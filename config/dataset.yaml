@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Dataset configuration
+# ---------------------------------------------------------------------------
+# source: "roboflow"  — download from Roboflow (dev/training environment)
+#         "local"     — use a pre-downloaded dataset (prod / offline)
+#
+# To swap for production:
+#   1. Set source to "local"
+#   2. Set local_path to the folder that contains data.yaml
+#   3. No API key required
+# ---------------------------------------------------------------------------
+
+source: local
+
+# --- Roboflow settings (used when source: roboflow) -----------------------
+# workspace: your Roboflow workspace slug
+workspace: "your-workspace"
+# project: your Roboflow project slug
+project: "apple-detection"
+# version: dataset version number
+version: 1
+# format: export format — must match the YOLO architecture family
+format: yolov8
+# api_key: leave blank here; set the ROBOFLOW_API_KEY environment variable
+api_key: ""
+
+# --- Local settings (used when source: local) -----------------------------
+# local_path: path (relative to project root) to the folder containing data.yaml
+local_path: "data/images"

@@ -1,0 +1,91 @@
+# ---------------------------------------------------------------------------
+# Hardware configuration
+# ---------------------------------------------------------------------------
+# cameras: number of cameras (1–3). Size-based distance uses single-cam for now.
+# Multi-camera triangulation positions TBD.
+# ---------------------------------------------------------------------------
+cameras:
+  num_cameras: 1   # max 3; positions configured later for triangulation
+
+# ---------------------------------------------------------------------------
+# interface: the physical layer used to drive servos and motors.
+#   "stub"     — no hardware; commands are printed only (default for dev)
+#   "pca9685"  — Adafruit PCA9685 I2C PWM board
+#   "gpio"     — direct RPi GPIO PWM (RPi.GPIO / pigpio)
+#   "serial"   — UART to a microcontroller (e.g. Arduino)
+#
+# Set to "stub" while developing so inference.py runs without hardware.
+# ---------------------------------------------------------------------------
+
+interface: serial
+
+# ---------------------------------------------------------------------------
+# Servo & motor channel/pin assignments
+# Steering and tilt: Hitec HS-646WP (standard 1–2 ms pulse @ 50 Hz).
+# ---------------------------------------------------------------------------
+
+steering_servo:       # Hitec HS-646WP
+  channel: 0          # PCA9685 channel  OR  GPIO BCM pin number
+  centre_pwm: 1500    # microseconds (neutral / straight)
+  min_pwm: 1000       # full left
+  max_pwm: 2000       # full right
+  inverted: false     # set true if servo direction is physically reversed
+
+drive_motor:           # DC motor via L298N on ESP32 (Pi sends D -1..1; ESP32 does IN1/IN2 + PWM)
+  channel: 1
+  centre_pwm: 1500    # stop (value 0 on serial)
+  min_pwm: 1000       # full reverse (-1.0)
+  max_pwm: 2000       # full forward (+1.0)
+  inverted: false
+
+camera_tilt_servo:    # Hitec HS-646WP
+  channel: 2
+  centre_pwm: 1500    # level / forward-looking
+  min_pwm: 1000       # max downward tilt
+  max_pwm: 2000       # max upward tilt
+  inverted: false
+
+# ---------------------------------------------------------------------------
+# PCA9685 settings (only used when interface: pca9685)
+# ---------------------------------------------------------------------------
+pca9685:
+  i2c_address: 0x40
+  pwm_frequency: 50   # Hz — standard servo frequency
+
+# ---------------------------------------------------------------------------
+# Serial settings (only used when interface: serial)
+# ESP32-S3 is connected to the Pi by USB cable. Pi sends "S D T" lines.
+# ESP32 drives: steering servo, tilt servo, DC motor via L298N.
+# On the Pi, run: ls /dev/ttyACM* /dev/ttyUSB* to find the port (often ttyACM0).
+# ---------------------------------------------------------------------------
+serial:
+  port: "/dev/ttyACM0"   # ESP32-S3 over USB (use ttyUSB0 if you see that instead)
+  baud_rate: 115200
+  verbose: true          # set false to stop echoing S D T lines to the console
+
+# ---------------------------------------------------------------------------
+# Control scaling
+# All ControlOutput values are in the range -1.0 to +1.0.
+# The hardware layer maps these to the pwm ranges above.
+# ---------------------------------------------------------------------------
+deadzone: 0.02        # smaller deadzone = reacts to smaller target movement
+gain_steer: 1.8       # >1.0 makes steering respond more aggressively
+gain_tilt: 1.4        # >1.0 makes camera tilt react more strongly
+max_drive_speed: 0.9  # cap forward speed at 90%
+min_steer_command: 0.25  # keep steering moving until centred (no tiny pulses)
+min_tilt_command: 0.18   # keep tilt correcting until centred
+min_drive_command: 0.55  # keep car moving; raise if motor still barely moves
+min_detection_confidence: 0.45  # ignore weaker detections (jitter/noise)
+hold_missed_frames: 5           # persist last valid target briefly on dropouts
+smoothing_alpha: 0.30           # EMA smoothing (lower = smoother, slower)
+damping_steer: 0.22             # derivative damping for steering overshoot
+damping_tilt: 0.18              # derivative damping for tilt overshoot
+max_drive_when_turning: 0.55    # min drive while turning; raise for more power
+
+# ---------------------------------------------------------------------------
+# Size-based distance (bbox area → drive D)
+# Larger apple in frame = closer; scale drive by bbox_area/frame_area.
+# ---------------------------------------------------------------------------
+use_size_for_drive: true        # use apple bbox size to set drive (distance proxy)
+size_min_ratio: 0.005           # bbox/frame below this → min_drive_command
+size_max_ratio: 0.12            # bbox/frame above this → max_drive_speed

@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.env/
+
+# YOLO / ML
+runs/
+weights/
+*.pt
+
+# System
+.DS_Store

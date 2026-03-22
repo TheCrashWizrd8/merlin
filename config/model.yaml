@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# Model configuration
+# ---------------------------------------------------------------------------
+# architecture: any Ultralytics model string, e.g.
+#   yolov8n  yolov8s  yolov8m  yolov8l  yolov8x
+#   yolov9c  yolov9e
+#   yolo11n  yolo11s  yolo11m
+# The value is passed directly to YOLO() so swapping version = change one line.
+architecture: yolov8n
+
+# weights: path to a .pt file to resume training or run inference.
+# Leave blank to train from the Ultralytics pretrained backbone.
+# On the Pi point this to weights/best.pt after training.
+weights: "weights/best.pt"
+
+# Detection thresholds
+confidence: 0.50
+iou: 0.45
+
+# Input image size fed to the model (pixels, square)
+img_size: 640
+
+# Training hyperparameters (used by train.py, ignored during inference)
+epochs: 50
+batch_size: 16          # reduce to 8 if running on a machine with <8 GB VRAM

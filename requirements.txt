@@ -1,0 +1,17 @@
+# Core detection
+ultralytics>=8.0.0
+
+# Dataset management
+roboflow>=1.1.0
+
+# Config & utilities
+pyyaml>=6.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# OpenCV (headless preferred on Pi to avoid X11 dependency issues at install time)
+# If you need the display window swap to opencv-python
+opencv-python-headless>=4.8.0
+
+# Web stream (--web mode)
+flask>=3.0.0
