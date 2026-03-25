@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--web", action="store_true",
-        help="Serve live stream on a web page (no OpenCV window). Open http://<pi-ip>:5000",
+        help="Serve live stream on a web page (no OpenCV window). Default port 8080 (see --web-port)",
     )
     parser.add_argument(
         "--web-host", type=str, default="0.0.0.0",

@@ -9,15 +9,12 @@ compatible data.yaml file that train.py passes to model.train().
 Swapping datasets for production
 ---------------------------------
 Set  source: local  in config/dataset.yaml and point  local_path  to the
-directory that already contains a data.yaml.  No API key or network access
-is required.
+directory that already contains a data.yaml.  Typical workflow: unzip or mount
+your YOLO dataset in Google Colab (or copy locally), then use local.
 
-Roboflow API key
-----------------
-Never hard-code the API key.  Set the ROBOFLOW_API_KEY environment variable
-or create a .env file in the project root:
-
-    ROBOFLOW_API_KEY=your_key_here
+Roboflow (optional)
+--------------------
+If source is roboflow, set ROBOFLOW_API_KEY (env or .env). Never commit keys.
 
 The .env file is loaded automatically if python-dotenv is installed.
 """

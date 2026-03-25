@@ -6,69 +6,68 @@
 2. [Hardware Setup](#2-hardware-setup)
 3. [Software Architecture](#3-software-architecture)
 4. [Installation](#4-installation)
-5. [Dataset Setup (Roboflow)](#5-dataset-setup-roboflow)
+5. [Dataset & Training (Google Colab)](#5-dataset--training-google-colab)
 6. [Training the Model](#6-training-the-model)
 7. [Running Inference on the Pi](#7-running-inference-on-the-pi)
-8. [ControlOutput Reference](#8-controloutput-reference)
-9. [Swapping the Dataset (Prod)](#9-swapping-the-dataset-prod)
-10. [Swapping the YOLO Model](#10-swapping-the-yolo-model)
-11. [Adding Hardware Control](#11-adding-hardware-control)
-12. [Troubleshooting](#12-troubleshooting)
+8. [ControlOutput & Control Behaviour](#8-controloutput--control-behaviour)
+9. [Hardware Configuration (`hardware.yaml`)](#9-hardware-configuration-hardwareyaml)
+10. [Swapping the Dataset](#10-swapping-the-dataset)
+11. [Swapping the YOLO Model](#11-swapping-the-yolo-model)
+12. [Hardware Output (`src/hardware.py`)](#12-hardware-output-srchardwarepy)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
 ## 1. System Overview
 
-The system detects apples in a live USB camera feed using a YOLO model and
-outputs normalised servo/motor commands that would drive an RC car towards
-the apple and keep it centred in the frame.
+The system detects apples in a live USB camera feed using Ultralytics YOLO, tracks the best apple, and outputs normalised **steering**, **drive**, and **camera tilt** commands. The Raspberry Pi can drive **servos and a DC motor** directly (PCA9685 / GPIO) or send commands over **USB serial** to an **ESP32** (e.g. L298N motor + servos).
 
 ```
-USB Camera ──► YOLO Detector ──► Tracker ──► Controller ──► ControlOutput
-                                                                  │
-                                                  ┌───────────────┼───────────────┐
-                                           steering_servo   drive_motor   camera_tilt_servo
+USB Camera ──► Detector ──► Tracker ──► Controller ──► ControlOutput
+                                              │
+                    ┌─────────────────────────┼─────────────────────────┐
+                    │                         │                         │
+              steering_servo            drive_motor            camera_tilt_servo
+                    │                         │                         │
+                    └─────────────────────────┼─────────────────────────┘
+                                              │
+                         stub / PCA9685 / GPIO / serial (ESP32)
 ```
 
-### Goal behaviour
+### Goal behaviour (high level)
 
-| Apple position | Expected response |
-|----------------|-------------------|
-| Left of centre | Steer left, camera stays level |
-| Right of centre | Steer right |
-| Above centre | Camera tilts up to recentre |
-| Below centre | Camera tilts down |
-| Centred | Drive forward, small corrections only |
-| Not visible | All outputs zero (stop) |
+| Situation | Behaviour |
+|-----------|-------------|
+| Apple left / right of centre | Steering corrects (sustain-until-centred; see `hardware.yaml`) |
+| Apple above / below centre | Camera tilt corrects |
+| Apple far (small in frame) | Stronger forward drive (when size-based drive is enabled) |
+| Apple close (large in frame) | Weaker forward drive |
+| Lost / low confidence | Outputs decay to stop; brief hold of last valid target |
 
 ---
 
 ## 2. Hardware Setup
 
-### RC Car components
+### Typical stack (Pi + ESP32)
 
 | Component | Role |
 |-----------|------|
-| Raspberry Pi 5 (8 GB) | Main compute |
-| USB camera | Input — plugged into any USB port |
-| Steering servo | Controls left/right direction |
-| Drive motor + ESC | Controls forward/reverse speed |
-| Camera tilt servo | Tilts camera up/down on pivot |
+| Raspberry Pi 5 | Main compute (YOLO + control loop) |
+| USB camera | Live input |
+| ESP32-S3 (USB serial to Pi) | PWM servos + L298N motor driver |
+| Hitec HS-646WP (×2) | Steering + camera tilt |
+| L298N + DC motor | Drive |
 
-### Wiring (to be completed when hardware arrives)
+Set `interface: serial` in `config/hardware.yaml`. Firmware and wiring: **`esp32/README.md`**, **`docs/ESP32_SERIAL.md`**, **`docs/PI_ESP32_COMPATIBILITY.md`**.
 
-The `config/hardware.yaml` file has a commented `interface` field with four
-options:
+### Other interfaces (`config/hardware.yaml`)
 
-- `stub` — no hardware wired; all commands are printed to the terminal only.
-  Use this during development.
-- `pca9685` — Adafruit PCA9685 I2C PWM board (recommended; gives 16 independent
-  PWM channels, powered separately from the Pi GPIO).
-- `gpio` — direct Pi GPIO PWM via `RPi.GPIO` or `pigpio`.
-- `serial` — send commands to an Arduino/microcontroller over UART.
-
-Until the hardware layer module (`src/hardware.py`) is implemented the system
-runs in `stub` mode and is fully functional for development.
+| `interface` | Use case |
+|-------------|----------|
+| `stub` | No hardware; prints commands only (development) |
+| `pca9685` | Adafruit PCA9685 I2C PWM (servos on Pi) |
+| `gpio` | Direct Pi PWM (if implemented for your pins) |
+| `serial` | Text protocol `S` / `D` / `T` to ESP32 or similar |
 
 ### PCA9685 wiring (when using that interface)
 
@@ -87,248 +86,213 @@ Separate 5V supply ──► PCA9685 V+ (servo power rail)
 ### Module responsibilities
 
 | File | Responsibility |
-|------|---------------|
-| `src/detector.py` | Wraps Ultralytics YOLO; returns a list of `Detection` objects per frame |
-| `src/tracker.py` | Picks the best apple; computes normalised `error_x` / `error_y` |
-| `src/controller.py` | Converts errors to `ControlOutput`; pretty-prints the table |
-| `src/camera.py` | Opens/reads USB camera via OpenCV `VideoCapture` |
-| `src/display.py` | Draws bboxes, crosshair, error vector, HUD, and gauge bars on the frame |
-| `src/dataset.py` | Downloads from Roboflow or resolves a local dataset path |
-| `train.py` | Full training pipeline (run on a GPU machine or Colab) |
-| `inference.py` | Main loop for the Pi — ties all modules together |
+|------|----------------|
+| `src/detector.py` | Ultralytics YOLO; returns `Detection` with bbox + class |
+| `src/tracker.py` | Picks target apple; bbox centre; `error_x` / `error_y`; bbox size |
+| `src/controller.py` | `TrackResult` → `ControlOutput`; smoothing; size-based drive |
+| `src/hardware.py` | Maps `ControlOutput` to stub / PCA9685 / serial |
+| `src/camera.py` | USB camera via OpenCV |
+| `src/display.py` | Bbox, crosshair, HUD, gauges |
+| `src/control_source.py` | Manual vs auto (e.g. web sliders vs inference) |
+| `src/web_stream.py` | Flask MJPEG + `/api/control` when using `--web` |
+| `src/dataset.py` | Resolves `data.yaml` (local or optional Roboflow download) |
+| `train.py` | Training on GPU/Colab (not on Pi) |
+| `inference.py` | Main loop on Pi |
 
 ### Data flow per frame
 
 ```
 cam.read()
-    └──► detector.detect(frame)         → List[Detection]
+    └──► detector.detect(frame)     → List[Detection]
               └──► tracker.update(...)  → TrackResult
                         └──► controller.compute(track)  → ControlOutput
-                                  ├──► output.pretty()  → printed table
+                                  ├──► hardware.apply(output)
+                                  ├──► output.pretty()  → terminal
                                   └──► display.draw(frame, output) → annotated view
 ```
 
-### ControlOutput normalisation
+### Normalisation
 
-All output values are in the range **-1.0 … +1.0**.
-
-```
--1.0 ──────────── 0.0 ──────────── +1.0
- full left       centre         full right   (steering)
- full rev        stop           full fwd     (drive)
- full down       level          full up      (tilt)
-```
-
-The hardware layer maps these to actual PWM microseconds using the `min_pwm`,
-`centre_pwm`, and `max_pwm` values in `config/hardware.yaml`.
-
-### Proportional control
-
-The current controller uses a simple proportional (P) law:
-
-```
-steering_servo    =  gain_steer × error_x
-camera_tilt_servo = −gain_tilt  × error_y   (inverted: apple low → tilt down)
-drive_motor       =  gain_drive × (1 − |error_x|)   (slow down when turning)
-```
-
-A full PID controller can be added later by extending `src/controller.py`.
+All actuator fields in `ControlOutput` are **-1.0 … +1.0**. `hardware.yaml` maps them to PWM ranges per channel.
 
 ---
 
 ## 4. Installation
 
-### On the Pi 5 (inference only)
+### On the Pi 5 (inference)
 
 ```bash
-# Update system packages
 sudo apt update && sudo apt upgrade -y
-
-# Install system-level OpenCV dependencies
 sudo apt install -y libopencv-dev python3-opencv
 
-# Create a virtual environment (recommended)
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install Python dependencies
 pip install -r requirements.txt
 ```
 
-> **Note:** PyTorch for ARM64 is included in `ultralytics` via pip on
-> Raspberry Pi OS (64-bit).  If you see errors about `torch` not being found,
-> install it manually:
-> ```bash
-> pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-> ```
+> **Note:** On ARM64 Pi, if `torch` fails, install CPU wheels, e.g.  
+> `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
 
 ### On a training machine (GPU / Colab)
 
 ```bash
 pip install -r requirements.txt
-# CUDA PyTorch is pulled in automatically by ultralytics on CUDA machines.
 ```
 
-For Google Colab, add this cell at the top:
-
-```python
-!pip install ultralytics roboflow python-dotenv pyyaml
-import os
-os.environ["ROBOFLOW_API_KEY"] = "your_key_here"
-```
+For **Google Colab**, use a **GPU runtime** (Runtime → Change runtime type → GPU).
 
 ---
 
-## 5. Dataset Setup (Roboflow)
+## 5. Dataset & Training (Google Colab)
 
-### Getting your dataset
+Training data must be a **YOLO-format** tree with **`data.yaml`** at the root (train/val images and labels). The recommended path is **[Google Colab](https://colab.research.google.com/)** so you don’t need a local GPU.
 
-1. Go to [roboflow.com](https://roboflow.com) and create / find an apple
-   detection dataset.
-2. Note your **workspace slug**, **project slug**, and **version number**.
-3. Get your **API key** from Account → Roboflow API.
+### 5.1 Get the project into Colab
 
-### Configuring the project
+- **Option A:** Upload a zip of this repo, unzip, `cd` into the folder.
+- **Option B:** Clone from Git (`git clone ...`) if the repo is hosted.
 
-Edit `config/dataset.yaml`:
+### 5.2 Get the dataset into Colab
+
+Pick one:
+
+- **Upload a zip:** Upload the dataset zip, unzip, e.g. `!unzip -q apple-dataset.zip -d data/apple-yolov8`
+- **Google Drive:**  
+  `from google.colab import drive`  
+  `drive.mount('/content/drive')`  
+  Then set `local_path` to the folder under Drive that contains `data.yaml` (e.g. `"/content/drive/MyDrive/datasets/apple-yolov8"` — use absolute paths in YAML if needed).
+
+### 5.3 Point `config/dataset.yaml` at the data
 
 ```yaml
-source: roboflow
-workspace: "my-workspace-slug"
-project: "apple-detection"
-version: 1
-format: yolov8
+source: local
+local_path: "data/apple-yolov8"   # or your unzipped / Drive path
 ```
 
-Set your API key as an environment variable (never commit it):
+`local_path` must resolve to a directory (or `data.yaml` file) that Ultralytics can use.
 
-```bash
-export ROBOFLOW_API_KEY="rf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+### 5.4 Install dependencies (Colab cell)
+
+```python
+!pip install -q ultralytics pyyaml roboflow python-dotenv
 ```
 
-Or create `.env` in the project root:
+(Optional: `!pip install -r requirements.txt` if you uploaded the full repo.)
 
+### 5.5 Run training (Colab cell)
+
+```python
+%cd /content/yolo-project   # adjust to your project path
+!python train.py
 ```
-ROBOFLOW_API_KEY=rf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+Weights are written to **`weights/best.pt`**. Download from the **Files** sidebar (left) or:
+
+```python
+from google.colab import files
+files.download('weights/best.pt')
 ```
+
+### 5.6 Optional: Roboflow inside Colab
+
+`config/dataset.yaml` can use `source: roboflow` with `ROBOFLOW_API_KEY` set in the environment or a Colab secret — then `train.py` will download the dataset when you run it. See `src/dataset.py`.
 
 ---
 
 ## 6. Training the Model
 
-Training must be run on a machine with a GPU (or Google Colab).
-The Pi5 is used for inference only.
-
-### Basic training run
+Run on a **GPU machine or Google Colab**, not on the Pi.
 
 ```bash
 python train.py
 ```
 
-This:
-1. Downloads the dataset from Roboflow into `data/`
-2. Trains `yolov8n` for 50 epochs
-3. Saves the best weights to `weights/best.pt`
-4. Runs validation and prints mAP metrics
+This reads `config/model.yaml` and `config/dataset.yaml`, resolves `data.yaml`, trains (default: epochs/batch from `model.yaml`), and writes **`weights/best.pt`**.
 
 ### Common options
 
 ```bash
-# Train a larger model
 python train.py --model yolov8s
-
-# More epochs
 python train.py --epochs 100
-
-# Smaller batch if GPU VRAM is limited
 python train.py --batch 8
-
-# Resume interrupted training
 python train.py --resume
-
-# Force CPU (slow but useful for testing on Pi)
 python train.py --device cpu
 ```
 
 ### After training
 
-1. Copy `weights/best.pt` to the Pi.
-2. Update `config/model.yaml` on the Pi:
-
-```yaml
-weights: weights/best.pt
-```
-
-3. Run `inference.py`.
+1. Copy **`weights/best.pt`** to the Pi (USB, `scp`, or download from Colab).
+2. Update `config/model.yaml`: `weights: weights/best.pt`
+3. Run `python inference.py` on the Pi.
 
 ---
 
 ## 7. Running Inference on the Pi
 
-### With a display (monitor or X forwarding)
+### With display
 
 ```bash
 python inference.py
 ```
 
-A window opens showing the annotated camera feed.  Press **q** to quit.
+Press **q** to quit.
 
-### Headless (SSH, no display)
+### Headless (SSH)
 
 ```bash
 python inference.py --headless
 ```
 
-The `ControlOutput` table is printed to the terminal every frame:
+### Web UI (`--web`)
 
-```
-┌────────────────────────────────────────────────────────────┐
-│  CONTROL OUTPUT                                  12:34:56.789 │
-├───────────────────┬────────────────────────────────────────┤
-│ apple_detected    │ YES                                    │
-│ target            │ x=298   y=241                          │
-│ error_x           │ -0.0688                                │
-│ error_y           │ +0.0042                                │
-│ confidence        │ 0.8731                                 │
-├───────────────────┼────────────────────────────────────────┤
-│ steering_servo    │ -0.069  ─────────|░░░░░░───  (left)   │
-│ drive_motor       │ +0.557  ──────────|████████  (forward)│
-│ camera_tilt       │ -0.003  ──────────|──────────  (centre)│
-└───────────────────┴────────────────────────────────────────┘
+```bash
+python inference.py --web
 ```
 
-### All inference flags
+Open `http://<pi-ip>:8080` (or `--web-port`). Live MJPEG + control API; see `src/web_stream.py`.
+
+### Inference flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--device N` | `0` | USB camera device index |
-| `--width N` | `640` | Capture width |
-| `--height N` | `480` | Capture height |
-| `--headless` | off | Skip display window |
-| `--print-on-detect` | off | Only print when apple is found |
+| `--device N` | `0` | USB camera index |
+| `--width` / `--height` | `640` / `480` | Capture size |
+| `--headless` | off | No OpenCV window |
+| `--print-on-detect` | off | Print only when apple detected |
 | `--tracker-strategy` | `best_confidence` | `best_confidence` or `closest_to_centre` |
-| `--apple-label STR` | `apple` | Class label to track |
+| `--apple-label` | `apple` | Class label to track |
+| `--web` | off | Flask server + browser stream |
+| `--web-host` / `--web-port` | `0.0.0.0` / `8080` | Bind address and port |
+| `--serial-port` | config | Override e.g. `/dev/ttyACM1` |
+| `--serial-verbose` / `--no-serial-verbose` | echo S D T | Console serial echo |
+| `--control-profile` | `config` | `config`, `stable`, or `aggressive` |
 
 ---
 
-## 8. ControlOutput Reference
+## 8. ControlOutput & Control Behaviour
 
-```python
-@dataclass
-class ControlOutput:
-    steering_servo:    float   # -1.0 = full left,    +1.0 = full right
-    drive_motor:       float   # -1.0 = full reverse, +1.0 = full forward
-    camera_tilt_servo: float   # -1.0 = full down,    +1.0 = full up
-    apple_detected:    bool
-    target_x:          int     # pixel x of apple centre
-    target_y:          int     # pixel y of apple centre
-    error_x:           float   # normalised horizontal offset from frame centre
-    error_y:           float   # normalised vertical   offset from frame centre
-    confidence:        float   # YOLO detection confidence 0–1
-    timestamp:         float   # time.time()
-```
+### Fields (see `src/controller.py`)
 
-### Accessing it in your own code
+| Field | Description |
+|-------|-------------|
+| `steering_servo`, `drive_motor`, `camera_tilt_servo` | Normalised -1…+1 |
+| `apple_detected` | Whether a track is active |
+| `target_x`, `target_y` | Pixel centre of apple |
+| `bbox_x1`…`bbox_y2` | Tracked detection bounding box |
+| `bbox_width`, `bbox_height`, `bbox_area`, `frame_area` | Size proxy for distance |
+| `size_ratio_raw`, `size_ratio_filtered` | `bbox_area/frame_area` (instant / smoothed) |
+| `error_x`, `error_y` | Normalised offset from frame centre |
+| `confidence` | Detection confidence |
+| `chosen_label` | Class name (e.g. `apple`) |
+| `timestamp` | `time.time()` |
+
+### Behaviour (summary)
+
+- **Smoothing** on errors (`smoothing_alpha` in `hardware.yaml`).
+- **Sustain-until-centred** steering/tilt: constant command until error inside deadzone (not a gentle proportional ramp).
+- **Size-based drive** (optional): `use_size_for_drive` maps apparent apple size to **D** — typically **far** (small bbox) → higher `size_drive_far`, **close** (large bbox) → lower `size_drive_close`. Tune `size_min_ratio` / `size_max_ratio` to match HUD **Size** values.
+
+### Example code
 
 ```python
 from src.detector import Detector
@@ -339,91 +303,86 @@ detector   = Detector()
 tracker    = Tracker()
 controller = Controller.from_hardware_config()
 
-# ... get a frame from Camera ...
+# ... frame from Camera ...
 detections = detector.detect(frame)
-track      = tracker.update(detections, frame.shape)
+track      = tracker.update(detections, frame.shape, apple_label="apple")
 output     = controller.compute(track)
 
-# As a dataclass
-print(output.steering_servo)
-
-# As a plain dict (for JSON / serial transmission)
 print(output.to_dict())
-
-# Pretty-printed table
 print(output.pretty())
 ```
 
 ---
 
-## 9. Swapping the Dataset (Prod)
+## 9. Hardware Configuration (`hardware.yaml`)
 
-No code changes required — only a config change.
+Key sections:
 
-1. Place your prod dataset in e.g. `data/prod-apples/` (must contain `data.yaml`).
-2. Edit `config/dataset.yaml`:
+- **`interface`**: `stub` | `pca9685` | `gpio` | `serial`
+- **`serial`**: `port`, `baud_rate`, `verbose` (ESP32 USB)
+- **`cameras.num_cameras`**: 1–3 (placeholder for future multi-camera)
+- **Control**: `deadzone`, `min_steer_command`, `min_tilt_command`, `min_drive_command`, `smoothing_alpha`, `confidence`, `hold_missed_frames`, etc.
+- **Size-based drive**: `use_size_for_drive`, `size_drive_far`, `size_drive_close`, `size_min_ratio`, `size_max_ratio`, `size_smoothing_alpha`, `size_curve` (`sqrt` or `linear`)
 
-```yaml
-source: local
-local_path: "data/prod-apples"
-```
-
-3. Run `python train.py` to retrain, or just update `weights` in `config/model.yaml`
-   if you already have trained weights.
+See inline comments in `config/hardware.yaml` for tuning.
 
 ---
 
-## 10. Swapping the YOLO Model
+## 10. Swapping the Dataset
+
+1. Place a YOLO dataset so it contains `data.yaml` (e.g. unzip on **Colab** or copy to your machine).
+2. Set in `config/dataset.yaml`:
+
+```yaml
+source: local
+local_path: "data/your-dataset-folder"
+```
+
+3. Run `python train.py` (e.g. in Colab) or point `weights` in `model.yaml` to existing `.pt` files.
+
+---
+
+## 11. Swapping the YOLO Model
 
 Edit `config/model.yaml`:
 
 ```yaml
-architecture: yolov8s   # was yolov8n
+architecture: yolov8s
+weights: weights/best.pt
 ```
 
-Model size vs Pi5 performance (approximate):
+Approximate Pi5 performance (CPU inference, varies by resolution):
 
-| Model | Params | Pi5 inference |
-|-------|--------|---------------|
-| yolov8n | 3.2 M | ~60–80 ms/frame |
-| yolov8s | 11 M  | ~120–180 ms/frame |
-| yolov8m | 25 M  | ~300 ms/frame |
+| Model | Pi5 inference (indicative) |
+|-------|----------------------------|
+| yolov8n | Fastest |
+| yolov8s | Slower |
+| yolov8m | Much slower |
 
-For real-time performance on Pi5 (no NPU), `yolov8n` is recommended.
-Consider reducing `img_size` to 320 if latency is too high.
+Use `img_size: 320` or `640` per `model.yaml` to trade accuracy vs speed.
 
 ---
 
-## 11. Adding Hardware Control
+## 12. Hardware Output (`src/hardware.py`)
 
-When the hardware is wired up, create `src/hardware.py`:
-
-```python
-from src.controller import ControlOutput
-import yaml
-from pathlib import Path
-
-class HardwareDriver:
-    def __init__(self): ...          # read hardware.yaml, open I2C / serial
-    def send(self, output: ControlOutput): ...  # map -1…+1 to PWM, write to servo
-    def close(self): ...
-```
-
-Then in `inference.py`, add:
+The project already implements hardware output. Use:
 
 ```python
-from src.hardware import HardwareDriver
-hw = HardwareDriver()
-# ... inside the loop:
-hw.send(output)
+from src.hardware import from_config as hardware_from_config
+
+hardware = hardware_from_config(serial_port_override=args.serial_port)
+hardware.apply(output)
+# ...
+hardware.close()
 ```
 
-The `ControlOutput` dataclass is already structured for direct consumption —
-no other changes needed.
+`inference.py` does this automatically. **Serial** sends lines:
+
+`S <steer> D <drive> T <tilt>\n` with values in **-1.0 … +1.0**.
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### Camera not found
 
@@ -431,50 +390,47 @@ no other changes needed.
 CameraError: Cannot open camera device '0'
 ```
 
-Check available devices:
-
 ```bash
 ls /dev/video*
-```
-
-Try a different index:
-
-```bash
 python inference.py --device 1
 ```
 
-### Model weights not found
+### Weights missing
 
-```
-FileNotFoundError: Weights file not found: weights/best.pt
-```
+Train or set `weights:` in `config/model.yaml`, or use empty `weights` to download pretrained backbone (development only).
 
-Either train first (`python train.py`) or leave `weights: ""` in
-`config/model.yaml` to use the Ultralytics pretrained backbone.
+### Colab: dataset path wrong / `data.yaml` not found
 
-### Roboflow API key missing
+- Confirm `local_path` matches the folder that **contains** `data.yaml` (or is the path to `data.yaml`).
+- After unzipping, list files: `!ls -la data/your-folder/` and open `data.yaml` paths if needed.
+- **Drive paths:** use the full path from `drive.mount()` (e.g. `/content/drive/MyDrive/...`).
 
-```
-EnvironmentError: Roboflow API key not found.
-```
+### Roboflow (optional `source: roboflow`)
 
 ```bash
 export ROBOFLOW_API_KEY="rf_xxxx"
-# or create .env in project root with ROBOFLOW_API_KEY=rf_xxxx
+pip install roboflow
 ```
+
+### Serial / ESP32
+
+- `ls /dev/ttyACM* /dev/ttyUSB*`
+- Override: `python inference.py --serial-port /dev/ttyACM1`
+- See **`docs/ESP32_SERIAL.md`** and **`docs/PI_ESP32_COMPATIBILITY.md`**
 
 ### Slow inference on Pi
 
-- Use `yolov8n` (nano) model.
-- Reduce `img_size` to 320 in `config/model.yaml`.
-- Run `python inference.py --headless` to avoid X11 rendering overhead.
-- Ensure the Pi is running in 64-bit mode: `uname -m` should return `aarch64`.
+- Use `yolov8n`, lower `img_size`, `--headless` to skip GUI work.
 
-### Display window doesn't open over SSH
+### Display over SSH
 
-Use `--headless` flag or set up X forwarding:
+Use `--headless` or `ssh -X` for X forwarding.
 
-```bash
-ssh -X user@raspberrypi
-python inference.py   # window will appear on your local machine
-```
+---
+
+## Related docs
+
+- **`README.md`** — Quick start
+- **`docs/ESP32_SERIAL.md`** — Serial protocol
+- **`docs/PI_ESP32_COMPATIBILITY.md`** — Pi ↔ ESP32 notes
+- **`esp32/README.md`** — Firmware build and upload

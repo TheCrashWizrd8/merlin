@@ -191,16 +191,16 @@ class Display:
     def _draw_hud(
         self, img: np.ndarray, output: ControlOutput, w: int, h: int
     ) -> None:
-        size_ratio = (
-            output.bbox_area / output.frame_area
-            if output.frame_area > 0 and output.bbox_area > 0
-            else 0.0
-        )
+        # Prefer controller-filtered ratio (smoothed; matches D)
+        size_f = getattr(output, "size_ratio_filtered", 0.0) or 0.0
+        size_r = getattr(output, "size_ratio_raw", 0.0) or 0.0
+        if size_f <= 0.0 and output.frame_area > 0 and output.bbox_area > 0:
+            size_f = output.bbox_area / output.frame_area
         lines = [
             f"FPS: {self.fps:5.1f}",
             f"Apple: {'YES' if output.apple_detected else 'NO '}",
             f"Conf:  {output.confidence:.3f}",
-            f"Size:  {size_ratio:.3f}",
+            f"Size:  {size_f:.3f} (r{size_r:.3f})",
             f"err_x: {output.error_x:+.4f}",
             f"err_y: {output.error_y:+.4f}",
             f"Steer: {output.steering_servo:+.3f}",

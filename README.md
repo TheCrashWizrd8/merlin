@@ -22,31 +22,37 @@ Copy and edit the config files in `config/`:
 | File | Purpose |
 |------|---------|
 | `config/model.yaml` | YOLO architecture, weights path, confidence |
-| `config/dataset.yaml` | Roboflow project details (swap for prod) |
+| `config/dataset.yaml` | Dataset source (`local` or optional `roboflow`) |
 | `config/hardware.yaml` | Servo/motor interface (stub, pca9685, or serial to ESP32) |
 
 **Hardware (Pi + ESP32 + L298N):** The Pi sends control values over USB serial to an **ESP32-S3**, which drives two **Hitec HS-646WP** servos and a **DC motor** via an **L298N**. Set `interface: serial` in `config/hardware.yaml`. Firmware: **`esp32/apple_car_rc/`** (Arduino sketch). Protocol and wiring: **`docs/ESP32_SERIAL.md`** and **`esp32/README.md`**.
 
-Set your Roboflow API key as an environment variable (never hard-code it):
+### 3. Dataset & training (**Google Colab** — not on Pi)
 
-```bash
-export ROBOFLOW_API_KEY="your_key_here"
+**Recommended:** train on **[Google Colab](https://colab.research.google.com/)** (free GPU tier) so you don’t need a local GPU.
+
+1. **Prepare** a YOLO-format dataset with a `data.yaml` at the root (train/val images and labels).
+2. In Colab, **upload** the project (or clone from Git) and your dataset — e.g. zip the dataset, upload it, unzip under `data/` (or mount **Google Drive** and point to a folder there).
+3. Set **`config/dataset.yaml`**:
+
+```yaml
+source: local
+local_path: "data/your-dataset-folder"   # must contain data.yaml
 ```
 
-Or create a `.env` file in the project root:
+4. Install deps and run training:
 
-```
-ROBOFLOW_API_KEY=your_key_here
-```
-
-### 3. Download dataset & train (GPU / Colab — not on Pi)
-
-```bash
-python train.py
+```python
+!pip install ultralytics pyyaml roboflow python-dotenv
+# optional: %cd to your project root if you cloned/unzipped the repo
+!python train.py
 ```
 
-This downloads the dataset from Roboflow, trains the model, and saves the best weights to  
-`weights/best.pt`.
+5. **Download** **`weights/best.pt`** from Colab (Files sidebar) to your Pi, then set `weights:` in **`config/model.yaml`**.
+
+> **Optional:** `dataset.yaml` can use `source: roboflow` with `ROBOFLOW_API_KEY` if you still use Roboflow for exports.
+
+Full Colab steps (Drive, zips, troubleshooting) are in **`docs/GUIDE.md`** §5–6.
 
 ### 4. Run inference on the Pi
 
@@ -54,30 +60,26 @@ This downloads the dataset from Roboflow, trains the model, and saves the best w
 python inference.py
 ```
 
-Opens the USB camera, runs YOLO detection each frame, and prints a live `ControlOutput`  
-table to the terminal. A camera view window shows bounding boxes, the frame crosshair,  
-and the error vector.
+Opens the USB camera, runs YOLO each frame, and prints a live `ControlOutput` table. The window shows **real bounding boxes**, crosshair, error vector, and HUD.
 
 Press **q** to quit.
 
 ### 5. View stream in a browser (optional)
 
-Run inference with the web server and open the stream in any device on your network:
-
 ```bash
 python inference.py --web
 ```
 
-Then open **http://\<pi-ip\>:8080** in a browser (e.g. `http://192.168.1.10:8080`).  
-The page shows the live camera feed with bounding boxes and HUD.
+Open **http://\<pi-ip\>:8080** in a browser (default port; use `--web-port` to change).  
+Live feed + **http://\<pi-ip\>:8080/api/control** for manual/auto mode (see `src/web_stream.py`).
 
 **Over Tailscale:**  
-The server binds to all interfaces (`0.0.0.0`), so it’s reachable on the Pi’s Tailscale IP. When you run with `--web`, the Tailscale URL is printed if `tailscale` is installed (e.g. `http://100.x.x.x:8080`). Open that URL from any device on your tailnet. If your firewall blocks the port, allow it (e.g. `sudo ufw allow 8080` then `sudo ufw reload`).
+The server binds to all interfaces (`0.0.0.0`), so it’s reachable on the Pi’s Tailscale IP. When you run with `--web`, the Tailscale URL is printed if `tailscale` is installed (e.g. `http://100.x.x.x:8080`). If your firewall blocks the port, allow it (e.g. `sudo ufw allow 8080` then `sudo ufw reload`).
 
 **If the page doesn’t load:**  
 - Try from the Pi first: `http://localhost:8080`.  
-- Test the server without the camera: `python scripts/test_web_server.py`, then open `http://localhost:8080`.  
-- If port 8080 is in use, use another: `python inference.py --web --web-port 9090`.
+- Test without the camera: `python scripts/test_web_server.py`, then open `http://localhost:8080`.  
+- If port 8080 is in use: `python inference.py --web --web-port 9090`.
 
 ---
 
@@ -87,37 +89,39 @@ The server binds to all interfaces (`0.0.0.0`), so it’s reachable on the Pi’
 yolo-project/
 ├── README.md
 ├── requirements.txt
-├── .env                        # (create locally, never commit)
+├── .env                        # (create locally; optional for legacy Roboflow)
 ├── config/
 │   ├── model.yaml              # YOLO version, weights, thresholds
-│   ├── dataset.yaml            # Dataset source — swap here for prod
-│   └── hardware.yaml           # Servo/motor pin assignments and PWM ranges
-├── data/                       # Downloaded datasets
+│   ├── dataset.yaml            # Dataset source — local (e.g. Colab/Drive) or roboflow
+│   └── hardware.yaml         # Servo/motor, serial, size-based drive
+├── data/                       # Local datasets (unzipped on Colab or copied to Pi)
 ├── weights/                    # Trained .pt weights
 ├── src/
 │   ├── __init__.py
 │   ├── detector.py             # YOLO inference wrapper
-│   ├── tracker.py              # Apple centroid + normalised error
-│   ├── controller.py           # ControlOutput dataclass + formatter
-│   ├── hardware.py             # Output to stub / PCA9685 / serial (ESP32)
+│   ├── tracker.py              # Apple centroid, bbox, normalised error
+│   ├── controller.py           # ControlOutput + size-based drive
+│   ├── hardware.py             # stub / PCA9685 / serial (ESP32)
 │   ├── camera.py               # USB camera capture
 │   ├── display.py              # Annotated live view
-│   └── dataset.py              # Roboflow dataset download helper
-├── train.py                    # Training pipeline (GPU/Colab)
+│   ├── control_source.py       # Manual vs auto (web / RC)
+│   ├── web_stream.py           # Flask MJPEG + API when --web
+│   └── dataset.py              # Resolve data.yaml (local or Roboflow)
+├── train.py                    # Training pipeline (GPU / Google Colab)
 ├── inference.py                # Main inference loop (Pi5)
 └── docs/
     ├── GUIDE.md                # Full system guide
-    └── ESP32_SERIAL.md         # Pi → ESP32 serial protocol (servos + L298N)
+    ├── ESP32_SERIAL.md         # Pi → ESP32 serial protocol
+    └── PI_ESP32_COMPATIBILITY.md
 ```
 
 ---
 
-## Swapping the Dataset (prod)
+## Swapping the Dataset
 
-1. Open `config/dataset.yaml`
-2. Change `source: roboflow` → `source: local`
-3. Set `local_path` to the directory containing your `data.yaml`
-4. Run `python train.py` (or point `weights` in `model.yaml` to pre-trained weights)
+1. Place a YOLO dataset where it contains **`data.yaml`** (e.g. unzip on **Colab** or copy to your PC).
+2. Set `source: local` and `local_path` in `config/dataset.yaml`.
+3. Run `python train.py` (e.g. in Colab) or point `weights` in `model.yaml` to existing weights.
 
 ---
 
@@ -136,6 +140,10 @@ Every inference frame produces a `ControlOutput` with:
 | `error_y` | -1.0 → +1.0 | Normalised vertical error |
 | `confidence` | 0–1 | YOLO detection confidence |
 | `apple_detected` | bool | Whether an apple was found |
+| `bbox_x1`…`bbox_y2` | px | Tracked apple bounding box |
+| `size_ratio_raw` / `size_ratio_filtered` | 0–1 | `bbox_area/frame_area` (instant / smoothed) |
 | `timestamp` | float | `time.time()` |
 
-See `docs/GUIDE.md` for the full system guide.
+Size-based forward drive is configured in `config/hardware.yaml` (`use_size_for_drive`, `size_drive_far` / `size_drive_close`, `size_min_ratio` / `size_max_ratio`). See comments in that file.
+
+See **`docs/GUIDE.md`** for the full system guide (Google Colab training, inference flags, hardware, troubleshooting).

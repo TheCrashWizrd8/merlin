@@ -21,6 +21,7 @@ is connected by adjusting the constants below or by passing them in.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -93,6 +94,9 @@ class ControlOutput:
     bbox_height: int = 0
     bbox_area: int = 0
     frame_area: int = 0
+    # bbox_area/frame_area: raw (instant) vs filtered (used for size-based drive)
+    size_ratio_raw: float = 0.0
+    size_ratio_filtered: float = 0.0
     chosen_label: str = ""
     # Timing
     timestamp: float = 0.0
@@ -204,6 +208,10 @@ class Controller:
         use_size_for_drive: bool = False,
         size_min_ratio: float = 0.005,
         size_max_ratio: float = 0.12,
+        size_smoothing_alpha: float = 0.22,
+        size_curve: str = "sqrt",
+        size_drive_far: float = 1.0,
+        size_drive_close: float = 0.0,
     ) -> None:
         self.gain_steer = gain_steer
         self.gain_tilt = gain_tilt
@@ -221,6 +229,13 @@ class Controller:
         self.use_size_for_drive = bool(use_size_for_drive)
         self.size_min_ratio = max(1e-6, float(size_min_ratio))
         self.size_max_ratio = max(self.size_min_ratio, float(size_max_ratio))
+        self.size_smoothing_alpha = max(0.0, min(1.0, float(size_smoothing_alpha)))
+        sc = (size_curve or "sqrt").strip().lower()
+        if sc not in ("linear", "sqrt"):
+            raise ValueError("size_curve must be 'linear' or 'sqrt'")
+        self.size_curve = sc
+        self.size_drive_far = float(size_drive_far)
+        self.size_drive_close = float(size_drive_close)
 
         # Internal state for smoothing, derivative damping and persistence.
         self._filtered_ex = 0.0
@@ -230,6 +245,7 @@ class Controller:
         self._last_t_monotonic: float | None = None
         self._last_valid_track: Optional[TrackResult] = None
         self._missed_frames = 0
+        self._filtered_size_ratio: float = 0.0
 
     @classmethod
     def from_hardware_config(
@@ -257,6 +273,10 @@ class Controller:
             "use_size_for_drive": bool(cfg.get("use_size_for_drive", False)),
             "size_min_ratio": float(cfg.get("size_min_ratio", 0.005)),
             "size_max_ratio": float(cfg.get("size_max_ratio", 0.12)),
+            "size_smoothing_alpha": float(cfg.get("size_smoothing_alpha", 0.22)),
+            "size_curve": str(cfg.get("size_curve", "sqrt")),
+            "size_drive_far": float(cfg.get("size_drive_far", 1.0)),
+            "size_drive_close": float(cfg.get("size_drive_close", 0.0)),
         }
         profile = (profile or "config").strip().lower()
         if profile != "config":
@@ -272,6 +292,34 @@ class Controller:
 
     def _clamp(self, value: float) -> float:
         return max(-1.0, min(1.0, value))
+
+    def _size_ratio_to_drive_t(self, area_ratio: float) -> float:
+        """
+        Map bbox_area/frame_area to [0, 1] for interpolating drive.
+
+        t≈0: small bbox (far). t≈1: large bbox (close).
+        Caller maps t to drive with closer → lower D.
+
+        'sqrt': use sqrt(area_ratio) — closer to linear pixel size / distance
+                than raw area (area ~ 1/d² for a fixed physical object).
+        'linear': raw area ratio (legacy).
+        """
+        lo = self.size_min_ratio
+        hi = self.size_max_ratio
+        a = max(0.0, area_ratio)
+        if self.size_curve == "sqrt":
+            ra = math.sqrt(a)
+            rlo = math.sqrt(lo)
+            rhi = math.sqrt(hi)
+            if rhi <= rlo:
+                return 0.0
+            t = (ra - rlo) / (rhi - rlo)
+        else:
+            span = hi - lo
+            if span <= 0:
+                return 0.0
+            t = (a - lo) / span
+        return max(0.0, min(1.0, t))
 
     def _with_min_command(self, value: float, minimum: float) -> float:
         """Keep motion alive when non-zero error exists, instead of tiny bursts."""
@@ -296,7 +344,9 @@ class Controller:
             track.apple_detected and track.confidence >= self.min_detection_confidence
         )
 
+        regained_track = False
         if has_confident_detection:
+            regained_track = self._last_valid_track is None
             self._last_valid_track = track
             self._missed_frames = 0
             active = track
@@ -311,6 +361,7 @@ class Controller:
                 self._prev_filtered_ex = 0.0
                 self._prev_filtered_ey = 0.0
                 self._last_valid_track = None
+                self._filtered_size_ratio = 0.0
                 return ControlOutput(
                     steering_servo=0.0,
                     drive_motor=0.0,
@@ -352,15 +403,29 @@ class Controller:
         else:
             tilt = (-1.0 if ey > 0 else 1.0) * self.min_tilt_command
 
-        # Drive: size-based (bbox area → distance proxy) or constant
+        # Size ratio: update EMA only on fresh detections (not hold frames)
+        size_raw = 0.0
+        size_filt = self._filtered_size_ratio
+        if active.frame_area > 0 and active.bbox_area > 0:
+            size_raw = active.bbox_area / active.frame_area
+            if has_confident_detection:
+                sa = self.size_smoothing_alpha
+                if regained_track:
+                    self._filtered_size_ratio = size_raw
+                else:
+                    self._filtered_size_ratio = (
+                        sa * size_raw + (1.0 - sa) * self._filtered_size_ratio
+                    )
+                size_filt = self._filtered_size_ratio
+
+        # Drive: size-based — farther (small bbox) → more drive; closer (large) → less
+        # Uses full [-1,1] span via size_drive_far / size_drive_close (not min/max_drive_command).
         if self.use_size_for_drive and active.frame_area > 0 and active.bbox_area > 0:
-            area_ratio = active.bbox_area / active.frame_area
-            span = self.size_max_ratio - self.size_min_ratio
-            t = (area_ratio - self.size_min_ratio) / span if span > 0 else 0.0
-            t = max(0.0, min(1.0, t))
-            drive = self.min_drive_command + t * (
-                self.gain_drive - self.min_drive_command
-            )
+            t = self._size_ratio_to_drive_t(size_filt)
+            far = max(-1.0, min(1.0, self.size_drive_far))
+            close = max(-1.0, min(1.0, self.size_drive_close))
+            # t=0 far → far; t=1 close → close
+            drive = far - t * (far - close)
             drive = self._clamp(drive)
         else:
             drive = self._clamp(self.min_drive_command)
@@ -383,6 +448,8 @@ class Controller:
             bbox_height=active.bbox_height,
             bbox_area=active.bbox_area,
             frame_area=active.frame_area,
+            size_ratio_raw=size_raw,
+            size_ratio_filtered=size_filt,
             chosen_label=active.chosen_label,
             timestamp=time.time(),
         )

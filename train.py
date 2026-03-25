@@ -1,13 +1,14 @@
 """
 train.py
 --------
-Standalone training pipeline.  Run this on a machine with a GPU (or Google
-Colab) — not on the Pi5 itself.
+Standalone training pipeline.  Run this on a machine with a GPU (e.g.
+Google Colab) — not on the Pi5 itself.
 
 Steps performed
 ---------------
 1. Read config/model.yaml  and config/dataset.yaml
-2. Download the dataset (Roboflow) or resolve the local path
+2. Resolve the dataset: local path (e.g. dataset unzipped in Colab or on disk)
+   or optional Roboflow download
 3. Build / load the YOLO model
 4. Train and save the best weights to weights/best.pt
 5. Print a short results summary

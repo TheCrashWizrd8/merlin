@@ -1,13 +1,17 @@
 # ---------------------------------------------------------------------------
 # Dataset configuration
 # ---------------------------------------------------------------------------
-# source: "roboflow"  — download from Roboflow (dev/training environment)
-#         "local"     — use a pre-downloaded dataset (prod / offline)
+# Primary workflow: train on Google Colab — upload/unzip dataset (or use Google Drive),
+#   source: local
+#   local_path: path to folder containing data.yaml
+#
+# source: "roboflow"  — optional; download via Roboflow API (requires ROBOFLOW_API_KEY)
+#         "local"     — use a dataset already on disk (Colab unzip, Drive, USB copy, etc.)
 #
 # To swap for production:
 #   1. Set source to "local"
 #   2. Set local_path to the folder that contains data.yaml
-#   3. No API key required
+#   3. No cloud API key required for training once data is local
 # ---------------------------------------------------------------------------
 
 source: local
