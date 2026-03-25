@@ -1,8 +1,8 @@
 ---
-title: "RC Receiver + Sensor Endpoints Plan (`--car` / `--sub`)"
+
+## title: "RC Receiver + Sensor Endpoints Plan (`--car` / `--sub`)"
 updated: 2026-03-25
 status: draft
----
 
 # RC Receiver + Sensor Endpoints Plan
 
@@ -38,7 +38,7 @@ Also note:
 
 ### 1.1 Pi runtime control loop
 
-The main loop lives in [`inference.py`](/home/subs/yolo-project/inference.py). Each frame does:
+The main loop lives in `[inference.py](/home/subs/yolo-project/inference.py)`. Each frame does:
 
 1. Camera frame capture (`src/camera.py`)
 2. YOLO detection (`src/detector.py`)
@@ -49,7 +49,7 @@ The main loop lives in [`inference.py`](/home/subs/yolo-project/inference.py). E
 
 ### 1.2 `ControlOutput` is the single actuator-command container
 
-Actuator commands are represented by [`src/controller.py#ControlOutput`](/home/subs/yolo-project/src/controller.py). It currently contains exactly three normalized actuator fields:
+Actuator commands are represented by `[src/controller.py#ControlOutput](/home/subs/yolo-project/src/controller.py)`. It currently contains exactly three normalized actuator fields:
 
 - `steering_servo` in range `-1.0 .. +1.0`
 - `drive_motor` in range `-1.0 .. +1.0`
@@ -61,8 +61,8 @@ Plus detection/telemetry-ish fields for display (e.g., `error_x`, `error_y`, bbo
 
 Manual/auto selection uses:
 
-- [`src/control_source.py#set_mode`](/home/subs/yolo-project/src/control_source.py)
-- [`src/control_source.py#get_current_sdt`](/home/subs/yolo-project/src/control_source.py)
+- `[src/control_source.py#set_mode](/home/subs/yolo-project/src/control_source.py)`
+- `[src/control_source.py#get_current_sdt](/home/subs/yolo-project/src/control_source.py)`
 
 Important behaviors:
 
@@ -73,7 +73,7 @@ At the moment, the RC callback mechanism exists but is not wired to any physical
 
 ### 1.4 Flask endpoints (existing “car” control UI)
 
-When launched with `--web`, the Flask server is implemented in [`src/web_stream.py`](/home/subs/yolo-project/src/web_stream.py).
+When launched with `--web`, the Flask server is implemented in `[src/web_stream.py](/home/subs/yolo-project/src/web_stream.py)`.
 
 Existing endpoints:
 
@@ -91,7 +91,7 @@ The existing UI (embedded in `web_stream.py`) only manipulates `s/d/t` (steer/dr
 
 ### 1.5 Hardware output mapping (car actuators)
 
-The hardware abstraction lives in [`src/hardware.py`](/home/subs/yolo-project/src/hardware.py).
+The hardware abstraction lives in `[src/hardware.py](/home/subs/yolo-project/src/hardware.py)`.
 
 It supports:
 
@@ -107,12 +107,12 @@ The Pi always sends one line per frame when `interface: serial`:
 
 `S <steer> D <drive> T <tilt>\n`
 
-This happens in [`inference.py`](/home/subs/yolo-project/inference.py) where it formats the string and calls:
+This happens in `[inference.py](/home/subs/yolo-project/inference.py)` where it formats the string and calls:
 
 - `hardware.apply(output)` (steering/drive/tilt)
 - plus it optionally prints the exact `serial_line` when serial verbose is enabled
 
-The ESP32 firmware is in [`esp32/apple_car_rc/apple_car_rc.ino`](/home/subs/yolo-project/esp32/apple_car_rc/apple_car_rc.ino) and parses:
+The ESP32 firmware is in `[esp32/apple_car_rc/apple_car_rc.ino](/home/subs/yolo-project/esp32/apple_car_rc/apple_car_rc.ino)` and parses:
 
 - `sscanf(line, "S %f D %f T %f", ...)`
 
@@ -204,7 +204,7 @@ The implementation goal is “more ways to control” for the receiver and addit
 
 Proposal (to match your confirmed preference):
 
-- Add a `--sub` CLI flag to [`inference.py`](/home/subs/yolo-project/inference.py).
+- Add a `--sub` CLI flag to `[inference.py](/home/subs/yolo-project/inference.py)`.
 - Default behavior remains the existing “car” pipeline when `--sub` is not provided.
 
 Non-invasive requirement:
@@ -389,6 +389,14 @@ Option 2 (more invasive):
 
 Given your requirement “no impact on current code”, prefer option 1 initially (API stubs + mapping scaffolding).
 
+Requirements:
+
+- Must NOT modify existing "S %f D %f T %f" parsing
+
+- Must be parsed in a separate conditional block on ESP32
+
+- Must be sent only when --sub is enabled
+
 ---
 
 ## 5. Implementation scaffolding (future work, clearly marked TODO)
@@ -417,11 +425,11 @@ Non-invasive requirement:
 
 Steps:
 
-1. Add `--sub` to [`inference.py`](/home/subs/yolo-project/inference.py).
+1. Add `--sub` to `[inference.py](/home/subs/yolo-project/inference.py)`.
 2. When `--web` + `--sub`:
-   - register additional Flask routes under `/sub/...`.
+  - register additional Flask routes under `/sub/...`.
 3. Ensure the existing `--web` car UI still works with no changes.
-4. Because you requested a new sub web UI page, also implement a new route that serves a sub-specific HTML/JS page (for example `GET /sub/` or `GET /sub/control`) instead of reusing the existing embedded car UI in [`src/web_stream.py`](/home/subs/yolo-project/src/web_stream.py).
+4. Because you requested a new sub web UI page, also implement a new route that serves a sub-specific HTML/JS page (for example `GET /sub/` or `GET /sub/control`) instead of reusing the existing embedded car UI in `[src/web_stream.py](/home/subs/yolo-project/src/web_stream.py)`.
 
 ### TODO 5.3 Manual source for sub (`controller manual`) from receiver
 
@@ -458,135 +466,138 @@ Future tasks:
 
 Practical note: right now YOLO only produces 2D error (`error_x`, `error_y`). Mapping these onto aft steering Y and Z (and deciding what Z means physically) is mostly a sign/inversion + axis convention task. Treat it as a configuration-driven mapping once you verify directions on real hardware.
 
+Requirements:
+
+- Must NOT modify existing "S %f D %f T %f" parsing
+
+- Must be parsed in a separate conditional block on ESP32
+
+- Must be sent only when --sub is enabled
+
+
+
 ### TODO 5.5 Concrete implementation sequence (non-invasive)
 
 This is a suggested implementation order that keeps the current “car” behavior unchanged and pushes any new sub functionality behind `--sub`.
 
 1. Add `--sub` CLI flag (Pi)
-   - File: [`inference.py`](/home/subs/yolo-project/inference.py)
-   - Add `parser.add_argument("--sub", action="store_true", help="Enable sub vehicle endpoints/control")`
-   - Keep the default path exactly as today when `--sub` is not set.
-   - In the existing `if args.web:` block, pass `args.sub` into the Flask app registration so it can decide which routes/UI to add.
-
+  - File: `[inference.py](/home/subs/yolo-project/inference.py)`
+  - Add `parser.add_argument("--sub", action="store_true", help="Enable sub vehicle endpoints/control")`
+  - Keep the default path exactly as today when `--sub` is not set.
+  - In the existing `if args.web:` block, pass `args.sub` into the Flask app registration so it can decide which routes/UI to add.
 2. Keep the existing car UI working (`/`)
-   - File: [`src/web_stream.py`](/home/subs/yolo-project/src/web_stream.py)
-   - Do not change the existing `/` HTML/JS page and do not change the existing car endpoints:
-     - `GET/POST /api/control`
-     - `GET /video_feed`
-   - Instead, add new routes for the sub UI:
-     - `GET /sub/` (or `/sub/control`) to serve a new HTML/JS page
-     - `GET/POST /sub/api/control` (receiver/manual + mode toggle for sub)
-     - Optional: `GET /sub/api/status` to expose `mode` + connection state for UI
-
+  - File: `[src/web_stream.py](/home/subs/yolo-project/src/web_stream.py)`
+  - Do not change the existing `/` HTML/JS page and do not change the existing car endpoints:
+    - `GET/POST /api/control`
+    - `GET /video_feed`
+  - Instead, add new routes for the sub UI:
+    - `GET /sub/` (or `/sub/control`) to serve a new HTML/JS page
+    - `GET/POST /sub/api/control` (receiver/manual + mode toggle for sub)
+    - Optional: `GET /sub/api/status` to expose `mode` + connection state for UI
 3. Introduce a “sub control state” separate from SDT
-   - File: [`src/control_source.py`](/home/subs/yolo-project/src/control_source.py)
-   - Keep existing SDT (`s/d/t`) code path untouched for the car.
-   - Add a parallel store for sub axes (names are up to you; the important part is that it does not reuse SDT):
-     - `aftSteerY`
-     - `aftSteerZ`
-     - `thrusterX`
-     - `finLeft`
-     - `finRight`
-   - Add functions analogous to `set_mode`, `get_mode`, `set_manual`, `get_current_sdt`, but for sub:
-     - `set_sub_mode('auto'|'manual')`
-     - `set_sub_manual(...)`
-     - `get_sub_effective_axes(auto_axes, manual_axes)`
-
+  - File: `[src/control_source.py](/home/subs/yolo-project/src/control_source.py)`
+  - Keep existing SDT (`s/d/t`) code path untouched for the car.
+  - Add a parallel store for sub axes (names are up to you; the important part is that it does not reuse SDT):
+    - `aftSteerY`
+    - `aftSteerZ`
+    - `thrusterX`
+    - `finLeft`
+    - `finRight`
+  - Add functions analogous to `set_mode`, `get_mode`, `set_manual`, `get_current_sdt`, but for sub:
+    - `set_sub_mode('auto'|'manual')`
+    - `set_sub_manual(...)`
+    - `get_sub_effective_axes(auto_axes, manual_axes)`
 4. Wire auto (YOLO) -> sub actuators without affecting car
-   - File: [`src/controller.py`](/home/subs/yolo-project/src/controller.py)
-   - Do not change the current `ControlOutput` structure yet if you want minimal risk.
-   - Instead, add a small “mapping function” that converts existing car outputs into sub axes for auto:
-     - `aftSteerY` derived from `steering_servo`
-     - `aftSteerZ` derived from `camera_tilt_servo` (with inversion/sign to be tuned)
-     - `thrusterX` derived from `drive_motor` (range/mapping for your thruster may differ from DC motor; for now treat it as equivalent `-1..+1` -> `-1..+1`)
-     - `finLeft`/`finRight` default neutral in auto (unless you decide to mirror roll during initial tuning)
-
+  - File: `[src/controller.py](/home/subs/yolo-project/src/controller.py)`
+  - Do not change the current `ControlOutput` structure yet if you want minimal risk.
+  - Instead, add a small “mapping function” that converts existing car outputs into sub axes for auto:
+    - `aftSteerY` derived from `steering_servo`
+    - `aftSteerZ` derived from `camera_tilt_servo` (with inversion/sign to be tuned)
+    - `thrusterX` derived from `drive_motor` (range/mapping for your thruster may differ from DC motor; for now treat it as equivalent `-1..+1` -> `-1..+1`)
+    - `finLeft`/`finRight` default neutral in auto (unless you decide to mirror roll during initial tuning)
 5. Wire manual (receiver) -> sub actuators (stubs first)
-   - File(s): start in [`src/control_source.py`](/home/subs/yolo-project/src/control_source.py) only
-   - Because receiver parsing is not implemented yet, implement manual mode semantics as “placeholders”:
-     - Sub manual inputs return fixed neutral defaults (or values you set via the sub UI)
-   - When ESP32 receiver decoding is later implemented, you will replace the stub manual source with receiver-derived values.
-
+  - File(s): start in `[src/control_source.py](/home/subs/yolo-project/src/control_source.py)` only
+  - Because receiver parsing is not implemented yet, implement manual mode semantics as “placeholders”:
+    - Sub manual inputs return fixed neutral defaults (or values you set via the sub UI)
+  - When ESP32 receiver decoding is later implemented, you will replace the stub manual source with receiver-derived values.
 6. Define how new sub axes reach hardware (ESP32 vs Pi PWM/serial)
-   - Current state: `src/hardware.py` + ESP32 firmware only understand `S/D/T`.
-   - Non-invasive approach:
-     - For now, keep `hardware.apply(output)` unchanged for car.
-     - For `--sub`, implement a separate serial message format (additive), for example:
-       - `S2 <aftY> <aftZ> F <finL> <finR> X <thruster> \n`
-     - Update ESP32 firmware to parse the new message in addition to the existing `S/D/T`.
-   - This step is where you must be most careful, but it is additive: the existing `S/D/T` parsing remains unchanged.
-
+  - Current state: `src/hardware.py` + ESP32 firmware only understand `S/D/T`.
+  - Non-invasive approach:
+    - For now, keep `hardware.apply(output)` unchanged for car.
+    - For `--sub`, implement a separate serial message format (additive), for example:
+      - `S2 <aftY> <aftZ> F <finL> <finR> X <thruster> \n`
+    - Update ESP32 firmware to parse the new message in addition to the existing `S/D/T`.
+  Requirements:
+  - Must NOT modify existing "S %f D %f T %f" parsing
+  - Must be parsed in a separate conditional block on ESP32
+  - Must be sent only when --sub is enabled
+  - This step is where you must be most careful, but it is additive: the existing `S/D/T` parsing remains unchanged.
 7. Add ultrasonic/leak/gyro API endpoints as stubs only
-   - File: [`src/web_stream.py`](/home/subs/yolo-project/src/web_stream.py)
-   - Return `connected: false` and `null`/empty arrays for now.
-   - Later, when ESP32 sends telemetry, add a serial reader on the Pi and replace stubs with real values.
+  - File: `[src/web_stream.py](/home/subs/yolo-project/src/web_stream.py)`
+  - Return `connected: false` and `null`/empty arrays for now.
+  - Later, when ESP32 sends telemetry, add a serial reader on the Pi and replace stubs with real values.
 
 ### Acceptance checklist (Cursor-friendly)
 
 Use this checklist to verify the changes are correct while implementing. Each item should be checked after its corresponding step.
 
 1. Car behavior unchanged (default)
-   - Run: `python inference.py --headless`
-   - Verify: existing endpoints still work:
-     - `GET/POST http://<pi-ip>:8080/api/control` updates `mode` + `s/d/t`
-     - `GET http://<pi-ip>:8080/video_feed` streams MJPEG
-   - Verify: when `--sub` is not enabled, Pi->ESP32 actuator commands are still only:
-     - `S <steer> D <drive> T <tilt>\n`
-
+  - Run: `python inference.py --headless`
+  - Verify: existing endpoints still work:
+    - `GET/POST http://<pi-ip>:8080/api/control` updates `mode` + `s/d/t`
+    - `GET http://<pi-ip>:8080/video_feed` streams MJPEG
+  - Verify: when `--sub` is not enabled, Pi->ESP32 actuator commands are still only:
+    - `S <steer> D <drive> T <tilt>\n`
 2. `--sub` gates additional UI/routes only
-   - Run: `python inference.py --web --headless --sub`
-   - Verify:
-     - car UI at `/` still loads
-     - sub UI route(s) exist (e.g. `/sub/` or `/sub/control`) and are served successfully
-     - sub endpoints under `/sub/api/...` return valid JSON without touching the existing `/api/control` handler
-
+  - Run: `python inference.py --web --headless --sub`
+  - Verify:
+    - car UI at `/` still loads
+    - sub UI route(s) exist (e.g. `/sub/` or `/sub/control`) and are served successfully
+    - sub endpoints under `/sub/api/...` return valid JSON without touching the existing `/api/control` handler
 3. Two-mode model still holds
-   - Verify:
-     - YOLO is still `auto`
-     - web/controller is still `manual`
-   - Until receiver parsing exists, verify sub manual defaults are neutral placeholders and do not crash the app.
-
+  - Verify:
+    - YOLO is still `auto`
+    - web/controller is still `manual`
+  - Until receiver parsing exists, verify sub manual defaults are neutral placeholders and do not crash the app.
 4. Sub actuator mapping scaffolding is isolated
-   - Verify:
-     - car SDT mapping code path is unchanged
-     - sub mapping logic is implemented separately (so car doesn’t regress)
-
+  - Verify:
+    - car SDT mapping code path is unchanged
+    - sub mapping logic is implemented separately (so car doesn’t regress)
 5. Sub hardware transport is additive (when implemented)
-   - Verify (after ESP32 firmware update):
-     - the original `sscanf("S %f D %f T %f", ...)` path still works
-     - the new sub serial message format is accepted without breaking the existing one
-
+  - Verify (after ESP32 firmware update):
+    - the original `sscanf("S %f D %f T %f", ...)` path still works
+    - the new sub serial message format is accepted without breaking the existing one
 6. Sensor endpoints are safe stubs initially
-   - Verify each returns stable, non-blocking JSON:
-     - `GET /sub/api/sensors/ultrasonic` -> `connected: false`, `distance_mm: null`
-     - `GET /sub/api/sensors/leaks` -> `connected: false` and a stable shape for leaks
-     - `GET /sub/api/sensors/gyro` -> `connected: false` and `pitch/roll/yaw: null`
+  - Verify each returns stable, non-blocking JSON:
+    - `GET /sub/api/sensors/ultrasonic` -> `connected: false`, `distance_mm: null`
+    - `GET /sub/api/sensors/leaks` -> `connected: false` and a stable shape for leaks
+    - `GET /sub/api/sensors/gyro` -> `connected: false` and `pitch/roll/yaw: null`
 
 ---
 
 ## 6. Open questions / unknowns (so implementation can proceed)
 
 1. Receiver wiring/pinouts:
-   - What signal type/pin the AR8020T provides to ESP32 (DSM pulse into GPIO, or UART telemetry, etc.) is still undecided.
+  - What signal type/pin the AR8020T provides to ESP32 (DSM pulse into GPIO, or UART telemetry, etc.) is still undecided.
 2. Receiver channel mapping:
-   - You provided actuator intent but confirmed channel numbers are not important yet.
-   - Implementation should allow flexible mapping in config later.
+  - You provided actuator intent but confirmed channel numbers are not important yet.
+  - Implementation should allow flexible mapping in config later.
 3. Thruster control type on the sub:
-   - You described `thruster x` but current plan is mostly about endpoint scaffolding and stubs for telemetry.
-   - It may require a different output mapping than car’s DC motor `D` unless the ESP32 firmware is extended.
+  - You described `thruster x` but current plan is mostly about endpoint scaffolding and stubs for telemetry.
+  - It may require a different output mapping than car’s DC motor `D` unless the ESP32 firmware is extended.
 4. Fin roll stabilization:
-   - Whether fins should be neutral in auto or actively mirrored requires a test plan.
+  - Whether fins should be neutral in auto or actively mirrored requires a test plan.
 5. Endpoint response formats:
-   - The JSON shapes above are suggestions for stubs; final schema should match whatever you plan to visualize/control next.
+  - The JSON shapes above are suggestions for stubs; final schema should match whatever you plan to visualize/control next.
 
 ---
 
 ## 7. References to current code paths (for quick navigation)
 
-- Flask server + web routes: [`src/web_stream.py`](/home/subs/yolo-project/src/web_stream.py)
-- Manual/auto state: [`src/control_source.py`](/home/subs/yolo-project/src/control_source.py)
-- Actuator computation: [`src/controller.py`](/home/subs/yolo-project/src/controller.py)
-- Hardware abstraction: [`src/hardware.py`](/home/subs/yolo-project/src/hardware.py)
-- Pi main loop: [`inference.py`](/home/subs/yolo-project/inference.py)
-- ESP32 serial parsing & actuator driving: [`esp32/apple_car_rc/apple_car_rc.ino`](/home/subs/yolo-project/esp32/apple_car_rc/apple_car_rc.ino)
+- Flask server + web routes: `[src/web_stream.py](/home/subs/yolo-project/src/web_stream.py)`
+- Manual/auto state: `[src/control_source.py](/home/subs/yolo-project/src/control_source.py)`
+- Actuator computation: `[src/controller.py](/home/subs/yolo-project/src/controller.py)`
+- Hardware abstraction: `[src/hardware.py](/home/subs/yolo-project/src/hardware.py)`
+- Pi main loop: `[inference.py](/home/subs/yolo-project/inference.py)`
+- ESP32 serial parsing & actuator driving: `[esp32/apple_car_rc/apple_car_rc.ino](/home/subs/yolo-project/esp32/apple_car_rc/apple_car_rc.ino)`
 

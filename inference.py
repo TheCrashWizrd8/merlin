@@ -93,8 +93,8 @@ def parse_args() -> argparse.Namespace:
         help="Port for web server (default: 8080; use if 5000 is in use)",
     )
     parser.add_argument(
-        "--serial-verbose", action="store_true", default=True,
-        help="Echo each S D T line sent to hardware (serial) to the console (default: True)",
+        "--serial-verbose", action="store_true", default=False,
+        help="Echo each S D T line sent to hardware (serial) to the console",
     )
     parser.add_argument(
         "--no-serial-verbose", action="store_false", dest="serial_verbose",
@@ -109,6 +109,15 @@ def parse_args() -> argparse.Namespace:
         choices=["config", "stable", "aggressive"],
         default="config",
         help="Control tuning profile override (default: config values from hardware.yaml)",
+    )
+    parser.add_argument(
+        "--tolerate-missing-devices",
+        action="store_true",
+        help=(
+            "Keep running when the USB camera or ESP32 serial device can't be opened. "
+            "In this mode, YOLO frame processing is skipped if the camera is missing, "
+            "and control falls back to manual s/d/t."
+        ),
     )
     return parser.parse_args()
 
@@ -172,14 +181,24 @@ def main() -> None:
     display    = Display(headless=args.headless or args.web)
 
     from src.hardware import from_config as hardware_from_config
+    from src.hardware import StubOutput
+    hardware: object
+    hardware_init_error: Exception | None = None
     try:
         hardware = hardware_from_config(serial_port_override=args.serial_port)
         print(f"[inference] Hardware: {type(hardware).__name__} (steering, drive, camera tilt)")
         if args.serial_port:
             print(f"[inference] Serial port override: {args.serial_port}")
     except Exception as exc:
-        print(f"[ERROR] Hardware init failed: {exc}")
-        sys.exit(1)
+        if args.tolerate_missing_devices:
+            # Non-invasive fallback: keep server and manual control alive,
+            # but don't drive real hardware.
+            hardware_init_error = exc
+            hardware = StubOutput({})
+            print(f"[WARN] Hardware init failed; falling back to stub: {exc}")
+        else:
+            print(f"[ERROR] Hardware init failed: {exc}")
+            sys.exit(1)
 
     if args.web:
         try:
@@ -200,13 +219,19 @@ def main() -> None:
         time.sleep(0.5)  # give server time to bind
         _print_web_urls(args.web_host, args.web_port)
 
-    print(f"[inference] Opening camera device {args.device} …")
-    cam = Camera(device=args.device, width=args.width, height=args.height)
+    cam = None
+    manual_only = False
     try:
+        print(f"[inference] Opening camera device {args.device} …")
+        cam = Camera(device=args.device, width=args.width, height=args.height)
         cam.open()
     except CameraError as exc:
-        print(f"[ERROR] {exc}")
-        sys.exit(1)
+        if args.tolerate_missing_devices:
+            manual_only = True
+            print(f"[WARN] Camera init failed; skipping YOLO loop (manual-only): {exc}")
+        else:
+            print(f"[ERROR] {exc}")
+            sys.exit(1)
 
     # ------------------------------------------------------------------
     # Graceful shutdown on Ctrl-C
@@ -226,71 +251,166 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("\n[inference] Running.  Press q to quit.\n")
     frame_count = 0
-    loop_start  = time.monotonic()
+    loop_start = time.monotonic()
+    manual_loop_start = loop_start
+
+    # control_source is the single source of truth for manual s/d/t.
+    # In tolerate-missing mode, we keep outputs stuck in manual.
+    from src.control_source import SDT, get_manual, set_mode
+    last_hw_retry = 0.0
+    hw_retry_interval_s = 5.0
 
     try:
-        while running:
-            ok, frame = cam.read()
-            if not ok or frame is None:
-                print("[WARN] Failed to read frame — retrying …")
-                time.sleep(0.05)
-                continue
+        if manual_only:
+            # "No camera" mode: keep the server alive and keep applying manual
+            # s/d/t to hardware (or stub) without running YOLO/tracking.
+            set_mode("manual")
+            from src.controller import ControlOutput
 
-            frame_count += 1
+            while running:
+                # Try to re-init real hardware if we fell back to StubOutput.
+                # This is additive and only runs in tolerate mode.
+                if args.tolerate_missing_devices and hardware_init_error is not None:
+                    now = time.monotonic()
+                    if now - last_hw_retry >= hw_retry_interval_s:
+                        last_hw_retry = now
+                        try:
+                            hardware = hardware_from_config(serial_port_override=args.serial_port)
+                            hardware_init_error = None
+                            print(f"[inference] Hardware reconnected: {type(hardware).__name__}")
+                        except Exception as exc:
+                            print(f"[inference] Still waiting for hardware: {exc}")
 
-            # 1. Detect
-            detections = detector.detect(frame)
-
-            # 2. Track
-            track = tracker.update(
-                detections,
-                frame.shape,
-                apple_label=args.apple_label,
-            )
-
-            # 3. Control
-            output = controller.compute(track)
-            if args.web:
-                from dataclasses import replace
-                from src.control_source import get_current_sdt, SDT
-                sdt = get_current_sdt(SDT(output.steering_servo, output.drive_motor, output.camera_tilt_servo))
-                output = replace(output, steering_servo=sdt.s, drive_motor=sdt.d, camera_tilt_servo=sdt.t)
-
-            # 3b. Send to hardware (steering servo, drive motor, camera tilt servo)
-            hardware.apply(output)
-            serial_line = (
-                f"S {output.steering_servo:.3f} "
-                f"D {output.drive_motor:.3f} "
-                f"T {output.camera_tilt_servo:.3f}\n"
-            )
-
-            # 4. Print
-            if not args.print_on_detect or output.apple_detected:
-                # Clear previous block only (table = 13 lines; +1 for serial when verbose)
-                if frame_count > 1:
-                    n_up = 14 if args.serial_verbose else 13
-                    sys.stdout.write(f"\033[{n_up}A\033[J")
-                print(output.pretty())
+                sdt = get_manual()
+                output = ControlOutput(
+                    steering_servo=sdt.s,
+                    drive_motor=sdt.d,
+                    camera_tilt_servo=sdt.t,
+                    apple_detected=False,
+                    target_x=0,
+                    target_y=0,
+                    error_x=0.0,
+                    error_y=0.0,
+                    confidence=0.0,
+                    timestamp=time.time(),
+                )
+                try:
+                    hardware.apply(output)
+                except Exception as exc:
+                    if args.tolerate_missing_devices:
+                        hardware_init_error = exc
+                        hardware = StubOutput({})
+                        # Keep outputs stuck in manual while HW is missing.
+                        set_mode("manual")
+                        print(f"[WARN] Hardware apply failed; using stub: {exc}")
+                    else:
+                        raise
                 if args.serial_verbose:
+                    serial_line = (
+                        f"S {output.steering_servo:.3f} "
+                        f"D {output.drive_motor:.3f} "
+                        f"T {output.camera_tilt_servo:.3f}\n"
+                    )
                     print(serial_line, end="", flush=True)
-                sys.stdout.flush()
 
-            # 5. Display
-            annotated = display.draw(frame, output)
-            if args.web:
-                set_latest_frame(annotated)
-            if not display.show(annotated):
-                break   # user pressed q
+                time.sleep(0.1)
+        else:
+            while running:
+                # If hardware was unavailable at startup, retry periodically.
+                if args.tolerate_missing_devices and hardware_init_error is not None:
+                    now = time.monotonic()
+                    if now - last_hw_retry >= hw_retry_interval_s:
+                        last_hw_retry = now
+                        try:
+                            hardware = hardware_from_config(serial_port_override=args.serial_port)
+                            hardware_init_error = None
+                            print(f"[inference] Hardware reconnected: {type(hardware).__name__}")
+                        except Exception as exc:
+                            print(f"[inference] Still waiting for hardware: {exc}")
+
+                ok, frame = cam.read()
+                if not ok or frame is None:
+                    print("[WARN] Failed to read frame — retrying …")
+                    time.sleep(0.05)
+                    continue
+
+                frame_count += 1
+
+                # 1. Detect
+                detections = detector.detect(frame)
+
+                # 2. Track
+                track = tracker.update(
+                    detections,
+                    frame.shape,
+                    apple_label=args.apple_label,
+                )
+
+                # 3. Control
+                output = controller.compute(track)
+                if args.web:
+                    from dataclasses import replace
+                    from src.control_source import get_current_sdt
+                    sdt = get_current_sdt(
+                        SDT(output.steering_servo, output.drive_motor, output.camera_tilt_servo)
+                    )
+                    output = replace(
+                        output,
+                        steering_servo=sdt.s,
+                        drive_motor=sdt.d,
+                        camera_tilt_servo=sdt.t,
+                    )
+
+                # 3b. Send to hardware (steering servo, drive motor, camera tilt servo)
+                try:
+                    hardware.apply(output)
+                except Exception as exc:
+                    if args.tolerate_missing_devices:
+                        hardware_init_error = exc
+                        hardware = StubOutput({})
+                        # Keep outputs stuck in manual while HW is missing.
+                        set_mode("manual")
+                        print(f"[WARN] Hardware apply failed; using stub: {exc}")
+                    else:
+                        raise
+                serial_line = (
+                    f"S {output.steering_servo:.3f} "
+                    f"D {output.drive_motor:.3f} "
+                    f"T {output.camera_tilt_servo:.3f}\n"
+                )
+
+                # 4. Print
+                if not args.print_on_detect or output.apple_detected:
+                    # Clear previous block only (table = 13 lines; +1 for serial when verbose)
+                    if frame_count > 1:
+                        n_up = 14 if args.serial_verbose else 13
+                        sys.stdout.write(f"\033[{n_up}A\033[J")
+                    print(output.pretty())
+                    if args.serial_verbose:
+                        print(serial_line, end="", flush=True)
+                    sys.stdout.flush()
+
+                # 5. Display
+                annotated = display.draw(frame, output)
+                if args.web:
+                    set_latest_frame(annotated)
+                if not display.show(annotated):
+                    break   # user pressed q
 
     finally:
-        cam.release()
+        if cam is not None:
+            cam.release()
         display.close()
         hardware.close()
 
         elapsed = time.monotonic() - loop_start
-        avg_fps = frame_count / elapsed if elapsed > 0 else 0
-        print(f"\n[inference] Processed {frame_count} frames in "
-              f"{elapsed:.1f}s  ({avg_fps:.1f} fps avg)")
+        if manual_only:
+            duration = time.monotonic() - manual_loop_start
+            print(f"\n[inference] Manual-only mode ended after {duration:.1f}s")
+        else:
+            avg_fps = frame_count / elapsed if elapsed > 0 else 0
+            print(f"\n[inference] Processed {frame_count} frames in "
+                  f"{elapsed:.1f}s  ({avg_fps:.1f} fps avg)")
 
 
 if __name__ == "__main__":
