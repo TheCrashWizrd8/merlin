@@ -119,6 +119,11 @@ def parse_args() -> argparse.Namespace:
             "and control falls back to manual s/d/t."
         ),
     )
+    parser.add_argument(
+        "--sub",
+        action="store_true",
+        help="Enable sub vehicle dashboard at /sub/ and sub control endpoints",
+    )
     return parser.parse_args()
 
 
@@ -185,9 +190,14 @@ def main() -> None:
     hardware: object
     hardware_init_error: Exception | None = None
     try:
-        hardware = hardware_from_config(serial_port_override=args.serial_port)
-        print(f"[inference] Hardware: {type(hardware).__name__} (steering, drive, camera tilt)")
-        if args.serial_port:
+        if args.sub:
+            # Sub mode: esp_bridge owns the serial port (S2/B telemetry).
+            hardware = StubOutput({})
+            print("[inference] Hardware: StubOutput (--sub; ESP bridge handles serial)")
+        else:
+            hardware = hardware_from_config(serial_port_override=args.serial_port)
+            print(f"[inference] Hardware: {type(hardware).__name__} (steering, drive, camera tilt)")
+        if args.serial_port and not args.sub:
             print(f"[inference] Serial port override: {args.serial_port}")
     except Exception as exc:
         if args.tolerate_missing_devices:
@@ -202,7 +212,7 @@ def main() -> None:
 
     if args.web:
         try:
-            from src.web_stream import _get_app, set_latest_frame, run_server
+            from src.web_stream import _get_app, set_latest_frame, run_server, register_sub_dashboard
         except ImportError as e:
             if "flask" in str(e).lower():
                 print("[ERROR] Flask is required for --web. Install with: pip install flask")
@@ -210,6 +220,9 @@ def main() -> None:
                 print(f"[ERROR] {e}")
             sys.exit(1)
         _get_app()  # ensure app is created
+        if args.sub:
+            register_sub_dashboard(start_services=True)
+            print(f"[inference] Sub dashboard: http://localhost:{args.web_port}/sub/")
         server_thread = threading.Thread(
             target=run_server,
             kwargs={"host": args.web_host, "port": args.web_port},
@@ -348,6 +361,10 @@ def main() -> None:
 
                 # 3. Control
                 output = controller.compute(track)
+                if args.sub:
+                    from src.sub_control import yolo_to_sub_actuators
+                    from src.sub_state import get_sub_state
+                    get_sub_state().set_auto_actuators(yolo_to_sub_actuators(output))
                 if args.web:
                     from dataclasses import replace
                     from src.control_source import get_current_sdt

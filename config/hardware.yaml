@@ -53,15 +53,34 @@ pca9685:
   pwm_frequency: 50   # Hz — standard servo frequency
 
 # ---------------------------------------------------------------------------
-# Serial settings (only used when interface: serial)
-# ESP32-S3 is connected to the Pi by USB cable. Pi sends "S D T" lines.
-# ESP32 drives: steering servo, tilt servo, DC motor via L298N.
-# On the Pi, run: ls /dev/ttyACM* /dev/ttyUSB* to find the port (often ttyACM0).
+# Serial link to ESP (telemetry + control)
+#
+# GPIO UART (recommended for sub telemetry on header pins):
+#   Pi GPIO 14 (pin 8)  = Pi TX  → connect to ESP RX
+#   Pi GPIO 15 (pin 10) = Pi RX  ← connect to ESP TX
+#   GND (pin 6/9/14/20/25/30/34/39) common with ESP
+#   Device: /dev/serial0  (Pi 5: ttyAMA10)  @ 115200 8N1
+#   Run once: bash scripts/setup_pi_uart.sh  then reboot
+#
+# USB (ESP32-S3 plugged into Pi USB):
+#   port: "/dev/ttyACM0"
 # ---------------------------------------------------------------------------
 serial:
-  port: "/dev/ttyACM0"   # ESP32-S3 over USB (use ttyUSB0 if you see that instead)
+  port: "/dev/serial0"
   baud_rate: 115200
-  verbose: true          # set false to stop echoing S D T lines to the console
+  verbose: true
+  link: gpio_uart          # gpio_uart | usb  (documentation only)
+  pi_tx_gpio: 14           # header pin 8
+  pi_rx_gpio: 15           # header pin 10
+
+# ---------------------------------------------------------------------------
+# Xbox controller (sub dashboard — USB or Bluetooth)
+# Requires pygame; Bluetooth Xbox One/Series needs xpadneo on Pi (see docs).
+# ---------------------------------------------------------------------------
+xbox:
+  deadzone: 0.12         # stick deadzone 0..1
+  poll_hz: 30            # read rate
+  # device_index: 0      # uncomment to force a specific /dev/input/js index
 
 # ---------------------------------------------------------------------------
 # Control scaling

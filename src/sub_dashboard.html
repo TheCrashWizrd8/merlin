@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sub — Diagnostics Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b1117;
+      --panel: #141c27;
+      --panel2: #1a2433;
+      --border: #243044;
+      --text: #e6edf5;
+      --muted: #7d8da6;
+      --accent: #3b82f6;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --leak-flash: #ff1744;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    body.leak-alarm {
+      animation: leak-bg 0.6s step-end infinite;
+    }
+    @keyframes leak-bg {
+      0%, 49% { background: #1a0508; }
+      50%, 100% { background: var(--bg); }
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.04em; }
+    .badges { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .badge {
+      font-size: 0.72rem;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--muted);
+    }
+    .badge.ok { color: var(--ok); border-color: #166534; }
+    .badge.off { color: var(--muted); }
+    .badge.alarm {
+      color: #fff;
+      background: var(--danger);
+      border-color: var(--danger);
+      animation: pulse 0.8s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      grid-template-rows: auto 1fr auto;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+    @media (max-width: 1100px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 0.55rem 0.85rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel-body { padding: 0.85rem; }
+    .camera-panel { grid-row: span 2; }
+    .camera-wrap {
+      background: #000;
+      aspect-ratio: 4/3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .camera-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.65rem;
+    }
+    .metric {
+      background: var(--panel2);
+      border-radius: 8px;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+    }
+    .metric .label {
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .metric .value {
+      font-size: 1.45rem;
+      font-weight: 600;
+      margin-top: 0.2rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .metric .unit { font-size: 0.85rem; color: var(--muted); font-weight: 400; }
+    .metric.warn .value { color: var(--warn); }
+    .metric.danger .value { color: var(--danger); }
+    .gyro-viz {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      justify-content: center;
+      padding: 0.5rem 0;
+    }
+    .horizon {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(#1e3a5f 50%, #3d2914 50%);
+    }
+    .horizon-inner {
+      position: absolute;
+      inset: 0;
+      transform-origin: center center;
+      background: linear-gradient(#2563eb 50%, #78350f 50%);
+    }
+    .horizon-cross {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    .horizon-cross::before,
+    .horizon-cross::after {
+      content: "";
+      position: absolute;
+      background: rgba(255,255,255,0.35);
+    }
+    .horizon-cross::before { width: 100%; height: 1px; }
+    .horizon-cross::after { width: 1px; height: 100%; }
+    .gyro-readouts { font-size: 0.82rem; line-height: 1.7; color: var(--muted); }
+    .gyro-readouts span { color: var(--text); font-weight: 500; }
+    .leak-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+      gap: 0.5rem;
+    }
+    .leak-cell {
+      text-align: center;
+      padding: 0.55rem 0.25rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      font-size: 0.72rem;
+    }
+    .leak-cell .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      margin: 0 auto 0.35rem;
+      background: var(--ok);
+    }
+    .leak-cell.triggered .dot {
+      background: var(--danger);
+      box-shadow: 0 0 12px var(--danger);
+      animation: pulse 0.5s ease-in-out infinite;
+    }
+    .leak-cell.triggered {
+      border-color: var(--danger);
+      background: rgba(239,68,68,0.12);
+    }
+    .ballast-bar {
+      height: 14px;
+      background: var(--panel2);
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      margin: 0.5rem 0;
+    }
+    .ballast-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #60a5fa);
+      width: 0%;
+      transition: width 0.3s;
+    }
+    .btn-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    button {
+      flex: 1;
+      min-width: 70px;
+      padding: 0.45rem 0.6rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.78rem;
+    }
+    button:hover { background: #243044; }
+    button.primary { background: #1d4ed8; border-color: #2563eb; }
+    button.danger { background: #991b1b; border-color: #b91c1c; }
+    .serial-log {
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem;
+      line-height: 1.45;
+      max-height: 220px;
+      overflow-y: auto;
+      background: #080d12;
+      border-radius: 6px;
+      padding: 0.5rem;
+      border: 1px solid var(--border);
+    }
+    .serial-line { white-space: pre-wrap; word-break: break-all; }
+    .serial-line.rx { color: #86efac; }
+    .serial-line.tx { color: #93c5fd; }
+    .serial-line.sys { color: var(--warn); }
+    .serial-input {
+      display: flex;
+      gap: 0.4rem;
+      margin-top: 0.45rem;
+    }
+    .serial-input input {
+      flex: 1;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 0.4rem 0.55rem;
+      font-family: inherit;
+      font-size: 0.78rem;
+    }
+    .xbox-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.45rem;
+      font-size: 0.78rem;
+    }
+    .stick-viz {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      aspect-ratio: 1;
+      position: relative;
+      max-width: 100px;
+    }
+    .stick-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      position: absolute;
+      transform: translate(-50%, -50%);
+      left: 50%;
+      top: 50%;
+    }
+    .mode-tabs {
+      display: flex;
+      gap: 0.35rem;
+      margin-bottom: 0.65rem;
+    }
+    .mode-tabs button.active {
+      background: #1e3a5f;
+      border-color: var(--accent);
+      color: #bfdbfe;
+    }
+    .actuator-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+      font-size: 0.78rem;
+    }
+    .actuator-row label { width: 4.5rem; color: var(--muted); }
+    .actuator-row .bar {
+      flex: 1;
+      height: 8px;
+      background: var(--panel2);
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .actuator-row .bar-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 50%;
+      transition: width 0.15s;
+    }
+    .actuator-row .num { width: 2.8rem; text-align: right; font-variant-numeric: tabular-nums; }
+    .right-col { display: flex; flex-direction: column; gap: 0.75rem; }
+    .span-full { grid-column: 1 / -1; }
+    .pin-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+    }
+    @media (max-width: 900px) {
+      .pin-grid { grid-template-columns: 1fr; }
+    }
+    .pin-box {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .pin-box h4 {
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.4rem;
+    }
+    .pin-line { font-family: ui-monospace, monospace; line-height: 1.5; color: var(--text); }
+    .pin-line.mismatch { color: var(--warn); }
+    .test-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-top: 0.5rem;
+    }
+    .test-grid button { flex: 0 1 auto; min-width: 60px; }
+    .test-grid button.pass { border-color: var(--ok); color: var(--ok); }
+    .test-grid button.fail { border-color: var(--danger); color: var(--danger); }
+    .diag-status {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.45rem;
+      font-family: ui-monospace, monospace;
+    }
+    .manual-sliders { display: none; margin-top: 0.65rem; }
+    .manual-sliders.visible { display: block; }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.35rem;
+      font-size: 0.78rem;
+    }
+    .slider-row label { width: 4.5rem; color: var(--muted); }
+    .slider-row input[type=range] { flex: 1; accent-color: var(--accent); }
+    .slider-row .val { width: 2.5rem; text-align: right; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SUB — Diagnostics Dashboard</h1>
+    <div class="badges">
+      <span class="badge off" id="badgeEsp">ESP — …</span>
+      <span class="badge off" id="badgeXbox">Xbox — …</span>
+      <span class="badge off" id="badgeLeak">Leaks — OK</span>
+      <span class="badge off" id="badgeMode">Mode — …</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel camera-panel">
+      <div class="panel-head">Camera POV <span id="camStatus">USB</span></div>
+      <div class="camera-wrap">
+        <img src="/video_feed" alt="Camera feed" id="camFeed">
+      </div>
+    </section>
+
+    <div class="right-col">
+      <section class="panel">
+        <div class="panel-head">Sensors</div>
+        <div class="panel-body metrics">
+          <div class="metric" id="metricBattery">
+            <div class="label">Battery</div>
+            <div class="value"><span id="batteryVal">—</span> <span class="unit">V</span></div>
+          </div>
+          <div class="metric" id="metricDepth">
+            <div class="label">Depth</div>
+            <div class="value"><span id="depthVal">—</span> <span class="unit">m</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">Gyro</div>
+        <div class="panel-body gyro-viz">
+          <div class="horizon" id="horizon">
+            <div class="horizon-inner" id="horizonInner"></div>
+            <div class="horizon-cross"></div>
+          </div>
+          <div class="gyro-readouts">
+            Pitch <span id="gyroPitch">—</span>°<br>
+            Roll <span id="gyroRoll">—</span>°<br>
+            Yaw <span id="gyroYaw">—</span>°
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="leakPanel">
+        <div class="panel-head">Leak Sensors <span id="leakStatus">—</span></div>
+        <div class="panel-body">
+          <div class="leak-grid" id="leakGrid">
+            <div class="leak-cell"><div class="dot"></div>L1</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">Ballast <span id="ballastCmd">cmd —</span></div>
+      <div class="panel-body">
+        <div class="label" style="font-size:0.7rem;color:var(--muted);">Level (ESP)</div>
+        <div class="ballast-bar"><div class="ballast-fill" id="ballastFill"></div></div>
+        <div class="btn-row">
+          <button class="danger" data-ballast="drain">Drain</button>
+          <button data-ballast="neutral">Hold</button>
+          <button class="primary" data-ballast="fill">Fill</button>
+        </div>
+        <input type="range" id="ballastSlider" min="-1" max="1" step="0.05" value="0" style="width:100%;margin-top:0.5rem;accent-color:var(--accent);">
+      </div>
+    </section>
+
+    <section class="panel span-full">
+      <div class="panel-head">
+        Pin Diagnostics
+        <span id="pinDiagStatus">—</span>
+      </div>
+      <div class="panel-body">
+        <div class="pin-grid">
+          <div class="pin-box">
+            <h4>Expected (config/pins.yaml)</h4>
+            <div id="expectedPins" class="pin-line">Loading…</div>
+          </div>
+          <div class="pin-box">
+            <h4>ESP reported (send PINS)</h4>
+            <div id="espPins" class="pin-line">No data — click PINS or Run All</div>
+          </div>
+        </div>
+        <div class="test-grid" id="pinTestButtons">
+          <button data-cmd="PING">PING</button>
+          <button data-cmd="PINS">PINS</button>
+          <button data-cmd="TEST S 0 1.0">Servo 0</button>
+          <button data-cmd="TEST S 1 1.0">Servo 1</button>
+          <button data-cmd="TEST S 2 1.0">Servo 2</button>
+          <button data-cmd="TEST S 3 1.0">Servo 3</button>
+          <button data-cmd="TEST T 0.5">Thr Fwd</button>
+          <button data-cmd="TEST T -0.5">Thr Rev</button>
+          <button data-cmd="TEST T 0">Thr Stop</button>
+          <button data-cmd="TEST B fill">Ballast Fill</button>
+          <button data-cmd="TEST B drain">Ballast Drain</button>
+          <button data-cmd="TEST B stop">Ballast Stop</button>
+          <button data-cmd="TEST L">Leaks</button>
+          <button data-cmd="TEST A">ADC</button>
+          <button class="primary" id="runAllTests">Run All Tests</button>
+        </div>
+        <div class="diag-status" id="lastDiag">Last diagnostic: —</div>
+      </div>
+    </section>
+
+    <section class="panel span-full">
+      <div class="panel-head">Control — Xbox / Manual</div>
+      <div class="panel-body" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+        <div>
+          <div class="mode-tabs">
+            <button data-mode="xbox" class="active">Xbox</button>
+            <button data-mode="manual">Manual</button>
+            <button data-mode="auto">Auto (YOLO)</button>
+          </div>
+          <div class="xbox-grid">
+            <div>
+              <div style="color:var(--muted);font-size:0.7rem;margin-bottom:0.25rem;">Left stick</div>
+              <div class="stick-viz"><div class="stick-dot" id="stickL"></div></div>
+            </div>
+            <div>
+              <div style="color:var(--muted);font-size:0.7rem;margin-bottom:0.25rem;">Right stick</div>
+              <div class="stick-viz"><div class="stick-dot" id="stickR"></div></div>
+            </div>
+          </div>
+          <div style="margin-top:0.5rem;font-size:0.78rem;color:var(--muted);">
+            LT/RT → ballast · LS → aft steer · RS Y → thruster · RS X → fins
+          </div>
+          <div class="manual-sliders" id="manualSliders">
+            <div style="font-size:0.7rem;color:var(--muted);margin:0.5rem 0 0.35rem;">Manual actuators</div>
+            <!-- filled by JS -->
+          </div>
+        </div>
+        <div id="actuatorBars">
+          <!-- filled by JS -->
+        </div>
+      </div>
+    </section>
+
+    <section class="panel span-full">
+      <div class="panel-head">ESP Serial Monitor</div>
+      <div class="panel-body">
+        <div class="serial-log" id="serialLog"></div>
+        <div class="serial-input">
+          <input type="text" id="serialInput" placeholder="Send raw line to ESP…">
+          <button id="serialSend">Send</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const ACTUATORS = [
+      { key: 'aftSteerY', label: 'Aft Y' },
+      { key: 'aftSteerZ', label: 'Aft Z' },
+      { key: 'thrusterX', label: 'Thruster' },
+      { key: 'finLeft', label: 'Fin L' },
+      { key: 'finRight', label: 'Fin R' },
+    ];
+
+    const actuatorBars = document.getElementById('actuatorBars');
+    ACTUATORS.forEach(a => {
+      const row = document.createElement('div');
+      row.className = 'actuator-row';
+      row.innerHTML = `
+        <label>${a.label}</label>
+        <div class="bar"><div class="bar-fill" data-key="${a.key}"></div></div>
+        <span class="num" data-num="${a.key}">0.00</span>`;
+      actuatorBars.appendChild(row);
+    });
+
+    const manualSliders = document.getElementById('manualSliders');
+    const manualValues = {};
+    ACTUATORS.forEach(a => {
+      manualValues[a.key] = 0;
+      const row = document.createElement('div');
+      row.className = 'slider-row';
+      row.innerHTML = `
+        <label>${a.label}</label>
+        <input type="range" min="-1" max="1" step="0.05" value="0" data-slider="${a.key}">
+        <span class="val" data-slider-val="${a.key}">0.00</span>`;
+      manualSliders.appendChild(row);
+    });
+
+    let manualTimer;
+    function sendManualActuators() {
+      clearTimeout(manualTimer);
+      manualTimer = setTimeout(() => {
+        fetch('/sub/api/control/actuators', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(manualValues),
+        });
+      }, 80);
+    }
+
+    manualSliders.querySelectorAll('input[type=range]').forEach(sl => {
+      sl.addEventListener('input', () => {
+        const key = sl.dataset.slider;
+        manualValues[key] = +sl.value;
+        document.querySelector(`[data-slider-val="${key}"]`).textContent = fmt(+sl.value);
+        sendManualActuators();
+      });
+    });
+
+    function renderExpectedPins(pins) {
+      const sub = pins.expected?.sub || {};
+      const pca = pins.expected?.pca9685?.channels || {};
+      const thr = pins.expected?.l298n?.thruster || {};
+      const lines = [
+        `I2C SDA=${pins.expected?.esp32?.i2c?.sda_gpio ?? '?'} SCL=${pins.expected?.esp32?.i2c?.scl_gpio ?? '?'}`,
+        `Servos: ch0=${pca.aft_steer_y?.channel ?? '?'} ch1=${pca.aft_steer_z?.channel ?? '?'}`,
+        `        ch2=${pca.fin_left?.channel ?? '?'} ch3=${pca.fin_right?.channel ?? '?'}`,
+        `Thruster: IN1=${thr.in1_gpio ?? '?'} IN2=${thr.in2_gpio ?? '?'} PWM=${thr.pwm_gpio ?? '?'}`,
+        `Ballast fill=${sub.ballast?.fill_gpio ?? '?'} drain=${sub.ballast?.drain_gpio ?? '?'}`,
+        `Leaks: ${(sub.leaks?.gpios || []).join(',') || '?'}`,
+        `ADC battery=${sub.adc?.battery ?? '?'} ballast=${sub.adc?.ballast_level ?? '?'} depth=${sub.adc?.depth ?? '?'}`,
+        `Pi UART: ESP RX=${sub.pi_uart?.esp_rx ?? '?'} TX=${sub.pi_uart?.esp_tx ?? '?'}`,
+      ];
+      document.getElementById('expectedPins').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+    }
+
+    function renderEspPins(pins, diag) {
+      const lines = pins.esp_pins_lines || [];
+      const el = document.getElementById('espPins');
+      if (!lines.length) {
+        el.textContent = 'No data — click PINS or Run All';
+        return;
+      }
+      el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+      if (diag.last_pong_ts) {
+        document.getElementById('pinDiagStatus').textContent =
+          'PONG ' + new Date(diag.last_pong_ts * 1000).toLocaleTimeString();
+      }
+    }
+
+    async function sendPinCmd(cmd) {
+      await fetch('/sub/api/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd }),
+      });
+    }
+
+    document.querySelectorAll('[data-cmd]').forEach(btn => {
+      btn.addEventListener('click', () => sendPinCmd(btn.dataset.cmd));
+    });
+
+    document.getElementById('runAllTests').addEventListener('click', async () => {
+      const btn = document.getElementById('runAllTests');
+      btn.disabled = true;
+      btn.textContent = 'Running…';
+      try {
+        const r = await fetch('/sub/api/test/run', { method: 'POST' });
+        const data = await r.json();
+        document.getElementById('pinDiagStatus').textContent =
+          data.all_ok ? 'ALL PASS' : `${data.results.filter(x => x.ok).length}/${data.results.length} pass`;
+        document.getElementById('pinDiagStatus').style.color = data.all_ok ? 'var(--ok)' : 'var(--warn)';
+        data.results.forEach(res => {
+          const match = [...document.querySelectorAll('[data-cmd]')].find(
+            b => b.dataset.cmd === res.command || (res.command.startsWith('TEST S') && b.dataset.cmd.startsWith('TEST S'))
+          );
+          if (match) match.classList.toggle('pass', res.ok);
+          if (match) match.classList.toggle('fail', !res.ok);
+        });
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run All Tests';
+      }
+    });
+
+    function fmt(v, d = 2) {
+      if (v == null || Number.isNaN(v)) return '—';
+      return Number(v).toFixed(d);
+    }
+
+    function setBadge(el, text, cls) {
+      el.textContent = text;
+      el.className = 'badge ' + (cls || 'off');
+    }
+
+    function updateActuators(eff) {
+      ACTUATORS.forEach(a => {
+        const v = eff[a.key] ?? 0;
+        const pct = ((v + 1) / 2) * 100;
+        document.querySelector(`.bar-fill[data-key="${a.key}"]`).style.width = pct + '%';
+        document.querySelector(`[data-num="${a.key}"]`).textContent = fmt(v);
+      });
+    }
+
+    function updateSticks(xbox) {
+      if (!xbox.connected) return;
+      const ls = xbox.sticks.left;
+      const rs = xbox.sticks.right;
+      const place = (el, x, y) => {
+        el.style.left = ((x + 1) / 2 * 100) + '%';
+        el.style.top = ((y + 1) / 2 * 100) + '%';
+      };
+      place(document.getElementById('stickL'), ls.x, ls.y);
+      place(document.getElementById('stickR'), rs.x, rs.y);
+    }
+
+    function updateLeaks(leaks) {
+      const grid = document.getElementById('leakGrid');
+      const sensors = leaks.sensors && leaks.sensors.length ? leaks.sensors : [];
+      if (!sensors.length) {
+        grid.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;">No leak data yet</div>';
+        return;
+      }
+      grid.innerHTML = sensors.map((t, i) =>
+        `<div class="leak-cell ${t ? 'triggered' : ''}"><div class="dot"></div>L${i + 1}</div>`
+      ).join('');
+      document.body.classList.toggle('leak-alarm', leaks.triggered);
+      const badge = document.getElementById('badgeLeak');
+      if (leaks.triggered) {
+        setBadge(badge, 'LEAK DETECTED', 'alarm');
+      } else {
+        setBadge(badge, 'Leaks — OK', 'ok');
+      }
+      document.getElementById('leakStatus').textContent = leaks.triggered ? 'ALARM' : 'OK';
+    }
+
+    function updateGyro(g) {
+      document.getElementById('gyroPitch').textContent = fmt(g.pitch, 1);
+      document.getElementById('gyroRoll').textContent = fmt(g.roll, 1);
+      document.getElementById('gyroYaw').textContent = fmt(g.yaw, 1);
+      const roll = g.roll ?? 0;
+      const pitch = g.pitch ?? 0;
+      document.getElementById('horizonInner').style.transform =
+        `rotate(${roll}deg) translateY(${pitch * 1.2}px)`;
+    }
+
+    function updateSerial(lines) {
+      const log = document.getElementById('serialLog');
+      log.innerHTML = lines.map(l => {
+        const t = new Date(l.ts * 1000).toLocaleTimeString();
+        return `<div class="serial-line ${l.dir}">[${t}] ${l.line}</div>`;
+      }).join('');
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function poll() {
+      try {
+        const [tel, ctrl, status, serial, pins, diag] = await Promise.all([
+          fetch('/sub/api/telemetry').then(r => r.json()),
+          fetch('/sub/api/control').then(r => r.json()),
+          fetch('/sub/api/status').then(r => r.json()),
+          fetch('/sub/api/serial?limit=80').then(r => r.json()),
+          fetch('/sub/api/pins').then(r => r.json()),
+          fetch('/sub/api/diagnostics').then(r => r.json()),
+        ]);
+
+        setBadge(document.getElementById('badgeEsp'),
+          tel.esp_connected ? `ESP — ${tel.esp_port || 'OK'}` : 'ESP — offline',
+          tel.esp_connected ? 'ok' : 'off');
+        setBadge(document.getElementById('badgeXbox'),
+          ctrl.xbox.connected ? `Xbox — ${ctrl.xbox.name || 'OK'}` : 'Xbox — none',
+          ctrl.xbox.connected ? 'ok' : 'off');
+        setBadge(document.getElementById('badgeMode'), `Mode — ${ctrl.mode}`, 'ok');
+
+        document.getElementById('batteryVal').textContent = fmt(tel.battery.voltage);
+        document.getElementById('depthVal').textContent = fmt(tel.depth.meters);
+        const batEl = document.getElementById('metricBattery');
+        batEl.classList.toggle('warn', tel.battery.voltage != null && tel.battery.voltage < 11.5);
+        batEl.classList.toggle('danger', tel.battery.voltage != null && tel.battery.voltage < 10.5);
+
+        updateGyro(tel.gyro);
+        updateLeaks(tel.leaks);
+
+        const lvl = tel.ballast.level;
+        document.getElementById('ballastFill').style.width = (lvl != null ? lvl * 100 : 0) + '%';
+        document.getElementById('ballastCmd').textContent = 'cmd ' + fmt(tel.ballast.command);
+
+        updateActuators(ctrl.effective);
+        updateSticks(ctrl.xbox);
+        updateSerial(serial.lines);
+
+        document.querySelectorAll('.mode-tabs button').forEach(b => {
+          b.classList.toggle('active', b.dataset.mode === ctrl.mode);
+        });
+        document.getElementById('manualSliders').classList.toggle('visible', ctrl.mode === 'manual');
+
+        renderExpectedPins(pins);
+        renderEspPins(pins, diag);
+        if (diag.last_diagnostic) {
+          document.getElementById('lastDiag').textContent =
+            'Last diagnostic: ' + diag.last_diagnostic;
+        }
+      } catch (e) {
+        console.warn('poll error', e);
+      }
+    }
+
+    document.querySelectorAll('[data-ballast]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        fetch('/sub/api/control/ballast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: btn.dataset.ballast }),
+        });
+      });
+    });
+
+    const slider = document.getElementById('ballastSlider');
+    let sliderTimer;
+    slider.addEventListener('input', () => {
+      clearTimeout(sliderTimer);
+      sliderTimer = setTimeout(() => {
+        fetch('/sub/api/control/ballast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: +slider.value }),
+        });
+      }, 80);
+    });
+
+    document.querySelectorAll('.mode-tabs button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        fetch('/sub/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: btn.dataset.mode }),
+        });
+      });
+    });
+
+    document.getElementById('serialSend').addEventListener('click', () => {
+      const input = document.getElementById('serialInput');
+      const line = input.value.trim();
+      if (!line) return;
+      fetch('/sub/api/serial', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line }),
+      }).then(() => { input.value = ''; });
+    });
+    document.getElementById('serialInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('serialSend').click();
+    });
+
+    poll();
+    setInterval(poll, 500);
+  </script>
+</body>
+</html>

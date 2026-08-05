@@ -161,10 +161,11 @@ class SerialOutput(HardwareOutput):
         if self._serial is not None:
             return
         try:
-            import serial
-            self._serial = serial.Serial(
-                port=self._port,
-                baudrate=self._baud,
+            from src.serial_util import open_serial_port
+
+            self._serial = open_serial_port(
+                self._port,
+                self._baud,
                 timeout=0.01,
                 write_timeout=0.05,
             )

@@ -249,6 +249,12 @@ def set_latest_frame(frame_bgr: np.ndarray) -> None:
         app.set_latest_frame(frame_bgr)
 
 
+def register_sub_dashboard(start_services: bool = True) -> None:
+    """Register /sub/ dashboard routes on the Flask app."""
+    from src.sub_web import register_sub_routes
+    register_sub_routes(_get_app(), start_services=start_services)
+
+
 def run_server(host: str = "0.0.0.0", port: int = 5000) -> None:
     """Run the Flask server (blocking). Use in a daemon thread from inference."""
     try:

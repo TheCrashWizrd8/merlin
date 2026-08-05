@@ -1,0 +1,157 @@
+# ---------------------------------------------------------------------------
+# Pins & channel reference (Pi <-> ESP32 <-> PCA9685 + motor driver)
+#
+# This file is documentation/config only; it should not affect runtime
+# behavior until code starts consuming it.
+# ---------------------------------------------------------------------------
+
+version: 1
+generated_from:
+  - esp32/apple_car_rc/apple_car_rc.ino
+  - src/hardware.py
+  - config/hardware.yaml
+
+# ---------------------------------------------------------------------------
+# Raspberry Pi -> ESP32 serial protocol (car)
+# ---------------------------------------------------------------------------
+pi:
+  gpio_uart:
+    device: "/dev/serial0"   # Pi 5: ttyAMA10; pins 14 TX / 15 RX
+    baud_rate: 115200
+    tx_gpio: 14              # header pin 8  → ESP RX
+    rx_gpio: 15              # header pin 10 ← ESP TX
+    setup_script: scripts/setup_pi_uart.sh
+  serial:
+    baud_rate: 115200
+    # Pi sends one line per update in ASCII:
+    #   S <steer> D <drive> T <tilt>\n
+    car_line_format: "S <steer> D <drive> T <tilt>\\n"
+    # Value ranges (as used by the current Python + ESP32 firmware):
+    steer_range: [-1.0, 1.0]
+    drive_range: [-1.0, 1.0]
+    tilt_range: [-1.0, 1.0]
+
+# ---------------------------------------------------------------------------
+# ESP32 configuration
+# ---------------------------------------------------------------------------
+esp32:
+  serial:
+    baud_rate: 115200
+    # Safety: stop motor if Pi stops sending D updates for this long.
+    serial_timeout_ms: 8000
+
+  i2c:
+    # ESP32-S3 SDA/SCL pins wired to PCA9685.
+    sda_gpio: 8
+    scl_gpio: 9
+
+# ---------------------------------------------------------------------------
+# PCA9685 (servo driver)
+# ---------------------------------------------------------------------------
+pca9685:
+  i2c_address: 0x40
+  pwm_frequency_hz: 50
+  # The ESP32 sketch uses these PCA9685 tick counts at 50Hz.
+  #
+  # Approx conversion (for sanity):
+  #   period_us = 20000
+  #   tick_us = period_us / 4096 = ~4.8828us
+  #   centre_tick=307 -> ~1500us
+  #   min_tick=205 -> ~1000us
+  #   max_tick=410 -> ~2000us
+  servo_tick_calibration:
+    min_tick: 205
+    centre_tick: 307
+    max_tick: 410
+    tick_us: 4.8828
+    centre_us_approx: 1500
+    min_us_approx: 1000
+    max_us_approx: 2000
+
+  channels:
+    # Current (car) firmware mapping:
+    steering_servo:
+      channel: 0
+      role: car_steering
+    camera_tilt_servo:
+      channel: 1
+      role: car_camera_tilt
+
+    # Sub vehicle mappings (matches esp32/sub_rc/sub_rc.ino and sub_hw_test.ino)
+    aft_steer_y:
+      channel: 0
+      role: sub_aft_steering_y
+    aft_steer_z:
+      channel: 1
+      role: sub_aft_steering_z
+    fin_left:
+      channel: 2
+      role: sub_fore_fin_left
+    fin_right:
+      channel: 3
+      role: sub_fore_fin_right
+
+# ---------------------------------------------------------------------------
+# Motor driver (L298N) used by the current car firmware
+# ---------------------------------------------------------------------------
+l298n:
+  motor:
+    # Current wiring on ESP32-S3 (car drive via "D <drive>"):
+    in1_gpio: 4
+    in2_gpio: 5
+    pwm_gpio: 6
+    # Notes from the sketch:
+    motor_pwm_freq_hz: 5000
+    motor_pwm_resolution_bits: 8
+
+  # Sub vehicle thruster (same L298N pins as car drive on current wiring)
+  thruster:
+    in1_gpio: 4
+    in2_gpio: 5
+    pwm_gpio: 6
+
+# ---------------------------------------------------------------------------
+# Sub vehicle (matches esp32/sub_rc/sub_rc.ino)
+# ---------------------------------------------------------------------------
+sub:
+  pi_uart:
+    esp_rx: 18    # ESP RX <- Pi GPIO14 TX (header pin 8)
+    esp_tx: 17    # ESP TX -> Pi GPIO15 RX (header pin 10)
+
+  ballast:
+    fill_gpio: 10
+    drain_gpio: 11
+
+  leaks:
+    gpios: [12, 13, 14, 15]
+
+  adc:
+    battery: 1
+    ballast_level: 2
+    depth: 3
+
+  imu_i2c_addr: 0x68
+  depth_i2c_addr: 0    # 0 = disabled; ADC depth on GPIO 3
+
+  # Axis names used by dashboard / S2 protocol:
+  axes:
+    aftSteerY: float in [-1,1]
+    aftSteerZ: float in [-1,1]
+    thrusterX: float in [-1,1]
+    finLeft: float in [-1,1]
+    finRight: float in [-1,1]
+
+  # Implemented in esp32/sub_rc/sub_rc.ino:
+  serial_line_format: "S2 <aftSteerY> <aftSteerZ> F <finLeft> <finRight> X <thrusterX>\\n"
+
+  # ESP diagnostic commands (Pi or dashboard serial monitor):
+  diagnostics:
+    ping: "PING"
+    pins: "PINS"
+    test_servo: "TEST S <ch 0-3> <val -1..1>"
+    test_thruster: "TEST T <val -1..1>"
+    test_ballast: "TEST B fill|drain|stop"
+    test_leaks: "TEST L"
+    test_adc: "TEST A"
+    help: "HELP"
+

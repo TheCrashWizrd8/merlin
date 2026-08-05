@@ -13,5 +13,11 @@ python-dotenv>=1.0.0
 # If you need the display window swap to opencv-python
 opencv-python-headless>=4.8.0
 
-# Web stream (--web mode)
+# Web stream (--web mode) and sub dashboard
 flask>=3.0.0
+
+# ESP serial bridge (hardware.yaml interface: serial)
+pyserial>=3.5
+
+# Xbox controller on Pi (--sub mode; optional if no gamepad)
+pygame>=2.5.0
