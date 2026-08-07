@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Xbox controller → sub actuator mapping
+# Edit this file to change bindings without touching Python code.
+# Verify: python -m src.xbox_controller
+#
+# Stick drift: tune xbox.deadzone in config/hardware.yaml (default 0.18).
+# Per-stick override: sticks.left.deadzone / sticks.right.deadzone below.
+# ---------------------------------------------------------------------------
+
+# Path override (optional — default is this file)
+# mapping_file: config/xbox_mapping.yaml
+
+sticks:
+  left:
+    # Dual-axis aft steering (two servos at the stern)
+    aft_steer_y: x
+    aft_steer_z: y
+    invert_y: true
+  right:
+    # Polar fin mapping — bearing from up, +clockwise (degrees):
+    #   up (0°)     both fins up
+    #   down (±180°) both fins down
+    #   -45° (up-left)   left fin up
+    #   -135° (down-left) left fin down
+    #   45° (up-right)   right fin up
+    #   135° (down-right) right fin down
+    mode: polar_fins
+    snap_degrees: 5   # ±5° windows at each keypoint (0°, ±45°, ±135°, 180°)
+
+buttons:
+  # SDL / Linux joystick button indices (Xbox over Bluetooth)
+  a: 0
+  b: 1
+  lb: 4   # L1 — drain ballast
+
+triggers:
+  lt: fill   # L2 — fill ballast (analog 0..1)
+
+ballast:
+  # No d-pad  → both tanks
+  # D-pad up  + L1/L2 → fore tank only
+  # D-pad down + L1/L2 → aft tank only
+  drain_button: lb
+  fill_trigger: lt
+  drain_magnitude: 1.0
+  dpad_up_tank: fore
+  dpad_down_tank: aft
+  default_tank: both
+
+thruster:
+  forward_button: rb
+  reverse_button: rt
+  forward_magnitude: 1.0
+  reverse_magnitude: 1.0

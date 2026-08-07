@@ -71,7 +71,7 @@ class Tracker:
     ------------------
     By default the highest-confidence detection is chosen ("best_confidence").
     Set strategy="closest_to_centre" to prefer the apple nearest the frame
-    centre instead — useful once the car is already tracking and the target
+    centre instead — useful once the sub is already tracking and the target
     fills the frame.
     """
 

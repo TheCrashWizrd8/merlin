@@ -1,110 +1,194 @@
-# Pi → ESP32 Pro S3 serial protocol
+# Pi ↔ ESP32 serial protocol
 
-The Raspberry Pi runs inference and sends **one line per frame** over USB serial to an **ESP32 Pro S3**. The ESP32 drives:
-
-- **Steering** — Hitec HS-646WP servo
-- **Camera tilt** — Hitec HS-646WP servo  
-- **Drive** — DC motor via **L298N** (direction + PWM speed)
+The Raspberry Pi communicates with an **ESP32-S3** on the RC submarine over serial using the **`sub_rc`** firmware and **`esp_bridge.py`**.
 
 ---
 
-## Architecture
+## Architecture overview
 
 ```
-┌─────────────────┐     USB serial      ┌─────────────────────┐
-│  Raspberry Pi   │ ──────────────────► │  ESP32 Pro S3       │
-│  inference.py   │   S D T values      │  • 2× servo PWM     │
-│  hardware:      │   (text, 115200)    │ • L298N IN1,IN2,PWM │
-│  interface:     │                     └──────────┬──────────┘
-│  serial         │                                │
-└─────────────────┘                                ▼
-                                          ┌───────────────────┐
-                                          │ L298N motor driver│
-                                          │ → DC drive motor  │
-                                          └───────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Raspberry Pi 5                                │
+│                                                                       │
+│  inference.py ──► hardware.py (SubBridgeOutput) ──► sub_state        │
+│                                                                       │
+│  sub_server.py / inference --sub ──► esp_bridge.py                   │
+│                                       /dev/serial0 or /dev/ttyACM0   │
+│                                       S2 / B / CAL / PING + TEL rx    │
+└───────────────────────────────────────┬───────────────────────────────┘
+                                        │ GPIO UART or USB
+                                        ▼
+                                   sub_rc.ino
+                                   (full sub vehicle)
 ```
 
----
+| Link | Pi device | Baud | Firmware | Purpose |
+|------|-----------|------|----------|---------|
+| **Sub vehicle** | `/dev/serial0` (GPIO UART) or `/dev/ttyACM0` (USB) | 115200 | `esp32/sub_rc/` | Actuators, ballast, sensors, telemetry |
 
-## Serial protocol
-
-- **Port:** set in `config/hardware.yaml` under `serial.port` (e.g. `/dev/ttyUSB0` when ESP32 is connected over USB).
-- **Baud rate:** `serial.baud_rate` (default `115200`).
-- **Format:** one line per frame, ASCII:
-
-  ```
-  S <steer> D <drive> T <tilt>\n
-  ```
-
-  Each value is a float from **-1.0** to **+1.0**, e.g.:
-
-  ```
-  S 0.120 D 0.450 T -0.050
-  S -0.300 D 0.000 T 0.000
-  ```
-
-| Letter | Meaning           | -1.0        | 0.0   | +1.0       |
-|--------|-------------------|-------------|-------|------------|
-| **S**  | Steering servo    | full left   | straight | full right |
-| **D**  | Drive motor       | full reverse | stop  | full forward |
-| **T**  | Camera tilt servo | full down   | level | full up    |
-
-**Semantics:**
-- **S, T** = *angle* — servos move to and hold that position (0 = centre).
-- **D** = *sustained speed* — the motor runs at that speed until a different D value is sent. D=1 means full forward continuously; D=0 means stop. Unlike servos, D is not a position — it is an ongoing speed command.
-
-The Pi sends at inference frame rate (e.g. 10–25 Hz). The ESP32 should parse each line and update outputs; if no line is received for a while, you may want to stop the motor (e.g. D=0) for safety.
-
----
-
-## ESP32 side: what to implement
-
-### 1. Serial
-
-- Open the same baud rate (e.g. 115200).
-- Read a line (up to `\n`), then parse: `S <float> D <float> T <float>`.
-- You can use `sscanf` or split on spaces and match the letters.
-
-### 2. Steering and tilt servos (Hitec HS-646WP)
-
-- Use two PWM outputs (e.g. ESP32 LEDC) at **50 Hz**.
-- Map value **-1.0 → 1.0** to pulse width **1000 µs → 2000 µs** (1500 µs = centre).
-- Example (concept):  
-  `pulse_us = 1500 + (value * 500)` then clamp to 1000–2000.
-
-### 3. Drive motor via L298N
-
-- **L298N** has IN1, IN2 and (optionally) enable/PWM.
-- **Direction:**  
-  - D &gt; 0: forward  → e.g. IN1=HIGH, IN2=LOW  
-  - D &lt; 0: reverse → e.g. IN1=LOW, IN2=HIGH  
-  - D = 0: stop      → IN1=LOW, IN2=LOW (or both LOW)
-- **Speed:** map `abs(D)` (0.0–1.0) to your PWM duty (0–255 or 0–1023). Use the same enable/PWM pin for both directions.
-- Optionally cap max duty (e.g. 80%) for safety.
-
-Example (pseudo):
-
-- `speed = (uint8_t)(fminf(1.0f, fabsf(drive)) * 255.0f);`
-- if `drive > 0`: IN1=1, IN2=0, PWM=speed  
-- if `drive < 0`: IN1=0, IN2=1, PWM=speed  
-- if `drive == 0`: IN1=0, IN2=0, PWM=0  
-
----
-
-## Pi configuration
-
-In `config/hardware.yaml`:
+Config in `config/hardware.yaml`:
 
 ```yaml
-interface: serial
-
-serial:
-  port: "/dev/ttyUSB0"   # or the device the ESP32 gets (check with ls /dev/tty*)
+interface: sub
+sub_serial:
+  port: "/dev/serial0"   # or /dev/ttyACM0 for USB
   baud_rate: 115200
 ```
 
-Install: `pip install pyserial`
+Pin reference: **`config/pins.yaml`**.
 
-Connect the ESP32 over USB to the Pi; then run `python inference.py` (or `python inference.py --web`). The Pi will send `S D T` lines every frame; the ESP32 handles servos and L298N.
+---
 
-**Firmware:** Arduino sketch for ESP32-S3 is in **`esp32/apple_car_rc/`**; see **`esp32/README.md`** for pinout, wiring, and upload.
+## Sub vehicle protocol
+
+Used by `sub_server.py` and `inference.py --sub` → `src/esp_bridge.py`.
+
+### Wiring (GPIO UART)
+
+Cross-connect Pi header pins to ESP32:
+
+| Pi | Header pin | ESP32 (sub_rc) |
+|----|------------|----------------|
+| GPIO14 TX | 8 | RX (GPIO 44) |
+| GPIO15 RX | 10 | TX (GPIO 43) |
+| GND | 6 | GND |
+
+Enable UART on the Pi (`/dev/serial0`). On Pi 5 this is typically available when serial console is disabled in `config.txt`.
+
+Probe with:
+
+```bash
+python scripts/probe_esp_uart.py
+```
+
+### Pi → ESP commands
+
+Sent at ~20 Hz by the ESP bridge writer thread (unless diagnostic mode is active):
+
+**Ballast** (fore and aft tanks, -1.0 … +1.0):
+
+```
+B <fore> <aft>\n
+```
+
+Example: `B 1.000 -1.000` — fill fore, drain aft.
+
+**Sub actuators** (all values -1.0 … +1.0):
+
+```
+S2 <aftY> <aftZ> F <finL> <finR> X <thruster>\n
+```
+
+Example: `S2 0.120 -0.050 F 0.000 0.000 X 0.450`
+
+| Token | Actuator |
+|-------|----------|
+| `S2` + two floats | Aft steer Y, aft steer Z (PCA9685 ch 0/1) |
+| `F` + two floats | Fore fin left, fore fin right (PCA9685 ch 2/3) |
+| `X` + one float | Thruster via L298N |
+
+**Calibration & diagnostics** (on demand via dashboard or `POST /sub/api/serial`):
+
+```
+PING
+PINS
+CAL B <fore|aft> top|bottom|show
+TEST S <ch 0-3> <val -1..1>
+TEST T <val -1..1>
+TEST B <fore|aft> fill|drain|stop
+TEST L
+TEST A
+HELP
+```
+
+### ESP → Pi telemetry
+
+The ESP32 sends `TEL` lines at ~5 Hz. The Pi parser in `esp_bridge.py` updates `sub_state`:
+
+```
+TEL battery 12.45
+TEL gyro 1.2 -0.5 45.0
+TEL depth 3.45
+TEL leak 0 0 1 0
+TEL ballast fore 0.500 2048 1 FILL
+TEL ballast aft 0.400 1638 0 STOP
+TEL ballastcal fore 500 3500 1
+TEL controls
+<7 value lines>
+TEL thruster 0.400 128
+TEL status READY
+TEL fault NONE
+TEL heartbeat 42
+```
+
+Diagnostic replies (not prefixed with `TEL`):
+
+```
+OK PONG
+OK PINS BEGIN
+... pin lines ...
+OK PINS END
+OK TEST servo ch=0 val=0.000
+OK CAL B fore top 3500
+ERR TEST ...
+```
+
+Telemetry is marked stale after 3 s with no updates.
+
+### Bench testing (no sensors wired)
+
+With **`sub_rc`** powered and UART linked but **no battery divider, depth sensor, pots, or motors** connected:
+
+| Line | Typical bench value | Interpretation |
+|------|---------------------|----------------|
+| `TEL status READY` | present | Firmware running |
+| `TEL fault NONE` | present | No leak alarm |
+| `TEL heartbeat N` | N increments ~5 Hz | Live telemetry loop |
+| `TEL leak 0 0 0 0` | all zero | OK (`PIN_LEAK = -1` or pulled low) |
+| `TEL gyro 0 0 0` | zeros | No IMU — hardcoded in firmware |
+| `TEL thruster 0 0` | zeros | Idle |
+| `B 0.000 0.000` | zeros | Pi sending ballast stop (manual mode) |
+| `S2 0 … 0` | all zeros | Pi sending idle actuators (manual mode) |
+| `TEL battery 12–14` | high | Floating ADC × voltage divider scale — **ignore** |
+| `TEL depth ~3.3` | high | Floating ADC voltage — **ignore** |
+| `TEL ballast … 4095` or low ADC | varies | Floating pot pins — **ignore** until calibrated |
+| `TEL ballastcal … -1 -1 0` | uncalibrated | Run dashboard **Cal top/bottom** when pots are wired |
+
+**Quick link test:** `PING` → `OK PONG`.
+
+**Non-zero `S2` on the bench:** those lines are **Pi → ESP** commands. If you see e.g. `S2 0.350 …`, the Pi is sending stick/slider input — switch dashboard to **Manual** and center sliders, or disconnect the gamepad.
+
+### Firmware
+
+**`esp32/sub_rc/`** — primary submarine sketch. See **`esp32/README.md`** for pinout and upload.
+
+---
+
+## Safety
+
+| Firmware | Timeout | Behaviour |
+|----------|---------|-----------|
+| `sub_rc` | 8000 ms | Thruster stops; ballast holds last command |
+
+Reduce max motor speed in firmware (`MOTOR_MAX_SPEED` / `MOTOR_PWM_MAX`).
+
+---
+
+## Troubleshooting
+
+| Problem | Check |
+|---------|-------|
+| No USB serial device | `ls /dev/ttyACM* /dev/ttyUSB*` — ESP32 must be plugged in via USB |
+| No GPIO UART | `ls -l /dev/serial0` — enable Pi UART; run `probe_esp_uart.py` |
+| Sub dashboard shows disconnected | Correct `sub_serial.port`? ESP flashed with `sub_rc` and `USE_PI_UART=1`? |
+| Wrong port in config | Override: `python sub_server.py --serial-port /dev/serial0` |
+| Garbled telemetry | Baud must be 115200 on both sides |
+
+---
+
+## Related docs
+
+- **`esp32/README.md`** — Build, upload, pinout
+- **`docs/PI_ESP32_COMPATIBILITY.md`** — Pre-flight checklist
+- **`config/pins.yaml`** — Authoritative pin map
+- **`docs/GUIDE.md`** §14–16 — Sub system usage

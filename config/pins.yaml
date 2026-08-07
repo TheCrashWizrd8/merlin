@@ -1,0 +1,138 @@
+# ---------------------------------------------------------------------------
+# Pins & channel reference (Pi <-> ESP32 <-> PCA9685 + motor driver)
+#
+# This file is documentation/config only; it should not affect runtime
+# behavior until code starts consuming it.
+# ---------------------------------------------------------------------------
+
+version: 1
+generated_from:
+  - esp32/sub_rc/sub_rc.ino
+  - config/hardware.yaml
+
+# ---------------------------------------------------------------------------
+# Raspberry Pi ↔ ESP32 serial (sub stack)
+# ---------------------------------------------------------------------------
+pi:
+  gpio_uart:
+    device: "/dev/serial0"   # Pi 5: ttyAMA10; pins 14 TX / 15 RX
+    baud_rate: 115200
+    tx_gpio: 14              # header pin 8  → ESP RX
+    rx_gpio: 15              # header pin 10 ← ESP TX
+    setup_script: scripts/setup_pi_uart.sh
+
+# ---------------------------------------------------------------------------
+# ESP32 configuration
+# ---------------------------------------------------------------------------
+esp32:
+  serial:
+    baud_rate: 115200
+    serial_timeout_ms: 8000
+
+  i2c:
+    sda_gpio: 21    # was 29 — GPIO 29/30 are flash SPI on ESP32-S3 (do not use)
+    scl_gpio: 22    # was 30
+
+# ---------------------------------------------------------------------------
+# PCA9685 (servo driver)
+# ---------------------------------------------------------------------------
+pca9685:
+  i2c_address: 0x40
+  pwm_frequency_hz: 50
+  servo_tick_calibration:
+    min_tick: 205
+    centre_tick: 307
+    max_tick: 410
+    tick_us: 4.8828
+    centre_us_approx: 1500
+    min_us_approx: 1000
+    max_us_approx: 2000
+
+  channels:
+    steering_servo:
+      channel: 0
+      role: sub_steering
+    camera_tilt_servo:
+      channel: 1
+      role: sub_camera_tilt
+    aft_steer_y:
+      channel: 0
+      role: sub_aft_steering_y
+    aft_steer_z:
+      channel: 1
+      role: sub_aft_steering_z
+    fin_left:
+      channel: 2
+      role: sub_fore_fin_left
+    fin_right:
+      channel: 3
+      role: sub_fore_fin_right
+
+# ---------------------------------------------------------------------------
+# Motor driver (L298N) — thruster
+# ---------------------------------------------------------------------------
+l298n:
+  motor:
+    in1_gpio: 4
+    in2_gpio: 12    # moved from 5 — GPIO 5 is leak sensor
+    pwm_gpio: 6
+    motor_pwm_freq_hz: 5000
+    motor_pwm_resolution_bits: 8
+
+  thruster:
+    in1_gpio: 4
+    in2_gpio: 12
+    pwm_gpio: 6
+
+# ---------------------------------------------------------------------------
+# Sub vehicle (matches esp32/sub_rc/sub_rc.ino)
+# ---------------------------------------------------------------------------
+sub:
+  pi_uart:
+    esp_rx: 44    # optional GPIO UART (USE_PI_UART=1)
+    esp_tx: 43
+  usb_serial:
+    device: "/dev/ttyACM0"
+    baud_rate: 115200
+
+  ballast:
+    fore:
+      pwm_gpio: 13
+      dir_gpio: 14
+      pot_adc_gpio: 7
+    aft:
+      dir_gpio: 8
+      pwm_gpio: 9
+      pot_adc_gpio: 11
+
+  leaks:
+    gpios: []    # set to [5] when wired; PIN_LEAK in sub_rc.ino
+
+  adc:
+    battery: 1
+    depth: 3
+
+  imu_i2c_addr: 0x68
+  depth_i2c_addr: 0
+
+  axes:
+    aftSteerY: float in [-1,1]
+    aftSteerZ: float in [-1,1]
+    thrusterX: float in [-1,1]
+    finLeft: float in [-1,1]
+    finRight: float in [-1,1]
+
+  serial_line_format: "S2 <aftSteerY> <aftSteerZ> F <finLeft> <finRight> X <thrusterX>\\n"
+  ballast_line_format: "B <fore> <aft>\\n"
+
+  diagnostics:
+    ping: "PING"
+    pins: "PINS"
+    test_servo: "TEST S <ch 0-3> <val -1..1>"
+    test_thruster: "TEST T <val -1..1>"
+    test_ballast_fore: "TEST B fore fill|drain|stop"
+    test_ballast_aft: "TEST B aft fill|drain|stop"
+    cal_ballast: "CAL B <fore|aft> top|bottom|show"
+    test_leaks: "TEST L"
+    test_adc: "TEST A"
+    help: "HELP"

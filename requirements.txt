@@ -15,3 +15,9 @@ opencv-python-headless>=4.8.0
 
 # Web stream (--web mode)
 flask>=3.0.0
+
+# ESP32 serial bridge (--sub mode)
+pyserial>=3.5
+
+# Xbox controller (--sub mode, optional)
+pygame>=2.5.0

@@ -201,12 +201,21 @@ class Display:
             f"Apple: {'YES' if output.apple_detected else 'NO '}",
             f"Conf:  {output.confidence:.3f}",
             f"Size:  {size_f:.3f} (r{size_r:.3f})",
+            f"Prox:  {getattr(output, 'proximity_t', 0.0):.3f}",
+        ]
+        depth_used = getattr(output, "depth_m_used", None)
+        if depth_used is not None:
+            lines.append(f"Depth: {depth_used:.2f}m")
+        note = getattr(output, "approach_note", "") or ""
+        if note:
+            lines.append(f"Note:  {note}")
+        lines.extend([
             f"err_x: {output.error_x:+.4f}",
             f"err_y: {output.error_y:+.4f}",
             f"Steer: {output.steering_servo:+.3f}",
             f"Drive: {output.drive_motor:+.3f}",
             f"Tilt:  {output.camera_tilt_servo:+.3f}",
-        ]
+        ])
         x, y = 8, 18
         for line in lines:
             # Shadow

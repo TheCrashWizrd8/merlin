@@ -26,7 +26,8 @@ Usage
     # Skip printing every frame (only print when apple is detected)
     python inference.py --print-on-detect
 
-    # Serve live stream in browser (no OpenCV window)
+    # Serve live stream in browser (no OpenCV window). With interface: sub in
+    # config/hardware.yaml, also starts ESP telemetry bridge and /sub/ dashboard.
     python inference.py --web
     # Then open http://<pi-ip>:5000
 
@@ -93,16 +94,8 @@ def parse_args() -> argparse.Namespace:
         help="Port for web server (default: 8080; use if 5000 is in use)",
     )
     parser.add_argument(
-        "--serial-verbose", action="store_true", default=False,
-        help="Echo each S D T line sent to hardware (serial) to the console",
-    )
-    parser.add_argument(
-        "--no-serial-verbose", action="store_false", dest="serial_verbose",
-        help="Disable echoing S D T lines to the console",
-    )
-    parser.add_argument(
         "--serial-port", type=str, default=None,
-        help="Override serial port from config/hardware.yaml (e.g. /dev/ttyACM1)",
+        help="Override ESP32 serial port from config/hardware.yaml (e.g. /dev/ttyACM1)",
     )
     parser.add_argument(
         "--control-profile",
@@ -118,6 +111,31 @@ def parse_args() -> argparse.Namespace:
             "In this mode, YOLO frame processing is skipped if the camera is missing, "
             "and control falls back to manual s/d/t."
         ),
+    )
+    parser.add_argument(
+        "--sub",
+        action="store_true",
+        help="Enable sub vehicle dashboard (/sub/), ESP bridge, and Xbox control",
+    )
+    parser.add_argument(
+        "--no-sub",
+        action="store_true",
+        help="Disable sub stack even when config/hardware.yaml has interface: sub",
+    )
+    parser.add_argument(
+        "--no-xbox",
+        action="store_true",
+        help="With --sub, skip Xbox controller polling",
+    )
+    parser.add_argument(
+        "--timing",
+        action="store_true",
+        help="Log capture/YOLO/draw ms and loop FPS every 30 frames",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Skip per-frame ControlOutput table (default when /sub/ or --web is active)",
     )
     return parser.parse_args()
 
@@ -151,6 +169,47 @@ def _print_web_urls(web_host: str, web_port: int) -> None:
         pass
 
 
+def _load_hw_config() -> dict:
+    import yaml
+    path = PROJECT_ROOT / "config" / "hardware.yaml"
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    except OSError:
+        return {}
+
+
+def _sub_stack_enabled(args: argparse.Namespace, hw_config: dict) -> bool:
+    if args.no_sub:
+        return False
+    if args.sub:
+        return True
+    return (hw_config.get("interface") or "").strip().lower() == "sub"
+
+
+def _start_sub_stack(args: argparse.Namespace, serial_port: str | None) -> object | None:
+    """Start ESP bridge, optional Xbox polling, and /sub/ routes. Returns bridge or None."""
+    from src.esp_bridge import get_esp_bridge
+    from src.sub_state import get_sub_state
+
+    bridge = get_esp_bridge(port=serial_port, autostart=False)
+    bridge.start()
+    print(f"[inference] ESP bridge on {bridge.port} (telemetry + S2/B actuators)")
+
+    if not args.no_xbox:
+        try:
+            from src.xbox_controller import connect_xbox, is_xbox_enabled
+            if is_xbox_enabled():
+                connect_xbox()
+                print("[inference] Xbox controller polling started (plug in pad anytime)")
+        except ImportError:
+            print("[WARN] Xbox controller unavailable — install pygame")
+
+    # YOLO inference should drive actuators unless the dashboard overrides mode.
+    get_sub_state().set_control_mode("auto")
+    return bridge
+
+
 def main() -> None:
     args = parse_args()
 
@@ -177,22 +236,29 @@ def main() -> None:
     controller = Controller.from_hardware_config(profile=args.control_profile)
     if args.control_profile != "config":
         print(f"[inference] Control profile override: {args.control_profile}")
-    # With --web we serve in browser so no OpenCV window
-    display    = Display(headless=args.headless or args.web)
 
     from src.hardware import from_config as hardware_from_config
     from src.hardware import StubOutput
+
+    hw_config = _load_hw_config()
+    use_sub = _sub_stack_enabled(args, hw_config)
+    serve_http = args.web or use_sub
+    # Browser/sub dashboard mode: skip OpenCV window (imshow over VNC/SSH kills FPS).
+    display = Display(headless=args.headless or serve_http)
+    quiet_terminal = args.quiet or serve_http
+    esp_bridge = None
+
     hardware: object
     hardware_init_error: Exception | None = None
     try:
-        hardware = hardware_from_config(serial_port_override=args.serial_port)
-        print(f"[inference] Hardware: {type(hardware).__name__} (steering, drive, camera tilt)")
-        if args.serial_port:
-            print(f"[inference] Serial port override: {args.serial_port}")
+        hardware = hardware_from_config()
+        label = type(hardware).__name__
+        if use_sub:
+            print(f"[inference] Hardware: {label} → sub_state (ESP bridge owns serial)")
+        else:
+            print(f"[inference] Hardware: {label}")
     except Exception as exc:
         if args.tolerate_missing_devices:
-            # Non-invasive fallback: keep server and manual control alive,
-            # but don't drive real hardware.
             hardware_init_error = exc
             hardware = StubOutput({})
             print(f"[WARN] Hardware init failed; falling back to stub: {exc}")
@@ -200,24 +266,41 @@ def main() -> None:
             print(f"[ERROR] Hardware init failed: {exc}")
             sys.exit(1)
 
-    if args.web:
+    if serve_http:
         try:
-            from src.web_stream import _get_app, set_latest_frame, run_server
+            from src.web_stream import _get_app, set_latest_frame, run_server, register_sub_dashboard
         except ImportError as e:
             if "flask" in str(e).lower():
-                print("[ERROR] Flask is required for --web. Install with: pip install flask")
+                print("[ERROR] Flask is required for --web/--sub. Install with: pip install flask")
             else:
                 print(f"[ERROR] {e}")
             sys.exit(1)
-        _get_app()  # ensure app is created
-        server_thread = threading.Thread(
-            target=run_server,
-            kwargs={"host": args.web_host, "port": args.web_port},
-            daemon=True,
-        )
-        server_thread.start()
-        time.sleep(0.5)  # give server time to bind
-        _print_web_urls(args.web_host, args.web_port)
+        _get_app()
+        if use_sub:
+            register_sub_dashboard(start_services=False)
+            esp_bridge = _start_sub_stack(args, args.serial_port)
+            print(f"[inference] Sub dashboard: http://localhost:{args.web_port}/sub/")
+        if args.web:
+            server_thread = threading.Thread(
+                target=run_server,
+                kwargs={"host": args.web_host, "port": args.web_port},
+                daemon=True,
+            )
+            server_thread.start()
+            time.sleep(0.5)
+            _print_web_urls(args.web_host, args.web_port)
+        elif use_sub:
+            server_thread = threading.Thread(
+                target=run_server,
+                kwargs={"host": args.web_host, "port": args.web_port},
+                daemon=True,
+            )
+            server_thread.start()
+            time.sleep(0.5)
+            print(f"[inference] Sub server: http://{args.web_host}:{args.web_port}/sub/")
+    elif use_sub:
+        # Headless YOLO + ESP telemetry/actuators (no browser UI).
+        esp_bridge = _start_sub_stack(args, args.serial_port)
 
     cam = None
     manual_only = False
@@ -275,7 +358,7 @@ def main() -> None:
                     if now - last_hw_retry >= hw_retry_interval_s:
                         last_hw_retry = now
                         try:
-                            hardware = hardware_from_config(serial_port_override=args.serial_port)
+                            hardware = hardware_from_config()
                             hardware_init_error = None
                             print(f"[inference] Hardware reconnected: {type(hardware).__name__}")
                         except Exception as exc:
@@ -305,14 +388,6 @@ def main() -> None:
                         print(f"[WARN] Hardware apply failed; using stub: {exc}")
                     else:
                         raise
-                if args.serial_verbose:
-                    serial_line = (
-                        f"S {output.steering_servo:.3f} "
-                        f"D {output.drive_motor:.3f} "
-                        f"T {output.camera_tilt_servo:.3f}\n"
-                    )
-                    print(serial_line, end="", flush=True)
-
                 time.sleep(0.1)
         else:
             while running:
@@ -322,13 +397,15 @@ def main() -> None:
                     if now - last_hw_retry >= hw_retry_interval_s:
                         last_hw_retry = now
                         try:
-                            hardware = hardware_from_config(serial_port_override=args.serial_port)
+                            hardware = hardware_from_config()
                             hardware_init_error = None
                             print(f"[inference] Hardware reconnected: {type(hardware).__name__}")
                         except Exception as exc:
                             print(f"[inference] Still waiting for hardware: {exc}")
 
+                t_loop = time.monotonic()
                 ok, frame = cam.read()
+                t_cap = time.monotonic()
                 if not ok or frame is None:
                     print("[WARN] Failed to read frame — retrying …")
                     time.sleep(0.05)
@@ -338,6 +415,7 @@ def main() -> None:
 
                 # 1. Detect
                 detections = detector.detect(frame)
+                t_yolo = time.monotonic()
 
                 # 2. Track
                 track = tracker.update(
@@ -346,9 +424,13 @@ def main() -> None:
                     apple_label=args.apple_label,
                 )
 
-                # 3. Control
-                output = controller.compute(track)
-                if args.web:
+                # 3. Control (vision + live ESP telemetry when sub stack is active)
+                telemetry = None
+                if use_sub:
+                    from src.telemetry_context import TelemetryContext
+                    telemetry = TelemetryContext.from_sub_state()
+                output = controller.compute(track, telemetry=telemetry)
+                if args.web or use_sub:
                     from dataclasses import replace
                     from src.control_source import get_current_sdt
                     sdt = get_current_sdt(
@@ -361,7 +443,7 @@ def main() -> None:
                         camera_tilt_servo=sdt.t,
                     )
 
-                # 3b. Send to hardware (steering servo, drive motor, camera tilt servo)
+                # 3b. Send to hardware / sub bridge (SubBridgeOutput updates sub_state)
                 try:
                     hardware.apply(output)
                 except Exception as exc:
@@ -373,35 +455,60 @@ def main() -> None:
                         print(f"[WARN] Hardware apply failed; using stub: {exc}")
                     else:
                         raise
-                serial_line = (
-                    f"S {output.steering_servo:.3f} "
-                    f"D {output.drive_motor:.3f} "
-                    f"T {output.camera_tilt_servo:.3f}\n"
-                )
+                if use_sub and frame_count % 30 == 0:
+                    esp = "ESP OK" if telemetry and telemetry.fresh else "ESP --"
+                    bat_s = (
+                        f"{telemetry.battery_v:.1f}V"
+                        if telemetry and telemetry.battery_v is not None
+                        else "--"
+                    )
+                    dep_s = (
+                        f"{telemetry.depth_m:.2f}m"
+                        if telemetry and telemetry.depth_m is not None
+                        else "--"
+                    )
+                    print(
+                        f"[telemetry] {esp}  battery={bat_s}  depth={dep_s}  "
+                        f"prox={output.proximity_t:.2f}  drive={output.drive_motor:+.2f}"
+                        + (f"  ({output.approach_note})" if output.approach_note else "")
+                    )
 
                 # 4. Print
-                if not args.print_on_detect or output.apple_detected:
-                    # Clear previous block only (table = 13 lines; +1 for serial when verbose)
+                if not quiet_terminal and (
+                    not args.print_on_detect or output.apple_detected
+                ):
                     if frame_count > 1:
-                        n_up = 14 if args.serial_verbose else 13
-                        sys.stdout.write(f"\033[{n_up}A\033[J")
+                        sys.stdout.write("\033[13A\033[J")
                     print(output.pretty())
-                    if args.serial_verbose:
-                        print(serial_line, end="", flush=True)
                     sys.stdout.flush()
 
                 # 5. Display
                 annotated = display.draw(frame, output)
-                if args.web:
+                t_draw = time.monotonic()
+                if serve_http:
                     set_latest_frame(annotated)
                 if not display.show(annotated):
                     break   # user pressed q
+
+                if args.timing and frame_count % 30 == 0:
+                    total_ms = (t_draw - t_loop) * 1000
+                    cap_ms = (t_cap - t_loop) * 1000
+                    yolo_ms = (t_yolo - t_cap) * 1000
+                    draw_ms = (t_draw - t_yolo) * 1000
+                    loop_fps = display.fps
+                    print(
+                        f"[perf] cap={cap_ms:.0f}ms yolo={yolo_ms:.0f}ms "
+                        f"ctrl+draw={draw_ms:.0f}ms total={total_ms:.0f}ms "
+                        f"hud_fps={loop_fps:.1f}"
+                    )
 
     finally:
         if cam is not None:
             cam.release()
         display.close()
         hardware.close()
+        if esp_bridge is not None:
+            esp_bridge.stop()
 
         elapsed = time.monotonic() - loop_start
         if manual_only:

@@ -5,13 +5,13 @@
 #   bash esp32/upload_from_pi.sh scan
 #   bash esp32/upload_from_pi.sh [BOARD] [PORT]
 #   bash esp32/upload_from_pi.sh [BOARD] [PORT] [SKETCH]
-#   bash esp32/upload_from_pi.sh --sketch apple_car_hw_test
+#   bash esp32/upload_from_pi.sh --sketch sub_hw_test
 # Prerequisites: Arduino CLI and ESP32 board support installed (see esp32/README.md).
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DEFAULT_SKETCH="apple_car_rc"
+DEFAULT_SKETCH="sub_rc"
 SKETCH_NAME="${DEFAULT_SKETCH}"
 
 if ! command -v arduino-cli &>/dev/null; then
@@ -54,8 +54,8 @@ fi
 if [ -z "${SKETCH_NAME}" ]; then
   echo "Missing sketch name."
   echo "Examples:"
-  echo "  bash esp32/upload_from_pi.sh --sketch apple_car_hw_test"
-  echo "  bash esp32/upload_from_pi.sh esp32:esp32:esp32s3 /dev/ttyACM0 apple_car_rc"
+  echo "  bash esp32/upload_from_pi.sh --sketch sub_hw_test"
+  echo "  bash esp32/upload_from_pi.sh esp32:esp32:esp32s3 /dev/ttyACM0 sub_rc"
   exit 1
 fi
 
@@ -63,13 +63,13 @@ SKETCH_PATH="esp32/${SKETCH_NAME}"
 if [ ! -d "${SKETCH_PATH}" ]; then
   echo "Sketch folder not found: ${SKETCH_PATH}"
   echo "Available:"
-  ls -1 esp32 | awk '/^apple_car_/{print "  " $1}'
+  ls -1d esp32/*/ 2>/dev/null | sed 's|esp32/||;s|/$||' | awk '{print "  " $1}'
   exit 1
 fi
 
 echo "Building sketch: ${SKETCH_PATH} (clean build)"
 BUILD_FLAGS=()
-# ESP32-S3: ensure Serial is routed to USB CDC on boot so serial_talk.py works.
+# ESP32-S3: ensure Serial is routed to USB CDC on boot.
 if [[ "${BOARD}" == esp32:esp32:esp32s3* ]]; then
   BUILD_FLAGS+=(--build-property 'build.extra_flags=-DARDUINO_USB_MODE=1 -DARDUINO_USB_CDC_ON_BOOT=1 -DESP32=1')
 fi

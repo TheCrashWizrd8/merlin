@@ -1,11 +1,9 @@
 """
 web_stream.py
 -------------
-Serves the live camera feed and S/D/T control UI over HTTP.
-Run inference with --web to host; open http://<pi-ip>:8080 in a browser.
-
-Control source abstraction (control_source.py) allows manual web control now
-and RC controller input later.
+Serves the live camera MJPEG feed over HTTP.
+Run inference with --web to host; open http://<pi-ip>:8080/video_feed in a browser.
+Sub dashboard routes are registered separately via register_sub_dashboard().
 """
 
 from __future__ import annotations
@@ -44,11 +42,9 @@ def _get_placeholder_jpeg() -> bytes:
 def _get_app():
     global _app
     if _app is None:
-        from flask import Flask, Response, request, jsonify
-        from src.control_source import set_mode, get_mode, set_manual, get_manual
+        from flask import Flask, Response
 
         _app = Flask(__name__)
-        _app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # 64KB for JSON
 
         def set_latest_frame_bgr(frame_bgr: np.ndarray) -> None:
             """Update the frame served to browsers. Call from inference loop."""
@@ -74,26 +70,7 @@ def _get_app():
                         b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n\r\n"
                         + frame_bytes + b"\r\n"
                     )
-                time.sleep(0.1)
-
-        @_app.route("/api/control", methods=["GET"])
-        def api_control_get():
-            m = get_manual()
-            return jsonify({"mode": get_mode(), "s": m.s, "d": m.d, "t": m.t})
-
-        @_app.route("/api/control", methods=["POST"])
-        def api_control_post():
-            data = request.get_json(silent=True) or {}
-            if "mode" in data:
-                set_mode(str(data["mode"]))
-            m = get_manual()
-            if "s" in data or "d" in data or "t" in data:
-                s = float(data.get("s", m.s))
-                d = float(data.get("d", m.d))
-                t = float(data.get("t", m.t))
-                set_manual(s, d, t)
-                m = get_manual()
-            return jsonify({"mode": get_mode(), "s": m.s, "d": m.d, "t": m.t})
+                time.sleep(0.066)
 
         @_app.route("/")
         def index():
@@ -103,130 +80,19 @@ def _get_app():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Apple Car — Control</title>
+  <title>Apple RC Sub — Live</title>
   <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: #1a1a1a;
-      color: #e0e0e0;
-      font-family: system-ui, -apple-system, sans-serif;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 1rem;
-    }
-    h1 { margin: 0 0 0.5rem; font-size: 1.25rem; font-weight: 600; }
-    .sub { color: #888; font-size: 0.875rem; margin-bottom: 1rem; }
-    .layout { display: flex; flex-wrap: wrap; gap: 1.5rem; justify-content: center; align-items: flex-start; max-width: 1200px; }
-    .stream-wrap {
-      background: #000;
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-      flex: 0 1 640px;
-    }
-    .stream-wrap img { display: block; width: 100%; height: auto; }
-    .controls {
-      background: #252525;
-      border-radius: 8px;
-      padding: 1.25rem;
-      min-width: 280px;
-    }
-    .controls h2 { margin: 0 0 1rem; font-size: 1rem; font-weight: 600; }
-    .mode-row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-    .mode-btn {
-      flex: 1;
-      padding: 0.5rem;
-      border: 1px solid #444;
-      border-radius: 6px;
-      background: #333;
-      color: #e0e0e0;
-      cursor: pointer;
-      font-size: 0.9rem;
-    }
-    .mode-btn.active { background: #2d6a4f; border-color: #40916c; }
-    .mode-btn:hover { background: #404040; }
-    .ctrl-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
-    .ctrl-row label { width: 2rem; font-size: 0.9rem; font-weight: 500; }
-    .ctrl-row input[type="range"] { flex: 1; accent-color: #40916c; }
-    .ctrl-row .val { min-width: 3rem; font-size: 0.85rem; color: #aaa; }
+    body { margin: 0; background: #1a1a1a; color: #e0e0e0;
+           font-family: system-ui, sans-serif; text-align: center; padding: 1rem; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    p { color: #888; font-size: 0.875rem; margin-bottom: 1rem; }
+    img { max-width: 100%; border-radius: 8px; }
   </style>
 </head>
 <body>
-  <h1>Apple Car</h1>
-  <p class="sub">Camera view and S/D/T control</p>
-  <div class="layout">
-    <div class="stream-wrap">
-      <img src="/video_feed" alt="Live stream" />
-    </div>
-    <div class="controls">
-      <h2>Control</h2>
-      <div class="mode-row">
-        <button class="mode-btn active" data-mode="auto">Auto</button>
-        <button class="mode-btn" data-mode="manual">Manual</button>
-      </div>
-      <div class="ctrl-row">
-        <label>S</label>
-        <input type="range" id="s" min="-1" max="1" step="0.05" value="0">
-        <span class="val" id="sVal">0.00</span>
-      </div>
-      <div class="ctrl-row">
-        <label>D</label>
-        <input type="range" id="d" min="-1" max="1" step="0.05" value="0">
-        <span class="val" id="dVal">0.00</span>
-      </div>
-      <div class="ctrl-row">
-        <label>T</label>
-        <input type="range" id="t" min="-1" max="1" step="0.05" value="0">
-        <span class="val" id="tVal">0.00</span>
-      </div>
-    </div>
-  </div>
-  <script>
-    const sEl = document.getElementById('s');
-    const dEl = document.getElementById('d');
-    const tEl = document.getElementById('t');
-    const sVal = document.getElementById('sVal');
-    const dVal = document.getElementById('dVal');
-    const tVal = document.getElementById('tVal');
-    const btns = document.querySelectorAll('.mode-btn');
-
-    function updateVal(el, valEl, v) {
-      const n = Math.round(parseFloat(v) * 100) / 100;
-      valEl.textContent = n.toFixed(2);
-    }
-    sEl.addEventListener('input', () => { updateVal(sEl, sVal, sEl.value); send(); });
-    dEl.addEventListener('input', () => { updateVal(dEl, dVal, dEl.value); send(); });
-    tEl.addEventListener('input', () => { updateVal(tEl, tVal, tEl.value); send(); });
-
-    function send() {
-      fetch('/api/control', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'manual', s: +sEl.value, d: +dEl.value, t: +tEl.value })
-      });
-    }
-
-    btns.forEach(b => {
-      b.addEventListener('click', () => {
-        const mode = b.dataset.mode;
-        btns.forEach(x => x.classList.toggle('active', x === b));
-        fetch('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) })
-          .then(r => r.json()).then(d => {
-            sEl.value = d.s; dEl.value = d.d; tEl.value = d.t;
-            updateVal(sEl, sVal, d.s); updateVal(dEl, dVal, d.d); updateVal(tEl, tVal, d.t);
-          });
-      });
-    });
-
-    fetch('/api/control').then(r => r.json()).then(d => {
-      btns.forEach(b => b.classList.toggle('active', b.dataset.mode === d.mode));
-      sEl.value = d.s; dEl.value = d.d; tEl.value = d.t;
-      updateVal(sEl, sVal, d.s); updateVal(dEl, dVal, d.d); updateVal(tEl, tVal, d.t);
-    });
-  </script>
+  <h1>Apple RC Sub</h1>
+  <p>Live camera feed. Sub dashboard: <a href="/sub/" style="color:#40916c">/sub/</a></p>
+  <img src="/video_feed" alt="Live stream" />
 </body>
 </html>
 """
@@ -236,6 +102,27 @@ def _get_app():
             return Response(
                 generate_feed(),
                 mimetype="multipart/x-mixed-replace; boundary=frame",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+
+        @_app.route("/snapshot")
+        def snapshot():
+            with _frame_lock:
+                frame_bytes = _frame_store["bytes"]
+            if not frame_bytes:
+                frame_bytes = _get_placeholder_jpeg()
+            return Response(
+                frame_bytes,
+                mimetype="image/jpeg",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
             )
 
         _app.set_latest_frame = set_latest_frame_bgr
@@ -247,6 +134,13 @@ def set_latest_frame(frame_bgr: np.ndarray) -> None:
     app = _get_app()
     if hasattr(app, "set_latest_frame"):
         app.set_latest_frame(frame_bgr)
+
+
+def register_sub_dashboard(start_services: bool = True) -> None:
+    """Register /sub/* routes on the Flask app (used by sub_server and inference --sub)."""
+    from src.sub_web import register_sub_dashboard as _register
+    app = _get_app()
+    _register(app, start_services=start_services)
 
 
 def run_server(host: str = "0.0.0.0", port: int = 5000) -> None:

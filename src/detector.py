@@ -83,7 +83,12 @@ class Detector:
         print(
             f"[Detector] Loaded {self.architecture} "
             f"({'custom weights: ' + model_source if weights_value else 'pretrained backbone'})"
+            f"  imgsz={self.img_size}"
         )
+        # Warm up torch/YOLO so the first live frame is not an outlier.
+        warmup = np.zeros((480, 640, 3), dtype=np.uint8)
+        self._model(warmup, conf=self.confidence, iou=self.iou, imgsz=self.img_size, verbose=False)
+        print("[Detector] Warmup complete")
 
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """
@@ -106,6 +111,7 @@ class Detector:
             iou=self.iou,
             imgsz=self.img_size,
             verbose=False,
+            max_det=10,
         )
 
         detections: List[Detection] = []

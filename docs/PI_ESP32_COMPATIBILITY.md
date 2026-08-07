@@ -1,99 +1,134 @@
-# Pi ↔ ESP32 compatibility checklist (first test)
+# Pi ↔ ESP32 compatibility checklist
 
 Use this to confirm the Raspberry Pi and ESP32 firmware match before your first run.
 
 ---
 
-## 1. Serial protocol
+## Sub vehicle (GPIO UART or USB)
 
-| Item | Pi | ESP32 | Match |
-|------|----|-------|-------|
-| **Format** | `S <steer> D <drive> T <tilt>\n` | `sscanf(line, "S %f D %f T %f", ...)` | ✅ Same |
-| **Order** | S, D, T | steer, drive, tilt | ✅ Same |
-| **Values** | -1.0 to +1.0 (float, 3 decimals) | -1.0 to +1.0 (clamped) | ✅ Same |
-| **Line ending** | `\n` | Accepts `\n` or `\r` | ✅ Compatible |
-| **Baud rate** | 115200 (`config/hardware.yaml`) | 115200 (`SERIAL_BAUD`) | ✅ Same |
+Used by `sub_server.py` and `inference.py` (when `interface: sub`) → `src/esp_bridge.py`.  
+**Single serial owner:** `SubBridgeOutput` → `sub_state` → `esp_bridge` (no duplicate S/D/T client).
 
-**Pi sends (example):** `S 0.120 D 0.450 T -0.050\n`  
-**ESP32 parses:** same string; drives steering servo, motor, tilt servo.
+### Wiring
+
+| Pi | ESP32 (`sub_rc`, `USE_PI_UART=1`) |
+|----|-----------------------------------|
+| GPIO14 TX (pin 8) | RX (GPIO 44) |
+| GPIO15 RX (pin 10) | TX (GPIO 43) |
+| GND | GND |
+
+### Protocol — Pi → ESP
+
+| Item | Pi (`esp_bridge.py`) | ESP32 (`sub_rc.ino`) | Match |
+|------|----------------------|----------------------|-------|
+| **Actuators** | `S2 <y> <z> F <fl> <fr> X <thr>\n` | `sscanf(..., "S2 %f %f F %f %f X %f", ...)` | ✅ |
+| **Ballast** | `B <fore> <aft>\n` | Parsed separately | ✅ |
+| **Diagnostics** | `PING`, `PINS`, `TEST …`, `CAL B …` | Handled in command parser | ✅ |
+| **Baud rate** | 115200 | 115200 | ✅ |
+| **Port** | `/dev/serial0` or `/dev/ttyACM0` | PiLink UART or USB CDC | ✅ |
+| **Send rate** | ~20 Hz (actuators + ballast) | Parsed each line | ✅ |
+
+### Protocol — ESP → Pi
+
+| Item | ESP32 | Pi (`esp_bridge.py`) | Match |
+|------|-------|----------------------|-------|
+| **Telemetry prefix** | `TEL …` | `parse_telemetry_line()` | ✅ |
+| **Battery** | `TEL battery 12.45` | Parsed | ✅ |
+| **Gyro** | `TEL gyro p r y` | Parsed | ✅ |
+| **Depth** | `TEL depth 3.45` | Parsed | ✅ |
+| **Leaks** | `TEL leak 0 0 1 0` | Parsed | ✅ |
+| **Ballast** | `TEL ballast fore …` | Parsed | ✅ |
+| **Heartbeat** | `TEL heartbeat N` | Parsed | ✅ |
+| **PONG** | `OK PONG` | `parse_diagnostic_line()` | ✅ |
+
+### Pi config
+
+```yaml
+interface: sub
+sub_serial:
+  port: "/dev/serial0"
+  baud_rate: 115200
+```
+
+### Quick test
+
+```bash
+# 1. Probe UART (listen + PING)
+python scripts/probe_esp_uart.py
+
+# 2. Start sub dashboard
+python sub_server.py
+
+# 3. Open http://<pi-ip>:8080/sub/
+#    — ESP connected flag should go green
+#    — Telemetry panels should update (~5 Hz)
+#    — POST PING via serial monitor → OK PONG
+```
+
+Or run the built-in pin checklist from the dashboard (**Run all tests**) or:
+
+```bash
+curl -X POST http://localhost:8080/sub/api/test/run
+```
 
 ---
 
-## 2. Value meaning (both sides)
+## Value semantics
 
 | Signal | -1.0 | 0.0 | +1.0 |
 |--------|------|-----|------|
-| **S (steer)** | Full left | Straight | Full right |
-| **D (drive)** | Full reverse | Stop | Full forward |
-| **T (tilt)** | Full down | Level | Full up |
+| **Steer / aftSteerY** | Full left | Straight | Full right |
+| **Drive / thrusterX** | Full reverse | Stop | Full forward |
+| **Tilt / aftSteerZ** | Full down | Level | Full up |
+| **Ballast** | Drain | Hold/stop | Fill |
 
-Pi `ControlOutput` and ESP32 behaviour use this convention consistently.
+### Control modes (sub dashboard)
 
----
+| Mode | Default? | Pi sends |
+|------|----------|----------|
+| `manual` | **Yes** | Dashboard slider values (`S2 …`, `B …`) |
+| `xbox` | No | Live gamepad mapping when connected; falls back to manual sliders if pad offline |
+| `auto` | During inference | `sub_motion.plan_sub_motion()` → `S2 …`, `B …` (fins, steer, thruster, ballast) |
 
-## 3. Pi config (for serial)
+Inference sets **`auto`** on startup. See **`docs/GUIDE.md`** §15 for layered motion detail.
 
-In **`config/hardware.yaml`**:
-
-```yaml
-interface: serial
-
-serial:
-  port: "/dev/ttyACM0"   # or /dev/ttyUSB0 — use: bash esp32/upload_from_pi.sh scan
-  baud_rate: 115200
-  verbose: true          # echo each S D T line to console (default on)
-```
-
-- **Port:** Must be the ESP32’s USB serial port (see `esp32/README.md`).
-- **Baud:** Must be 115200 (same as ESP32).
+Dashboard slider/mode state persists in browser **`sessionStorage`** across normal reloads. Server-side default is **`manual`** (`src/sub_state.py`).
 
 ---
 
-## 4. ESP32 hardware (this firmware)
+## Sub hardware (sub_rc firmware)
 
-- **Steering:** GPIO 4 → Hitec HS-646WP (1000–2000 µs @ 50 Hz).
-- **Tilt:** GPIO 5 → Hitec HS-646WP (1000–2000 µs @ 50 Hz).
-- **Motor:** GPIO 6 = IN1, 7 = IN2, 8 = Enable PWM → L298N → DC motor.
+| Component | Connection |
+|-----------|------------|
+| Aft steer Y/Z, fins | PCA9685 ch 0–3 (I2C GPIO 21/22) when `ENABLE_PCA9685=1` |
+| Thruster | L298N — GPIO 4 (IN1), 12 (IN2), 6 (PWM) |
+| Fore ballast | GPIO 13 PWM, 14 DIR, 7 pot ADC |
+| Aft ballast | GPIO 9 PWM, 8 DIR, 11 pot ADC |
+| Leak | GPIO 5 (active HIGH) |
+| Battery | ADC GPIO 1 |
+| Depth | ADC GPIO 3 |
 
-Library: **ESP32Servo**. API: **ESP32 Arduino 3.x** (`ledcAttach`/`ledcWrite` by pin).
-
----
-
-## 5. Pi flow (inference → serial)
-
-1. Camera frame → detector → tracker → controller → **ControlOutput**.
-2. **hardware.apply(output)** sends one line per frame: `S ... D ... T ...\n`.
-3. With `serial.verbose: true`, that line is also printed to the console.
-
-So every frame, the Pi sends one line; the ESP32 parses it and updates servos and motor. If the Pi stops sending, the ESP32 stops the motor after 500 ms (safety timeout).
+Full map: **`config/pins.yaml`**.
 
 ---
 
-## 6. Quick test (no car movement)
-
-1. **Pi:** Set `interface: serial`, correct `serial.port`, `verbose: true`. Run:
-   ```bash
-   cd ~/yolo-project && source .venv/bin/activate
-   python inference.py --headless
-   ```
-2. **Console:** You should see lines like `S 0.000 D 0.000 T 0.000` (or non-zero when an apple is detected). That is what the Pi is sending.
-3. **ESP32:** If connected over USB to the Pi, it receives those lines and drives servos/motor. With no apple, S/D/T are 0 → steering centre, motor stop, tilt level.
-
----
-
-## 7. Common mismatches
+## Common mismatches
 
 | Problem | Check |
-|--------|--------|
-| ESP32 does nothing | Pi `interface: serial`? Correct `serial.port`? ESP32 on that port? (`bash esp32/upload_from_pi.sh scan`) |
-| Wrong direction (e.g. steer left/right flipped) | On ESP32 set `INVERT_STEER 1` (or `INVERT_DRIVE` / `INVERT_TILT`) in the .ino and reflash. |
-| Motor runs when it shouldn’t | ESP32 safety timeout (500 ms) only stops motor; servos hold last position. Pi sends 0,0,0 when no apple. |
-| No serial output on Pi | `serial.verbose: true` in `config/hardware.yaml`. |
+|---------|-------|
+| Sub dashboard disconnected | GPIO UART wired? Flash `sub_rc` with `USE_PI_UART=1`? Port `/dev/serial0`? |
+| Upload works but sub UART silent | Upload uses USB; runtime uses GPIO UART — check pins 8/10 wiring |
+| Wrong steer direction | Set `INVERT_STEER` / inversion flags in `.ino` and reflash |
+| Motor runs when it shouldn't | Serial timeout (8 s) stops thruster; verify Pi is sending |
+| No telemetry | Run `probe_esp_uart.py`; check ESP is powered and flashed with `sub_rc` |
+| Rogue actuator commands on bench | Default mode is `manual`; center dashboard sliders; disconnect gamepad or set mode Manual |
+| Non-zero `S2` in serial monitor | Pi → ESP TX lines — not ESP sensor data; check control mode and sliders |
+| PCA9685 servos dead | `ENABLE_PCA9685=0` by default — set to `1` after I2C wiring on 21/22 |
 
 ---
 
-## 8. Summary
+## Summary
 
-- **Protocol:** Pi and ESP32 use the same text format and value range; no code change needed for compatibility.
-- **Config:** Pi uses `config/hardware.yaml` (interface, port, baud, verbose); ESP32 uses `SERIAL_BAUD` and pin #defines.
-- **First test:** Run inference with `interface: serial` and `verbose: true`; confirm S D T lines in the console and ESP32 reacting (servos/motor) when the camera sees an apple.
+- **First sub test:** `probe_esp_uart.py` → `sub_server.py` → open `/sub/` → run pin checklist.
+- **First YOLO test:** `inference.py --web --timing` with trained `weights/best.pt` (when `interface: sub`).
+- **YOLO + sub:** layered auto motion — fins, aft steer, thruster, ballast height (`docs/GUIDE.md` §15).

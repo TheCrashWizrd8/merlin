@@ -29,6 +29,7 @@ from typing import Optional
 
 import yaml
 
+from src.telemetry_context import TelemetryContext
 from src.tracker import TrackResult
 
 
@@ -98,6 +99,10 @@ class ControlOutput:
     size_ratio_raw: float = 0.0
     size_ratio_filtered: float = 0.0
     chosen_label: str = ""
+    # Fused approach (vision + telemetry); 0 = far, 1 = close
+    proximity_t: float = 0.0
+    depth_m_used: float | None = None
+    approach_note: str = ""
     # Timing
     timestamp: float = 0.0
 
@@ -212,6 +217,12 @@ class Controller:
         size_curve: str = "sqrt",
         size_drive_far: float = 1.0,
         size_drive_close: float = 0.0,
+        use_telemetry: bool = True,
+        stop_on_leak: bool = True,
+        min_battery_v: float = 10.5,
+        low_battery_drive_scale: float = 0.45,
+        max_error_x_for_drive: float = 0.40,
+        max_error_y_for_drive: float = 0.45,
     ) -> None:
         self.gain_steer = gain_steer
         self.gain_tilt = gain_tilt
@@ -236,6 +247,12 @@ class Controller:
         self.size_curve = sc
         self.size_drive_far = float(size_drive_far)
         self.size_drive_close = float(size_drive_close)
+        self.use_telemetry = bool(use_telemetry)
+        self.stop_on_leak = bool(stop_on_leak)
+        self.min_battery_v = float(min_battery_v)
+        self.low_battery_drive_scale = max(0.0, min(1.0, float(low_battery_drive_scale)))
+        self.max_error_x_for_drive = max(0.05, float(max_error_x_for_drive))
+        self.max_error_y_for_drive = max(0.05, float(max_error_y_for_drive))
 
         # Internal state for smoothing, derivative damping and persistence.
         self._filtered_ex = 0.0
@@ -278,6 +295,15 @@ class Controller:
             "size_drive_far": float(cfg.get("size_drive_far", 1.0)),
             "size_drive_close": float(cfg.get("size_drive_close", 0.0)),
         }
+        approach = cfg.get("approach") or {}
+        params.update({
+            "use_telemetry": bool(approach.get("use_telemetry", True)),
+            "stop_on_leak": bool(approach.get("stop_on_leak", True)),
+            "min_battery_v": float(approach.get("min_battery_v", 10.5)),
+            "low_battery_drive_scale": float(approach.get("low_battery_drive_scale", 0.45)),
+            "max_error_x_for_drive": float(approach.get("max_error_x_for_drive", 0.40)),
+            "max_error_y_for_drive": float(approach.get("max_error_y_for_drive", 0.45)),
+        })
         profile = (profile or "config").strip().lower()
         if profile != "config":
             if profile not in CONTROL_PROFILES:
@@ -328,7 +354,62 @@ class Controller:
         sign = 1.0 if value > 0 else -1.0
         return sign * max(abs(value), minimum)
 
-    def compute(self, track: TrackResult) -> ControlOutput:
+    def _alignment_drive_scale(self, ex: float, ey: float) -> float:
+        """Reduce forward thrust while the apple is off-centre (steer first, then approach)."""
+        sx = min(1.0, abs(ex) / self.max_error_x_for_drive)
+        sy = min(1.0, abs(ey) / self.max_error_y_for_drive)
+        misalign = max(sx, sy)
+        # 1.0 when centred → max_drive_when_turning when badly misaligned
+        return 1.0 - misalign * (1.0 - self.max_drive_when_turning)
+
+    def _compute_drive(
+        self,
+        ex: float,
+        ey: float,
+        size_filt: float,
+        frame_area: int,
+        bbox_area: int,
+        telemetry: TelemetryContext | None,
+    ) -> tuple[float, float, str]:
+        """
+        Forward drive from camera (bbox size + centre alignment).
+        Telemetry only affects safety (leak stop, low-battery scale).
+
+        Returns (drive, proximity_t, approach_note).
+        """
+        note_parts: list[str] = []
+
+        if self.use_size_for_drive and frame_area > 0 and bbox_area > 0:
+            proximity_t = self._size_ratio_to_drive_t(size_filt)
+            far = max(-1.0, min(1.0, self.size_drive_far))
+            close = max(-1.0, min(1.0, self.size_drive_close))
+            drive = far - proximity_t * (far - close)
+        else:
+            proximity_t = 0.0
+            drive = self.min_drive_command
+
+        drive *= self._alignment_drive_scale(ex, ey)
+
+        tel = telemetry
+        if tel and self.use_telemetry and tel.fresh:
+            if self.stop_on_leak and tel.leak_triggered:
+                return 0.0, proximity_t, "leak"
+
+            if (
+                tel.battery_v is not None
+                and tel.battery_v < self.min_battery_v
+            ):
+                drive *= self.low_battery_drive_scale
+                note_parts.append("low_batt")
+
+        drive = self._clamp(drive)
+        return drive, proximity_t, ",".join(note_parts)
+
+    def compute(
+        self,
+        track: TrackResult,
+        telemetry: TelemetryContext | None = None,
+    ) -> ControlOutput:
         """
         Compute actuator commands from a TrackResult.
 
@@ -418,17 +499,15 @@ class Controller:
                     )
                 size_filt = self._filtered_size_ratio
 
-        # Drive: size-based — farther (small bbox) → more drive; closer (large) → less
-        # Uses full [-1,1] span via size_drive_far / size_drive_close (not min/max_drive_command).
-        if self.use_size_for_drive and active.frame_area > 0 and active.bbox_area > 0:
-            t = self._size_ratio_to_drive_t(size_filt)
-            far = max(-1.0, min(1.0, self.size_drive_far))
-            close = max(-1.0, min(1.0, self.size_drive_close))
-            # t=0 far → far; t=1 close → close
-            drive = far - t * (far - close)
-            drive = self._clamp(drive)
-        else:
-            drive = self._clamp(self.min_drive_command)
+        # Drive: camera bbox size + centre alignment; telemetry = safety only
+        drive, proximity_t, approach_note = self._compute_drive(
+            ex, ey, size_filt, active.frame_area, active.bbox_area, telemetry
+        )
+        depth_display = (
+            telemetry.depth_m
+            if telemetry and telemetry.depth_valid
+            else None
+        )
 
         return ControlOutput(
             steering_servo=steering,
@@ -451,5 +530,8 @@ class Controller:
             size_ratio_raw=size_raw,
             size_ratio_filtered=size_filt,
             chosen_label=active.chosen_label,
+            proximity_t=proximity_t,
+            depth_m_used=depth_display,
+            approach_note=approach_note,
             timestamp=time.time(),
         )

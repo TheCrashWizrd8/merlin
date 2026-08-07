@@ -98,10 +98,19 @@ class Camera:
         actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = self._cap.get(cv2.CAP_PROP_FPS)
+        fourcc_int = int(self._cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc = "".join(
+            chr((fourcc_int >> (8 * i)) & 0xFF) for i in range(4)
+        ).strip("\x00")
         print(
             f"[Camera] Opened device={self.device}  "
-            f"resolution={actual_w}x{actual_h}  fps={actual_fps:.1f}"
+            f"resolution={actual_w}x{actual_h}  fps={actual_fps:.1f}  fourcc={fourcc or '?'}"
         )
+        if fourcc and fourcc != "MJPG":
+            print(
+                "[Camera] WARN: not MJPEG — USB decode may be slow. "
+                "Try: v4l2-ctl -d /dev/video0 --set-fmt-video=width=640,height=480,pixelformat=MJPG"
+            )
 
     def release(self) -> None:
         """Release the camera resource."""
