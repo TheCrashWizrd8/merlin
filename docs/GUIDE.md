@@ -19,6 +19,26 @@
 15. [Layered Sub Motion (auto mode)](#15-layered-sub-motion-auto-mode)
 16. [Sub Dashboard & API](#16-sub-dashboard--api)
 17. [ESP32 Telemetry & Commands](#17-esp32-telemetry--commands)
+18. [Complete Command Reference](#18-complete-command-reference)
+19. [Scripts & Utilities](#19-scripts--utilities)
+20. [Configuration Files Reference](#20-configuration-files-reference)
+21. [ESP32 Firmware & Upload](#21-esp32-firmware--upload)
+22. [Web Routes & HTTP API](#22-web-routes--http-api)
+23. [Tests & Verification](#23-tests--verification)
+
+### Quick command index
+
+| Goal | Command |
+|------|---------|
+| YOLO + sub + web (production) | `python inference.py --web --timing` |
+| Sub dashboard only | `python sub_server.py` |
+| Train model (Colab/GPU) | `python train.py` |
+| Fake dashboard data | `python scripts/test_telemetry.py` |
+| Probe ESP serial | `python scripts/probe_esp_uart.py --port /dev/ttyACM0` |
+| Test gamepad | `python -m src.xbox_controller` |
+| Check camera | `bash scripts/check_camera.sh` |
+| Flash ESP32 | `bash esp32/upload_from_pi.sh scan` then `bash esp32/upload_from_pi.sh` |
+| Zip dataset for Colab | `bash scripts/zip_dataset.sh` |
 
 ---
 
@@ -64,14 +84,21 @@ USB Camera ──► Detector ──► Tracker ──► Controller ──► C
 |-----------|------|
 | Raspberry Pi 5 | Main compute (YOLO + control loop + web dashboard) |
 | USB endoscope camera | Live YOLO input (`/dev/video0`) |
-| ESP32-S3 (GPIO UART to Pi) | Sub actuators, ballast, leak/ADC sensors, telemetry |
+| ESP32-S3 (USB or GPIO UART to Pi) | Sub actuators, ballast, leak/ADC sensors, telemetry |
 | PCA9685 (I2C on ESP32) | Aft steer Y/Z + fore fin servos (when enabled) |
 | L298N + DC motor | Thruster |
 | Fore/aft ballast | DC motors + linear pots (level feedback) |
 
-**Pi ↔ ESP32 wiring (sub_rc):** Cross-connect Pi **GPIO14 TX** (header pin 8) → ESP **RX (GPIO 44)**, Pi **GPIO15 RX** (pin 10) ← ESP **TX (GPIO 43)**. Device: **`/dev/serial0`**.
+**Pi ↔ ESP32 wiring:** Two options — pick one and set `sub_serial.port` in `config/hardware.yaml`.
 
-Set `sub_serial.port: "/dev/serial0"` in `config/hardware.yaml`. Firmware and pin map: **`esp32/README.md`**, **`config/pins.yaml`**, **`docs/ESP32_SERIAL.md`**.
+| Connection | Pi side | ESP32 (`sub_rc`) | Device |
+|------------|---------|------------------|--------|
+| **USB (default)** | USB cable to ESP32-S3 | USB CDC | `/dev/ttyACM0` (or `/dev/serial/by-id/...`) |
+| **GPIO UART** | GPIO14 TX (pin 8) → ESP RX (GPIO 44) | GPIO15 RX (pin 10) ← ESP TX (GPIO 43) | `/dev/serial0` |
+
+Current default in `config/hardware.yaml`: **`sub_serial.port: "/dev/ttyACM0"`**. The ESP bridge also auto-detects Espressif devices under `/dev/serial/by-id/` when present.
+
+Firmware and pin map: **`esp32/README.md`**, **`config/pins.yaml`**, **§17** and **§21**.
 
 ### Hardware interface (`config/hardware.yaml`)
 
@@ -105,8 +132,11 @@ Set `sub_serial.port: "/dev/serial0"` in `config/hardware.yaml`. Firmware and pi
 | `src/sub_web.py` | `/sub/*` Flask routes and dashboard |
 | `src/xbox_controller.py` | Gamepad reader (pygame thread, hot-plug) |
 | `src/xbox_mapping.py` | Loads `config/xbox_mapping.yaml` → actuators + ballast |
+| `src/xbox_stick_filter.py` | EMA + hold filter for Bluetooth stick jitter |
+| `src/serial_util.py` | Serial port open helpers (USB boot grace, by-id) |
 | `sub_server.py` | Standalone sub dashboard (no YOLO) |
 | `train.py` | Training on GPU/Colab (not on Pi) |
+| `train_colab.ipynb` | Colab notebook — upload dataset, train, download weights |
 | `inference.py` | Main YOLO loop on Pi (+ `--web`, `--sub`) |
 
 ### Data flow per frame
@@ -226,13 +256,25 @@ This reads `config/model.yaml` and `config/dataset.yaml`, resolves `data.yaml`, 
 
 ### Common options
 
+| Flag | Overrides | Default (from `config/model.yaml`) | Description |
+|------|-----------|-----------------------------------|-------------|
+| `--epochs N` | `epochs` | `50` | Training epochs |
+| `--batch N` | `batch_size` | `16` | Batch size (reduce to `8` on low VRAM) |
+| `--model NAME` | `architecture` | `yolov8n` | Model string, e.g. `yolov8s`, `yolo11n` |
+| `--imgsz N` | `img_size` | `640` | Square input size in pixels |
+| `--resume` | — | off | Resume from `weights:` path in `model.yaml` |
+| `--device DEV` | — | auto | e.g. `cpu`, `0`, `0,1`, `mps` |
+
+Examples:
+
 ```bash
-python train.py --model yolov8s
-python train.py --epochs 100
-python train.py --batch 8
-python train.py --resume
-python train.py --device cpu
+python train.py
+python train.py --model yolov8s --epochs 100 --batch 8
+python train.py --resume --device 0
+python train.py --device cpu   # no GPU
 ```
+
+Output: **`weights/best.pt`** plus Ultralytics run logs under **`runs/`**.
 
 ### After training
 
@@ -300,7 +342,7 @@ Open `http://<pi-ip>:8080` (or `--web-port`). Live MJPEG at `/video_feed`.
 | `--web` | off | Flask server + browser stream at `/` |
 | `--web-host` / `--web-port` | `0.0.0.0` / `8080` | Bind address and port |
 | `--serial-port` | config | Override e.g. `/dev/ttyACM1` |
-| `--control-profile` | `config` | `config`, `stable`, or `aggressive` |
+| `--control-profile` | `config` | `config`, `stable`, or `aggressive` — see **§8.1** |
 | `--sub` | auto when `interface: sub` | Enable sub dashboard + ESP bridge |
 | `--no-sub` | off | Disable sub stack even when `interface: sub` |
 | `--no-xbox` | off | Skip Xbox controller polling |
@@ -362,6 +404,24 @@ When `interface: sub`, `TelemetryContext.from_sub_state()` is passed to `control
 | Apple off-centre (`max_error_x/y_for_drive`) | Forward drive reduced until aligned |
 
 Steering, tilt, and drive **intent** always come from the camera. Depth from ESP is shown on the HUD for display only.
+
+### 8.1 Control profiles (`--control-profile`)
+
+Profiles override selected keys in `config/hardware.yaml` at runtime (base values still load from YAML first).
+
+| Profile | Effect |
+|---------|--------|
+| **`config`** | Use `hardware.yaml` as-is (default) |
+| **`stable`** | More smoothing/damping, stricter confidence (`0.50`), longer hold on dropouts, lower drive while turning |
+| **`aggressive`** | Less smoothing, lower confidence threshold (`0.35`), faster response, higher drive while turning |
+
+Example:
+
+```bash
+python inference.py --web --control-profile stable
+```
+
+Overridden fields are defined in `src/controller.py` → `CONTROL_PROFILES`.
 
 ### Example code
 
@@ -521,7 +581,7 @@ Use `--headless`, `--web`, or `interface: sub` (auto-headless when server runs).
 
 ## 14. Sub Vehicle System (`--sub`)
 
-The sub stack uses **GPIO UART or USB serial** and the **`esp32/sub_rc/`** firmware.
+The sub stack uses **USB serial or GPIO UART** (see **`sub_serial`** in `config/hardware.yaml`) and the **`esp32/sub_rc/`** firmware.
 
 ### Entry points
 
@@ -531,7 +591,10 @@ The sub stack uses **GPIO UART or USB serial** and the **`esp32/sub_rc/`** firmw
 | `python inference.py` (with `interface: sub`) | Yes | Yes (auto) | Yes (auto) |
 | `python inference.py --web` | Yes + `/` stream | Yes if `interface: sub` | Yes if `interface: sub` |
 | `python inference.py --no-sub` | Yes | No | No |
-| `python scripts/test_telemetry.py` | No | Yes (simulated data) | No |
+| `python scripts/test_telemetry.py` | No | Yes (simulated) | No |
+| `python scripts/simulate_esp_serial.py` | No | With `sub_server --serial-port …` | Simulated ESP |
+
+**`sub_server.py` flags:** `--host`, `--port`, `--serial-port`, `--no-camera`, `--camera-device`, `--no-xbox`, `--no-esp` — see **§18.2**.
 
 When inference starts with the sub stack, it sets **`get_sub_state().set_control_mode("auto")`** so YOLO drives actuators immediately.
 
@@ -654,11 +717,12 @@ Right-stick fin angles use **snap zones** (`snap_degrees` in `config/xbox_mappin
 
 | Bearing (from up) | Fins |
 |-------------------|------|
-| 0° ± snap | Both up (equal) |
+| 0° ± snap | Both up |
 | ±45° ± snap | Single fin up (left or right) |
+| ±90° ± snap | Both neutral |
 | ±135° ± snap | Single fin down |
 | 180° ± snap | Both down (equal) |
-| Between zones | **Both fins equal** (smooth up/down from vertical component) |
+| Between zones | Normal blend between nearest keypoints |
 
 Verify live mapping:
 
@@ -950,10 +1014,21 @@ Quick check: type **`PING`** in the serial monitor input → expect **`OK PONG`*
 
 ## 17. ESP32 Telemetry & Commands
 
-The ESP bridge (`src/esp_bridge.py`) runs two background threads on GPIO UART:
+The ESP bridge (`src/esp_bridge.py`) runs background threads on the serial port configured in **`sub_serial`**:
 
 - **Reader:** parses `TEL` telemetry and diagnostic replies into `sub_state`
-- **Writer:** sends ballast + actuator commands at ~20 Hz
+- **Writer:** sends ballast + actuator commands at ~20 Hz (paused during diagnostic mode)
+- **Stale watcher:** marks telemetry disconnected after 3 s silence
+
+**Port resolution** (automatic, in order):
+
+1. `/dev/serial/by-id/*` matching Espressif / ESP32 / USB JTAG
+2. `sub_serial.port` from config if the path exists
+3. First `/dev/ttyACM*` or `/dev/ttyUSB*`
+
+Override at runtime: `--serial-port /dev/ttyACM1` on `inference.py` or `sub_server.py`.
+
+USB CDC gets a **4 s boot grace** after open (ESP32-S3 reset lines). Boot spam (`ESP-ROM:`, `rst:`) is filtered from the serial log.
 
 ### Pi → ESP commands
 
@@ -1003,6 +1078,543 @@ python scripts/test_telemetry.py
 ```
 
 See **`docs/ESP32_SERIAL.md`** for protocol details and **`esp32/README.md`** for firmware upload.
+
+---
+
+## 18. Complete Command Reference
+
+Quick index of every runnable entry point. All Python commands assume:
+
+```bash
+cd ~/yolo-project
+source .venv/bin/activate
+```
+
+### 18.1 `inference.py` — YOLO detection loop
+
+**Purpose:** Main Pi runtime. Camera → YOLO → tracker → controller → hardware/sub bridge. Optionally serves web UI and sub dashboard.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--device` | int | `0` | USB camera V4L2 index (`/dev/videoN`) |
+| `--width` | int | `640` | Capture width (pixels) |
+| `--height` | int | `480` | Capture height (pixels) |
+| `--headless` | flag | off | Skip OpenCV display window |
+| `--print-on-detect` | flag | off | Print ControlOutput table only when apple detected |
+| `--quiet` | flag | auto when `--web` or sub active | Suppress per-frame terminal table |
+| `--timing` | flag | off | Every 30 frames: log `cap`/`yolo`/`draw` ms and HUD FPS |
+| `--tracker-strategy` | choice | `best_confidence` | `best_confidence` or `closest_to_centre` when multiple apples |
+| `--apple-label` | str | `apple` | YOLO class name to track |
+| `--web` | flag | off | Start Flask server; MJPEG at `/video_feed`, index at `/` |
+| `--web-host` | str | `0.0.0.0` | HTTP bind address |
+| `--web-port` | int | `8080` | HTTP port |
+| `--serial-port` | str | from config | Override `sub_serial.port` for ESP bridge |
+| `--control-profile` | choice | `config` | `config`, `stable`, or `aggressive` |
+| `--sub` | flag | auto when `interface: sub` | Force sub dashboard + ESP bridge + Xbox |
+| `--no-sub` | flag | off | Disable sub stack even when `interface: sub` |
+| `--no-xbox` | flag | off | Skip Xbox controller polling |
+| `--tolerate-missing-devices` | flag | off | Continue if camera/serial missing; manual-only fallback |
+
+**Common invocations:**
+
+```bash
+# Production (interface: sub in hardware.yaml)
+python inference.py --web --timing
+
+# YOLO only, local window, no hardware
+# Set interface: stub in config/hardware.yaml first
+python inference.py
+
+# SSH headless, no browser
+python inference.py --headless --quiet
+
+# Force sub off (YOLO + web only)
+python inference.py --web --no-sub
+
+# Bench: keep server up without camera
+python inference.py --web --tolerate-missing-devices
+```
+
+**Exit:** Press **q** in OpenCV window, or **Ctrl+C** in terminal.
+
+---
+
+### 18.2 `sub_server.py` — Sub dashboard without YOLO
+
+**Purpose:** ESP telemetry, actuator/ballast control, Xbox input, camera MJPEG — no apple detection.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--host` | str | `0.0.0.0` | HTTP bind address |
+| `--port` | int | `8080` | HTTP port |
+| `--serial-port` | str | from config | Override ESP serial port |
+| `--no-camera` | flag | off | Skip USB camera (placeholder MJPEG) |
+| `--camera-device` | int | `0` | Camera V4L2 index |
+| `--no-xbox` | flag | off | Skip Xbox polling |
+| `--no-esp` | flag | off | Skip ESP bridge (use with `test_telemetry.py` instead) |
+
+```bash
+python sub_server.py
+python sub_server.py --serial-port /dev/ttyACM0 --no-xbox
+python sub_server.py --no-camera --port 9090
+```
+
+Open **`http://<pi-ip>:8080/sub/`**. Default control mode: **manual** (sliders).
+
+---
+
+### 18.3 `train.py` — Model training (GPU / Colab)
+
+**Purpose:** Train YOLO on apple dataset. **Do not run on Pi** — use Colab or a GPU machine.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--epochs` | int | from `model.yaml` | Training epochs |
+| `--batch` | int | from `model.yaml` | Batch size |
+| `--model` | str | from `model.yaml` | Architecture string |
+| `--imgsz` | int | from `model.yaml` | Input image size |
+| `--resume` | flag | off | Resume from `weights:` in `model.yaml` |
+| `--device` | str | auto | `cpu`, `0`, `mps`, etc. |
+
+```bash
+python train.py
+python train.py --epochs 100 --batch 8 --model yolov8s
+```
+
+---
+
+### 18.4 `python -m src.xbox_controller` — Gamepad diagnostic
+
+**Purpose:** List connected gamepads and print live stick/button → actuator mapping without starting the full server.
+
+```bash
+python -m src.xbox_controller
+```
+
+- Enumerates pads via pygame/SDL
+- Connects for ~10 s or until a pad opens
+- Prints LS/RS, triggers, mapped thruster/fins/ballast
+- **Ctrl+C** to quit
+
+Requires `xbox.enabled: true` in `config/hardware.yaml` (warns if false).
+
+---
+
+### 18.5 Shell scripts (project root)
+
+| Script | Command | Purpose |
+|--------|---------|---------|
+| **`scripts/check_camera.sh`** | `bash scripts/check_camera.sh` | Lists `/dev/video*`, user groups, `v4l2-ctl` devices, `lsusb`, recent `dmesg`, processes holding camera |
+| **`scripts/zip_dataset.sh`** | `bash scripts/zip_dataset.sh` | Creates **`dataset.zip`** from `data/images/` for Colab upload |
+| **`esp32/upload_from_pi.sh`** | See **§21** | Build + flash ESP32 firmware from Pi |
+
+---
+
+### 18.6 Python scripts in `scripts/`
+
+| Script | Purpose |
+|--------|---------|
+| **`scripts/test_telemetry.py`** | Fake ESP telemetry + dashboard (no hardware) |
+| **`scripts/simulate_esp_serial.py`** | Fake ESP on PTY; tests full serial round-trip |
+| **`scripts/probe_esp_uart.py`** | Listen + PING on UART ports |
+
+Detailed usage: **§19**.
+
+---
+
+## 19. Scripts & Utilities
+
+### 19.1 `scripts/test_telemetry.py`
+
+**Simulation only** — populates `sub_state` with fake battery, gyro, depth, leaks, ballast, and Xbox data. Does **not** open real serial.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `0.0.0.0` | HTTP bind |
+| `--port` | `8080` | HTTP port |
+| `--hz` | `5.0` | Simulated telemetry update rate |
+| `--no-camera` | off | Skip USB camera feed |
+| `--camera-device` | `0` | Camera index |
+| `--leak-alarm` | off | Toggle leak sensor 3 every 20 s (UI alarm test) |
+
+```bash
+python scripts/test_telemetry.py
+python scripts/test_telemetry.py --port 8080 --leak-alarm
+python scripts/test_telemetry.py --no-camera
+```
+
+Use when developing the dashboard UI without ESP32 or when demoing leak alarms.
+
+---
+
+### 19.2 `scripts/simulate_esp_serial.py`
+
+**Full serial path test** — pretends to be `sub_rc.ino`: sends `TEL` lines, parses `B` / `S2` / `CAL` from Pi.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pi-port` | `/tmp/sub_fake_pi` | Path for `sub_server --serial-port` |
+| `--esp-port` | `/tmp/sub_fake_esp` | Path this script opens (socat mode) |
+| `--hz` | `5.0` | Telemetry transmit rate |
+| `--leak-alarm` | off | Toggle simulated leak every 20 s |
+
+**Two-terminal workflow:**
+
+```bash
+# Terminal 1
+python scripts/simulate_esp_serial.py
+
+# Terminal 2 (use port printed by Terminal 1)
+python sub_server.py --serial-port /tmp/sub_fake_pi --no-xbox
+```
+
+Uses **socat** if installed (creates linked PTYs); otherwise falls back to a single PTY symlink. Move dashboard sliders to see `<< (Pi cmd) B …` / `S2 …` in Terminal 1.
+
+---
+
+### 19.3 `scripts/probe_esp_uart.py`
+
+**Hardware probe** — opens serial, listens for spontaneous `TEL` lines, sends `PING`, reports `OK PONG`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `/dev/ttyAMA0`, `/dev/ttyAMA10` | Repeatable; probes each port listed |
+
+```bash
+python scripts/probe_esp_uart.py
+python scripts/probe_esp_uart.py --port /dev/ttyACM0 --port /dev/serial0
+```
+
+Exit code `0` if any port responds with `OK PONG` or spontaneous `TEL`. Prints wiring checklist on failure.
+
+---
+
+### 19.4 `scripts/check_camera.sh`
+
+Non-destructive camera diagnostics. No arguments.
+
+```bash
+bash scripts/check_camera.sh
+```
+
+Checks:
+
+1. `/dev/video*` device nodes
+2. Current user groups (`video` group needed)
+3. `v4l2-ctl --list-devices` (install: `sudo apt install v4l-utils`)
+4. `lsusb` for camera presence
+5. Recent kernel messages
+6. Processes using video devices (`fuser`)
+
+**Manual MJPEG test:**
+
+```bash
+vlc v4l2:///dev/video0 --v4l2-chroma=MJPG
+```
+
+---
+
+### 19.5 `scripts/zip_dataset.sh`
+
+Packages training data for Colab upload.
+
+```bash
+bash scripts/zip_dataset.sh
+```
+
+Creates **`dataset.zip`** from **`data/images/`** (must contain `data.yaml`). Copy to PC or upload directly in Colab.
+
+---
+
+### 19.6 `train_colab.ipynb`
+
+Self-contained Google Colab notebook at project root. Typical flow:
+
+1. Upload **`dataset.zip`** and project files (or clone repo)
+2. Install dependencies
+3. Run training cells → produces **`weights/best.pt`**
+4. Download weights to Pi
+
+Alternative to manual Colab steps in **§5**.
+
+---
+
+## 20. Configuration Files Reference
+
+All YAML lives in **`config/`**. Paths are relative to project root unless absolute.
+
+### 20.1 `config/model.yaml`
+
+| Key | Example | Used by | Description |
+|-----|---------|---------|-------------|
+| `architecture` | `yolov8n` | `train.py`, `inference.py` | Ultralytics model name |
+| `weights` | `weights/best.pt` | `inference.py` | Trained `.pt` path; empty = pretrained backbone only |
+| `confidence` | `0.50` | `Detector` | Detection confidence threshold |
+| `iou` | `0.45` | `Detector` | NMS IoU threshold |
+| `img_size` | `640` | train + infer | Square input size |
+| `epochs` | `50` | `train.py` | Default training epochs |
+| `batch_size` | `16` | `train.py` | Default batch size |
+
+---
+
+### 20.2 `config/dataset.yaml`
+
+| Key | When | Description |
+|-----|------|-------------|
+| `source` | always | `local` or `roboflow` |
+| `local_path` | `source: local` | Folder containing `data.yaml` (e.g. `data/images`) |
+| `workspace`, `project`, `version`, `format` | `source: roboflow` | Roboflow export settings |
+| `api_key` | roboflow | Leave blank; set env `ROBOFLOW_API_KEY` |
+
+---
+
+### 20.3 `config/hardware.yaml`
+
+| Section | Keys | Description |
+|---------|------|-------------|
+| **`interface`** | `stub` \| `sub` | `stub` = log only; `sub` = route to ESP via `SubBridgeOutput` |
+| **`sub_serial`** | `port`, `baud_rate` | ESP link (default USB `/dev/ttyACM0`, 115200) |
+| **`xbox`** | `enabled`, `deadzone`, `trigger_deadzone`, `smoothing_alpha`, `stick_hold_ms`, `release_alpha`, `poll_hz`, `scan_interval_s`, `mapping_file`, `device_index` | Gamepad polling (**§14**) |
+| **Control** | `deadzone`, `gain_steer`, `gain_tilt`, `max_drive_speed`, `min_steer_command`, `min_tilt_command`, `min_drive_command`, `min_detection_confidence`, `hold_missed_frames`, `smoothing_alpha`, `damping_steer`, `damping_tilt`, `max_drive_when_turning` | YOLO → ControlOutput tuning |
+| **Size drive** | `use_size_for_drive`, `size_drive_far`, `size_drive_close`, `size_min_ratio`, `size_max_ratio`, `size_smoothing_alpha`, `size_curve` | Bbox area → forward speed |
+| **`approach`** | `use_telemetry`, `stop_on_leak`, `min_battery_v`, `low_battery_drive_scale`, `max_error_x_for_drive`, `max_error_y_for_drive` | Telemetry safety on drive |
+| **`sub_motion`** | `level_roll_gain`, `level_pitch_gain`, `max_fin_command`, `max_roll_deg`, `max_pitch_deg`, `require_level_for_steer`, `require_level_for_drive`, `use_ballast_for_height`, `ballast_height_gain`, `ballast_error_deadzone`, `ballast_max_command` | Layered auto actuators (**§15**) |
+| **`cameras`** | `num_cameras` | Placeholder for future multi-cam (1–3) |
+
+---
+
+### 20.4 `config/xbox_mapping.yaml`
+
+Gamepad → actuator bindings. Loaded by `src/xbox_mapping.py`. Edit without changing Python.
+
+| Section | Purpose |
+|---------|---------|
+| **`sticks.left`** | `aft_steer_y: x`, `aft_steer_z: y`, `invert_y`, optional `deadzone` |
+| **`sticks.right`** | `mode: polar_fins`, `snap_degrees` — fin angles from stick bearing |
+| **`buttons`** | SDL button indices: `a`, `b`, `lb`, etc. |
+| **`triggers`** | `lt: fill` — analog fill |
+| **`ballast`** | `drain_button`, `fill_trigger`, `dpad_up_tank`, `dpad_down_tank`, `default_tank` |
+| **`thruster`** | `forward_button: rb`, `reverse_button: rt`, magnitudes |
+
+Verify: `python -m src.xbox_controller`
+
+---
+
+### 20.5 `config/pins.yaml`
+
+**Reference only** — not read at runtime yet. Documents GPIO, PCA9685 channels, L298N, ballast, leak pins synced from `esp32/sub_rc/sub_rc.ino`. Used by `/sub/api/pins` “expected” snapshot.
+
+---
+
+## 21. ESP32 Firmware & Upload
+
+### 21.1 Available sketches
+
+| Folder | Purpose |
+|--------|---------|
+| **`esp32/sub_rc/`** | **Production** — actuators, ballast, sensors, `TEL` telemetry, diagnostics |
+| **`esp32/sub_hw_test/`** | Isolated hardware bring-up (motors/servos one at a time) |
+
+Flash **`sub_rc`** for normal operation.
+
+### 21.2 `esp32/upload_from_pi.sh`
+
+Build and upload from the Pi (ESP32 connected via **USB** for flashing).
+
+```bash
+# List USB ports
+bash esp32/upload_from_pi.sh scan
+
+# Auto-detect port, build sub_rc
+bash esp32/upload_from_pi.sh
+
+# Explicit board + port + sketch
+bash esp32/upload_from_pi.sh esp32:esp32:esp32s3 /dev/ttyACM0 sub_rc
+
+# Hardware test sketch
+bash esp32/upload_from_pi.sh --sketch sub_hw_test
+
+# Named sketch as third argument
+bash esp32/upload_from_pi.sh esp32:esp32:esp32s3 /dev/ttyACM0 sub_hw_test
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `scan` / `list` / `--list-ports` | — | List ports and exit |
+| `--sketch NAME` | `sub_rc` | Sketch folder under `esp32/` |
+| `[BOARD]` | `esp32:esp32:esp32s3` | Arduino FQBN |
+| `[PORT]` | auto-detect | USB serial for upload |
+| `[SKETCH]` | `sub_rc` | Third positional sketch name |
+
+**Prerequisites:** `arduino-cli`, ESP32 core, libraries — see **`esp32/README.md`**.
+
+**Note:** Upload uses USB. Runtime serial to Pi may be the same USB cable (`/dev/ttyACM0`) or GPIO UART — set `sub_serial.port` accordingly.
+
+### 21.3 Firmware serial behaviour
+
+- **Baud:** 115200
+- **Timeout:** 8000 ms — thruster stops if Pi stops sending
+- **Telemetry:** ~5 Hz `TEL` lines
+- **Diagnostics:** `PING`, `PINS`, `TEST …`, `CAL B …`, `HELP`
+- **USB debug:** `USB_DEBUG_MIRROR=1` in sketch mirrors key messages to USB Serial Monitor
+
+### 21.4 Pi UART enable (GPIO wiring only)
+
+If using GPIO UART instead of USB:
+
+1. Enable UART in `/boot/firmware/config.txt` (`dtparam=uart0=on` on Pi 5)
+2. Disable serial console if it occupies the port
+3. Set `sub_serial.port: "/dev/serial0"`
+4. Flash `sub_rc` with `USE_PI_UART=1` in the sketch
+
+Probe: `python scripts/probe_esp_uart.py --port /dev/serial0`
+
+---
+
+## 22. Web Routes & HTTP API
+
+Default base URL: **`http://<pi-ip>:8080`** (port from `--web-port` / `--port`).
+
+### 22.1 YOLO / camera routes (`web_stream.py`)
+
+Started by `inference.py --web` or any process that calls `run_server()`.
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/` | GET | Minimal HTML page linking to stream and `/sub/` |
+| `/video_feed` | GET | MJPEG multipart stream (~15 FPS when inference running) |
+| `/snapshot` | GET | Single JPEG frame (debug); same source as video feed |
+
+There is **no** separate `/api/control` for YOLO S/D/T — manual/auto for the sub stack is entirely under **`/sub/api/*`**.
+
+### 22.2 Sub dashboard routes (`sub_web.py`)
+
+See **§16** for narrative docs. Summary:
+
+**Pages:** `/sub/`, `/sub`
+
+**Read (GET):**
+
+| Route | Returns |
+|-------|---------|
+| `/sub/api/status` | Connection flags, mode, telemetry age |
+| `/sub/api/telemetry` | Full telemetry snapshot |
+| `/sub/api/telemetry/battery` | `{ voltage, connected, timestamp }` |
+| `/sub/api/telemetry/gyro` | `{ pitch, roll, yaw, connected }` |
+| `/sub/api/telemetry/depth` | `{ meters, connected }` |
+| `/sub/api/telemetry/leaks` | `{ sensors[], triggered, connected }` |
+| `/sub/api/telemetry/ballast` | Fore/aft levels and commands |
+| `/sub/api/control` | Mode, effective/auto/manual/xbox actuators, ballast commands |
+| `/sub/api/actuators` | Same actuator breakdown |
+| `/sub/api/xbox` | Raw pad state |
+| `/sub/api/serial?limit=N` | Serial log lines (1–500) |
+| `/sub/api/pins` | Expected vs ESP pin map |
+| `/sub/api/diagnostics` | Last PONG, PINS capture, test replies |
+| `/sub/api/stream` | **SSE** — live combined dashboard payload |
+
+**Write (POST):**
+
+| Route | Body (JSON) | Effect |
+|-------|-------------|--------|
+| `/sub/api/control` | `{ "mode": "auto"\|"manual"\|"xbox", "aftSteerY": 0.5, ... }` | Set mode and/or manual actuators |
+| `/sub/api/control/actuators` | `{ "aftSteerY", "thrusterX", "finLeft", ... }` | Manual actuators (forces manual) |
+| `/sub/api/control/ballast` | `{ "action": "fill"\|"drain"\|"stop", "tank": "fore"\|"aft"\|"both" }` or `{ "fore": 1.0, "aft": -1.0 }` or `{ "value": 0.5, "tank": "fore" }` | Ballast command |
+| `/sub/api/ballast/calibrate` | `{ "tank": "fore", "end": "top"\|"bottom" }` | Send `CAL B` to ESP |
+| `/sub/api/ballast/calibrate/resume` | — | Ack resume (no-op) |
+| `/sub/api/serial` | `{ "line": "PING" }` | Send raw command (newline added) |
+| `/sub/api/test` | `{ "command": "PING" }` | Diagnostic mode + single command |
+| `/sub/api/test/resume` | — | Exit diagnostic mode |
+| `/sub/api/test/run` | — | Run full pin checklist |
+
+**Actuator JSON keys:** `aftSteerY`, `aftSteerZ`, `thrusterX`, `finLeft`, `finRight` (snake_case aliases accepted).
+
+**curl examples:**
+
+```bash
+curl http://localhost:8080/sub/api/status
+curl -X POST http://localhost:8080/sub/api/control \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"manual","thrusterX":0.3}'
+curl -X POST http://localhost:8080/sub/api/control/ballast \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"fill","tank":"fore"}'
+curl -X POST http://localhost:8080/sub/api/serial \
+  -H 'Content-Type: application/json' \
+  -d '{"line":"PING"}'
+curl -X POST http://localhost:8080/sub/api/test/run
+```
+
+Full JSON schemas: **`docs/sub_endpoints_plan.md`**.
+
+---
+
+## 23. Tests & Verification
+
+### 23.1 `tests/test_sub_motion.py`
+
+Unit tests for layered auto control (`src/sub_motion.py`).
+
+```bash
+# Run with pytest (if installed)
+pytest tests/test_sub_motion.py -v
+
+# Or run individual checks
+python -c "
+from tests.test_sub_motion import (
+    test_fins_counter_roll,
+    test_thruster_gated_when_rolled,
+    test_ballast_apple_below_fills,
+)
+test_fins_counter_roll()
+test_thruster_gated_when_rolled()
+test_ballast_apple_below_fills()
+print('ok')
+"
+```
+
+| Test | Verifies |
+|------|----------|
+| `test_fins_counter_roll` | Positive roll → differential fin correction |
+| `test_thruster_gated_when_rolled` | High roll reduces thruster |
+| `test_ballast_apple_below_fills` | Positive `error_y` → fill command |
+
+### 23.2 End-to-end checklists
+
+**YOLO + camera:**
+
+```bash
+bash scripts/check_camera.sh
+python inference.py --headless --timing --no-sub   # if interface: stub
+```
+
+**ESP serial (real hardware):**
+
+```bash
+python scripts/probe_esp_uart.py --port /dev/ttyACM0
+python sub_server.py
+# Dashboard → serial monitor → PING → OK PONG
+curl -X POST http://localhost:8080/sub/api/test/run
+```
+
+**ESP serial (simulated):**
+
+```bash
+# Terminal 1: python scripts/simulate_esp_serial.py
+# Terminal 2: python sub_server.py --serial-port /tmp/sub_fake_pi --no-xbox
+```
+
+**Dashboard UI (no hardware):**
+
+```bash
+python scripts/test_telemetry.py --leak-alarm
+```
+
+**Xbox:**
+
+```bash
+python -m src.xbox_controller
+python sub_server.py   # then open /sub/ and switch to Xbox mode
+```
 
 ---
 

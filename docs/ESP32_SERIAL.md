@@ -73,6 +73,8 @@ B <fore> <aft>\n
 
 Example: `B 1.000 -1.000` — fill fore, drain aft.
 
+On the ESP, each tank uses **INA + INB** (digital on/off, no PWM) plus a **3-wire linear pot** (3.3 V, wiper → ADC, GND). See `config/pins.yaml` and `esp32/README.md`.
+
 **Sub actuators** (all values -1.0 … +1.0):
 
 ```

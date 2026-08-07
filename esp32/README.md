@@ -61,10 +61,19 @@ Edit `#define` values at the top of **`sub_rc/sub_rc.ino`** to match your wiring
 
 ### Ballast tanks
 
-| Tank | DIR GPIO | PWM GPIO | Pot ADC |
+Each tank: **5 wires** — INA, INB, pot wiper (ADC), pot 3.3 V, pot GND.  
+Fill/drain is **on/off** via INA/INB (no PWM).
+
+| Tank | INA GPIO | INB GPIO | Pot ADC |
 |------|----------|----------|---------|
-| Fore | 14 | 13 | 7 |
-| Aft | 8 | 9 | 11 |
+| Fore | 13 | 14 | 7 |
+| Aft | 9 | 8 | 11 |
+
+| State | INA | INB |
+|-------|-----|-----|
+| Fill | HIGH | LOW |
+| Drain | LOW | HIGH |
+| Stop | LOW | LOW |
 
 ### Sensors
 
@@ -86,7 +95,7 @@ Pi GND ──────────────────────── 
 PCA9685 SDA/SCL ──► ESP GPIO 21/22
 Servo signals ────► PCA9685 channels 0–3
 L298N IN1/IN2/PWM ► ESP GPIO 4/12/6
-Ballast motors ───► ESP GPIO 13/14 (fore), 8/9 (aft)
+Ballast INA/INB ──► ESP GPIO 13/14 (fore), 9/8 (aft) + pot wiper on 7/11
 Leak sensor ──────► ESP GPIO 5
 Battery / depth ──► ESP ADC GPIO 1/3
 ```

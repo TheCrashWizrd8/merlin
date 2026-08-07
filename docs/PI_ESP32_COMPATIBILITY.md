@@ -102,8 +102,8 @@ Dashboard slider/mode state persists in browser **`sessionStorage`** across norm
 |-----------|------------|
 | Aft steer Y/Z, fins | PCA9685 ch 0–3 (I2C GPIO 21/22) when `ENABLE_PCA9685=1` |
 | Thruster | L298N — GPIO 4 (IN1), 12 (IN2), 6 (PWM) |
-| Fore ballast | GPIO 13 PWM, 14 DIR, 7 pot ADC |
-| Aft ballast | GPIO 9 PWM, 8 DIR, 11 pot ADC |
+| Fore ballast | GPIO 13 INA, 14 INB, 7 pot ADC |
+| Aft ballast | GPIO 9 INA, 8 INB, 11 pot ADC |
 | Leak | GPIO 5 (active HIGH) |
 | Battery | ADC GPIO 1 |
 | Depth | ADC GPIO 3 |
