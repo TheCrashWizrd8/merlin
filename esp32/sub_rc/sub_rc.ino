@@ -27,14 +27,15 @@
 #define PIN_THR_IN2           12
 #define PIN_THR_PWM           6
 
-// Fore ballast — DC motor DIR + PWM + linear pot (-1 = pot not wired)
-#define PIN_FORE_BALLAST_PWM  13
-#define PIN_FORE_BALLAST_DIR  14
+// Fore ballast — H-bridge INA/INB (on/off fill/drain) + linear pot (-1 = pot not wired)
+// Harness: 5 wires — INA, INB, pot wiper (ADC), pot 3.3V, pot GND
+#define PIN_FORE_BALLAST_INA  13
+#define PIN_FORE_BALLAST_INB  14
 #define PIN_FORE_BALLAST_POT  7
 
-// Aft ballast — DC motor DIR + PWM + linear pot (-1 = pot not wired)
-#define PIN_AFT_BALLAST_DIR   8
-#define PIN_AFT_BALLAST_PWM   9
+// Aft ballast — H-bridge INA/INB + linear pot
+#define PIN_AFT_BALLAST_INA   9
+#define PIN_AFT_BALLAST_INB   8
 #define PIN_AFT_BALLAST_POT   11
 
 // Sensors
@@ -95,8 +96,8 @@ Adafruit_PWMServoDriver pca9685 = Adafruit_PWMServoDriver(PCA9685_ADDR);
 #endif
 
 struct BallastState {
-  int pinPwm;
-  int pinDir;
+  int pinIna;
+  int pinInb;
   int pinPot;
   float command;
   float pos;
@@ -127,9 +128,9 @@ struct HardwareState {
 HardwareState hw = {};
 
 BallastState ballasts[BALLAST_COUNT] = {
-  { PIN_FORE_BALLAST_PWM, PIN_FORE_BALLAST_DIR, PIN_FORE_BALLAST_POT,
+  { PIN_FORE_BALLAST_INA, PIN_FORE_BALLAST_INB, PIN_FORE_BALLAST_POT,
     0.0f, 0.0f, 0, false, "STOP", -1, -1, false, "fore", "fTop", "fBot", "fCal" },
-  { PIN_AFT_BALLAST_PWM, PIN_AFT_BALLAST_DIR, PIN_AFT_BALLAST_POT,
+  { PIN_AFT_BALLAST_INA, PIN_AFT_BALLAST_INB, PIN_AFT_BALLAST_POT,
     0.0f, 0.0f, 0, false, "STOP", -1, -1, false, "aft", "aTop", "aBot", "aCal" },
 };
 
@@ -301,19 +302,16 @@ static void setBallastTank(BallastState *tank, float cmd) {
   tank->command = clampf(cmd);
   bool fill = tank->command > BALLAST_CMD_DEADBAND;
   bool drain = tank->command < -BALLAST_CMD_DEADBAND;
-  float mag = fabsf(tank->command);
-  int pwm = (int)(mag * MOTOR_MAX_SPEED);
-  if (pwm > 0) pwm = max(MOTOR_MIN_START, pwm);
-  pwm = min(MOTOR_MAX_SPEED, pwm);
 
   if (fill) {
-    digitalWrite(tank->pinDir, HIGH);
-    ledcWrite(tank->pinPwm, pwm);
+    digitalWrite(tank->pinIna, HIGH);
+    digitalWrite(tank->pinInb, LOW);
   } else if (drain) {
-    digitalWrite(tank->pinDir, LOW);
-    ledcWrite(tank->pinPwm, pwm);
+    digitalWrite(tank->pinIna, LOW);
+    digitalWrite(tank->pinInb, HIGH);
   } else {
-    ledcWrite(tank->pinPwm, 0);
+    digitalWrite(tank->pinIna, LOW);
+    digitalWrite(tank->pinInb, LOW);
   }
 
   tank->moving = fill || drain;
@@ -389,11 +387,11 @@ static void printPins() {
   LINK.print("  Thruster IN1="); LINK.print(PIN_THR_IN1);
   LINK.print(" IN2="); LINK.print(PIN_THR_IN2);
   LINK.print(" PWM="); LINK.println(PIN_THR_PWM);
-  LINK.print("  Fore ballast PWM="); LINK.print(PIN_FORE_BALLAST_PWM);
-  LINK.print(" DIR="); LINK.print(PIN_FORE_BALLAST_DIR);
+  LINK.print("  Fore ballast INA="); LINK.print(PIN_FORE_BALLAST_INA);
+  LINK.print(" INB="); LINK.print(PIN_FORE_BALLAST_INB);
   LINK.print(" pot="); LINK.println(PIN_FORE_BALLAST_POT);
-  LINK.print("  Aft ballast DIR="); LINK.print(PIN_AFT_BALLAST_DIR);
-  LINK.print(" PWM="); LINK.print(PIN_AFT_BALLAST_PWM);
+  LINK.print("  Aft ballast INA="); LINK.print(PIN_AFT_BALLAST_INA);
+  LINK.print(" INB="); LINK.print(PIN_AFT_BALLAST_INB);
   LINK.print(" pot="); LINK.println(PIN_AFT_BALLAST_POT);
   for (int i = 0; i < BALLAST_COUNT; i++) {
     BallastState *t = &ballasts[i];
@@ -725,8 +723,10 @@ void setup() {
 
   pinMode(PIN_THR_IN1, OUTPUT);
   pinMode(PIN_THR_IN2, OUTPUT);
-  pinMode(PIN_FORE_BALLAST_DIR, OUTPUT);
-  pinMode(PIN_AFT_BALLAST_DIR, OUTPUT);
+  pinMode(PIN_FORE_BALLAST_INA, OUTPUT);
+  pinMode(PIN_FORE_BALLAST_INB, OUTPUT);
+  pinMode(PIN_AFT_BALLAST_INA, OUTPUT);
+  pinMode(PIN_AFT_BALLAST_INB, OUTPUT);
 #if PIN_LEAK >= 0
   pinMode(PIN_LEAK, INPUT_PULLDOWN);  // floating pin reads LOW (no leak)
 #endif
@@ -734,18 +734,16 @@ void setup() {
 
   digitalWrite(PIN_THR_IN1, LOW);
   digitalWrite(PIN_THR_IN2, LOW);
-  digitalWrite(PIN_FORE_BALLAST_DIR, LOW);
-  digitalWrite(PIN_AFT_BALLAST_DIR, LOW);
+  digitalWrite(PIN_FORE_BALLAST_INA, LOW);
+  digitalWrite(PIN_FORE_BALLAST_INB, LOW);
+  digitalWrite(PIN_AFT_BALLAST_INA, LOW);
+  digitalWrite(PIN_AFT_BALLAST_INB, LOW);
 
 #if PIN_THR_PWM >= 0
   ledcAttach(PIN_THR_PWM, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
   ledcWrite(PIN_THR_PWM, 0);
 #endif
-  ledcAttach(PIN_FORE_BALLAST_PWM, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
-  ledcWrite(PIN_FORE_BALLAST_PWM, 0);
-  ledcAttach(PIN_AFT_BALLAST_PWM, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
-  ledcWrite(PIN_AFT_BALLAST_PWM, 0);
-  bootCheckpoint("CHK4 pwm attached");
+  bootCheckpoint("CHK4 thruster pwm attached");
 
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);

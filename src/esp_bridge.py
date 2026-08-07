@@ -19,9 +19,12 @@ Expected ESP → Pi telemetry (sub_rc.ino):
   TEL heartbeat 42
 
 Pi → ESP commands:
-  B <fore> <aft>\\n                     ballast -1..+1 per tank
+  B <fore> <aft>\\n                     ballast -1..+1 per tank (ESP drives INA/INB on/off)
   CAL B <fore|aft> top|bottom|show
   S2 <y> <z> F <fl> <fr> X <thr>\\n   sub actuators
+
+Ballast hardware (per tank, 5 wires): INA + INB + pot wiper (ADC) + pot 3.3V + pot GND.
+Fill/drain is digital only — no motor PWM on ballast pumps.
 """
 
 from __future__ import annotations

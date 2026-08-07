@@ -96,13 +96,15 @@ sub:
     baud_rate: 115200
 
   ballast:
+    # 5 wires per tank: INA, INB, pot wiper (ADC), pot 3.3V, pot GND
+    # Motor is on/off fill/drain only — no PWM speed control
     fore:
-      pwm_gpio: 13
-      dir_gpio: 14
+      ina_gpio: 13
+      inb_gpio: 14
       pot_adc_gpio: 7
     aft:
-      dir_gpio: 8
-      pwm_gpio: 9
+      ina_gpio: 9
+      inb_gpio: 8
       pot_adc_gpio: 11
 
   leaks:

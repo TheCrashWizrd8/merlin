@@ -24,8 +24,9 @@ sticks:
     #   -135° (down-left) left fin down
     #   45° (up-right)   right fin up
     #   135° (down-right) right fin down
+    #   ±90° (left/right) both fins neutral
     mode: polar_fins
-    snap_degrees: 5   # ±5° windows at each keypoint (0°, ±45°, ±135°, 180°)
+    snap_degrees: 5   # ±5° hold at each keypoint; normal blend between windows
 
 buttons:
   # SDL / Linux joystick button indices (Xbox over Bluetooth)

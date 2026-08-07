@@ -18,9 +18,9 @@
 #define PIN_THR_IN1 4
 #define PIN_THR_IN2 5
 #define PIN_THR_PWM 6
-#define PIN_BALLAST_FILL 10
-#define PIN_BALLAST_DRAIN 11
-#define PIN_BALLAST_ADC 2
+#define PIN_BALLAST_INA  10
+#define PIN_BALLAST_INB  11
+#define PIN_BALLAST_ADC  2
 #define PIN_BATTERY_ADC 1
 #define PIN_DEPTH_ADC 3
 #define PIN_LEAK_0 12
@@ -71,15 +71,23 @@ static void setThruster(float v) {
 static void setBallast(const char *mode) {
   bool fill = strcmp(mode, "fill") == 0;
   bool drain = strcmp(mode, "drain") == 0;
-  digitalWrite(PIN_BALLAST_FILL, fill ? HIGH : LOW);
-  digitalWrite(PIN_BALLAST_DRAIN, drain ? HIGH : LOW);
+  if (fill) {
+    digitalWrite(PIN_BALLAST_INA, HIGH);
+    digitalWrite(PIN_BALLAST_INB, LOW);
+  } else if (drain) {
+    digitalWrite(PIN_BALLAST_INA, LOW);
+    digitalWrite(PIN_BALLAST_INB, HIGH);
+  } else {
+    digitalWrite(PIN_BALLAST_INA, LOW);
+    digitalWrite(PIN_BALLAST_INB, LOW);
+  }
 }
 
 static void printPins() {
   Serial.println("=== sub pin map ===");
   Serial.printf("I2C SDA=%d SCL=%d  PCA9685 ch0=aftY ch1=aftZ ch2=finL ch3=finR\n", I2C_SDA, I2C_SCL);
   Serial.printf("Thruster IN1=%d IN2=%d PWM=%d\n", PIN_THR_IN1, PIN_THR_IN2, PIN_THR_PWM);
-  Serial.printf("Ballast fill=%d drain=%d adc=%d\n", PIN_BALLAST_FILL, PIN_BALLAST_DRAIN, PIN_BALLAST_ADC);
+  Serial.printf("Ballast INA=%d INB=%d adc=%d\n", PIN_BALLAST_INA, PIN_BALLAST_INB, PIN_BALLAST_ADC);
   Serial.printf("Battery ADC=%d  Depth ADC=%d\n", PIN_BATTERY_ADC, PIN_DEPTH_ADC);
   Serial.printf("Leaks GPIO %d,%d,%d,%d\n", PIN_LEAK_0, PIN_LEAK_1, PIN_LEAK_2, PIN_LEAK_3);
 }
@@ -138,8 +146,8 @@ void setup() {
   pca9685.setPWMFreq(50);
   pinMode(PIN_THR_IN1, OUTPUT);
   pinMode(PIN_THR_IN2, OUTPUT);
-  pinMode(PIN_BALLAST_FILL, OUTPUT);
-  pinMode(PIN_BALLAST_DRAIN, OUTPUT);
+  pinMode(PIN_BALLAST_INA, OUTPUT);
+  pinMode(PIN_BALLAST_INB, OUTPUT);
   pinMode(PIN_LEAK_0, INPUT);
   pinMode(PIN_LEAK_1, INPUT);
   pinMode(PIN_LEAK_2, INPUT);

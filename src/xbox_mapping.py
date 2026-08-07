@@ -110,12 +110,14 @@ def _angle_diff(a: float, b: float) -> float:
 
 # Bearing from up (+clockwise °) → (fin_left, fin_right)
 _FIN_KEYPOINTS: list[tuple[float, float, float]] = [
-    (0.0, 1.0, 1.0),
-    (45.0, 0.0, 1.0),
-    (-45.0, 1.0, 0.0),
-    (135.0, 0.0, -1.0),
-    (-135.0, -1.0, 0.0),
-    (180.0, -1.0, -1.0),
+    (0.0, 1.0, 1.0),       # up — both up
+    (45.0, 0.0, 1.0),      # up-right
+    (-45.0, 1.0, 0.0),     # up-left
+    (90.0, 0.0, 0.0),      # right — both neutral
+    (-90.0, 0.0, 0.0),     # left — both neutral
+    (135.0, 0.0, -1.0),    # down-right
+    (-135.0, -1.0, 0.0),   # down-left
+    (180.0, -1.0, -1.0),   # down — both down
 ]
 
 
@@ -140,9 +142,28 @@ def _map_polar_fins(
     if abs(abs(bearing) - 180.0) <= half:
         return -mag, -mag
 
-    # Between snap zones: both fins equal (up/down from vertical stick component)
-    both = max(-1.0, min(1.0, mag * math.cos(math.radians(bearing))))
-    return both, both
+    # Outside snap windows: normal interpolation between keypoints
+    sorted_kp = sorted(_FIN_KEYPOINTS, key=lambda k: k[0])
+    extended: list[tuple[float, float, float]] = [
+        (-180.0, -1.0, -1.0),
+        *sorted_kp,
+        (180.0, -1.0, -1.0),
+    ]
+
+    fl = fr = 0.0
+    for i in range(len(extended) - 1):
+        b0, l0, r0 = extended[i]
+        b1, l1, r1 = extended[i + 1]
+        if b0 <= bearing <= b1:
+            t = (bearing - b0) / (b1 - b0) if b1 != b0 else 0.0
+            fl = l0 + t * (l1 - l0)
+            fr = r0 + t * (r1 - r0)
+            break
+
+    return (
+        max(-1.0, min(1.0, mag * fl)),
+        max(-1.0, min(1.0, mag * fr)),
+    )
 
 
 def map_xbox_to_actuators(
