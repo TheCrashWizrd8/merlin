@@ -100,11 +100,12 @@ Dashboard slider/mode state persists in browser **`sessionStorage`** across norm
 
 | Component | Connection |
 |-----------|------------|
-| Aft steer Y/Z, fins | PCA9685 ch 0–3 (I2C GPIO 21/22) when `ENABLE_PCA9685=1` |
+| Aft steer Y/Z, fins | PCA9685 @ 0x40 on I2C GPIO 29/30 |
+| IMU (pitch/roll) | MPU6050 GY-521 @ 0x68 on same I2C bus |
 | Thruster | L298N — GPIO 4 (IN1), 12 (IN2), 6 (PWM) |
-| Fore ballast | GPIO 13 INA, 14 INB, 7 pot ADC |
-| Aft ballast | GPIO 9 INA, 8 INB, 11 pot ADC |
-| Leak | GPIO 5 (active HIGH) |
+| Fore ballast | GPIO 13 DIR A, 14 PWM A, 11 pot ADC (Makerverse driver) |
+| Aft ballast | GPIO 8 DIR B, 9 PWM B, 7 pot ADC (Makerverse driver) |
+| Leak | GPIO 5 — Blue Robotics SOS (active HIGH) |
 | Battery | ADC GPIO 1 |
 | Depth | ADC GPIO 3 |
 
@@ -123,7 +124,8 @@ Full map: **`config/pins.yaml`**.
 | No telemetry | Run `probe_esp_uart.py`; check ESP is powered and flashed with `sub_rc` |
 | Rogue actuator commands on bench | Default mode is `manual`; center dashboard sliders; disconnect gamepad or set mode Manual |
 | Non-zero `S2` in serial monitor | Pi → ESP TX lines — not ESP sensor data; check control mode and sliders |
-| PCA9685 servos dead | `ENABLE_PCA9685=0` by default — set to `1` after I2C wiring on 21/22 |
+| PCA9685 servos dead | Confirm PCA9685 + MPU6050 share SDA/SCL on GPIO 29/30; boot should print `OK PCA9685` |
+| Gyro always zero | Confirm GY-521 on same I2C bus @ 0x68; boot should print `OK MPU6050` |
 
 ---
 

@@ -19,12 +19,12 @@ Expected ESP → Pi telemetry (sub_rc.ino):
   TEL heartbeat 42
 
 Pi → ESP commands:
-  B <fore> <aft>\\n                     ballast -1..+1 per tank (ESP drives INA/INB on/off)
+  B <fore> <aft>\\n                     ballast -1..+1 per tank (ESP drives DIR/PWM on/off)
   CAL B <fore|aft> top|bottom|show
   S2 <y> <z> F <fl> <fr> X <thr>\\n   sub actuators
 
 Ballast hardware (per tank, 5 wires): INA + INB + pot wiper (ADC) + pot 3.3V + pot GND.
-Fill/drain is digital only — no motor PWM on ballast pumps.
+Fill/drain is digital only — Makerverse DIR/PWM enable, no motor speed PWM on ballast pumps.
 """
 
 from __future__ import annotations
@@ -204,7 +204,9 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             return True
         if kind == "ballast" and len(parts) >= 7 and parts[2] in ("fore", "aft"):
             raw_level = float(parts[3])
-            level = None if raw_level < 0 else raw_level
+            adc = int(parts[4])
+            # -1 level with adc >= 0 means unwired sentinel; otherwise use raw/cal level
+            level = None if (raw_level < 0 and adc < 0) else max(0.0, raw_level)
             state.update_ballast_tank(
                 parts[2],
                 level,
@@ -233,6 +235,15 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             return True
         if kind == "heartbeat":
             state.update_heartbeat(int(parts[2]))
+            return True
+        if kind == "sonarpt" and len(parts) >= 4:
+            angle = int(float(parts[2]))
+            raw = float(parts[3])
+            range_m = None if raw < 0 else raw
+            state.update_sonar_point(angle, range_m)
+            return True
+        if kind == "sonar" and len(parts) >= 3 and parts[2].lower() == "sweep":
+            state.clear_sonar_scan()
             return True
         if kind == "controls":
             return True

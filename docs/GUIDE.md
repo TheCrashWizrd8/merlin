@@ -25,12 +25,16 @@
 21. [ESP32 Firmware & Upload](#21-esp32-firmware--upload)
 22. [Web Routes & HTTP API](#22-web-routes--http-api)
 23. [Tests & Verification](#23-tests--verification)
+24. [Stereo Cameras & Range](#24-stereo-cameras--range)
 
 ### Quick command index
 
 | Goal | Command |
 |------|---------|
 | YOLO + sub + web (production) | `python inference.py --web --timing` |
+| Stereo YOLO (two cameras) | `python inference.py --web --timing` (when `cameras.num_cameras: 2`) |
+| Switch YOLO model (dashboard) | `/sub/` → **Auto (YOLO)** → pick a model button |
+| Switch YOLO model (API) | `curl -X POST http://localhost:8080/sub/api/models/select -H 'Content-Type: application/json' -d '{"id":"detect"}'` |
 | Sub dashboard only | `python sub_server.py` |
 | Train model (Colab/GPU) | `python train.py` |
 | Fake dashboard data | `python scripts/test_telemetry.py` |
@@ -47,7 +51,9 @@
 The system detects apples in a live USB camera feed using Ultralytics YOLO, tracks the best apple, and outputs normalised **steering**, **drive**, and **camera tilt** commands. The Raspberry Pi runs the full **sub vehicle stack** over **GPIO UART or USB** (`sub_rc`) with telemetry, ballast, and extra actuators.
 
 ```
-USB Camera ──► Detector ──► Tracker ──► Controller ──► ControlOutput
+USB Camera(s) ──► Detector(s) ──► Tracker ──► Controller ──► ControlOutput
+                         │                         ▲
+                         └── stereo.triangulate ───┘  (2 cams, range_m)
                                               │              │
                                               │              └── TelemetryContext (safety)
                                               ▼
@@ -83,7 +89,7 @@ USB Camera ──► Detector ──► Tracker ──► Controller ──► C
 | Component | Role |
 |-----------|------|
 | Raspberry Pi 5 | Main compute (YOLO + control loop + web dashboard) |
-| USB endoscope camera | Live YOLO input (`/dev/video0`) |
+| USB endoscope camera(s) | Live YOLO input. One camera: `/dev/video0`. Stereo pair: left + right, centres **16 cm** apart |
 | ESP32-S3 (USB or GPIO UART to Pi) | Sub actuators, ballast, leak/ADC sensors, telemetry |
 | PCA9685 (I2C on ESP32) | Aft steer Y/Z + fore fin servos (when enabled) |
 | L298N + DC motor | Thruster |
@@ -115,15 +121,17 @@ Firmware and pin map: **`esp32/README.md`**, **`config/pins.yaml`**, **§17** an
 
 | File | Responsibility |
 |------|----------------|
-| `src/detector.py` | Ultralytics YOLO; returns `Detection` with bbox + class |
-| `src/tracker.py` | Picks target apple; bbox centre; `error_x` / `error_y`; bbox size |
+| `src/detector.py` | Ultralytics YOLO (pytorch / ncnn / openvino); bbox + optional mask centroid for *-seg |
+| `src/model_runtime.py` | **Model catalog** from `config/model.yaml`; hot-swap weights while inference runs |
+| `src/tracker.py` | Picks target apple; mask or bbox centre; `error_x` / `error_y`; bbox/mask size |
+| `src/stereo.py` | Parallel-camera triangulation from left/right bbox centres → `range_m` |
 | `src/controller.py` | `TrackResult` → `ControlOutput`; smoothing; size-based drive; telemetry **safety** only |
 | `src/telemetry_context.py` | Read-only ESP snapshot (depth, battery, gyro, leak, ballast) for controller + sub motion |
 | `src/hardware.py` | Maps `ControlOutput` to stub or `SubBridgeOutput` (single serial path via esp_bridge) |
 | `src/camera.py` | USB camera via OpenCV; MJPEG preferred; fourcc logged at open |
 | `src/display.py` | Bbox, crosshair, HUD (FPS, errors, proximity), gauges |
 | `src/control_source.py` | Manual vs auto for YOLO S/D/T (used by sub auto mode) |
-| `src/web_stream.py` | Flask MJPEG feed + `/snapshot` when using `--web` or sub stack |
+| `src/web_stream.py` | Flask `/snapshot` + MJPEG `/video_feed` when using `--web` or sub stack |
 | `src/dataset.py` | Resolves `data.yaml` (local or optional Roboflow download) |
 | `src/esp_bridge.py` | Serial to ESP32: telemetry in, S2/B commands out (~20 Hz) |
 | `src/sub_state.py` | Thread-safe sub telemetry, control modes, serial log |
@@ -142,9 +150,10 @@ Firmware and pin map: **`esp32/README.md`**, **`config/pins.yaml`**, **§17** an
 ### Data flow per frame
 
 ```
-cam.read()
-    └──► detector.detect(frame)     → List[Detection]
-              └──► tracker.update(...)  → TrackResult
+cam.read()  [+ right cam when stereo]
+    └──► model_runtime.detect(frame)  → List[Detection]   [one shared model; L then R when stereo]
+              └──► tracker.update(..., apple_label=runtime.track_label)  → TrackResult
+                        └──► stereo.triangulate(left, right)  → range_m
                         └──► TelemetryContext.from_sub_state()  (when interface: sub)
                         └──► controller.compute(track, telemetry)  → ControlOutput
                                   ├──► SubBridgeOutput.apply(output)
@@ -174,6 +183,15 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+For **NCNN / OpenVINO export** (once, after you have `weights/best.pt`):
+
+```bash
+pip install -r requirements-export.txt
+python scripts/export_model.py --format ncnn
+```
+
+Then set `backend: ncnn` in `config/model.yaml`. See **§11**.
 
 > **Note:** On ARM64 Pi, if `torch` fails, install CPU wheels, e.g.  
 > `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
@@ -331,7 +349,11 @@ Open `http://<pi-ip>:8080` (or `--web-port`). Live MJPEG at `/video_feed`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--device N` | `0` | USB camera index |
+| `--device N` | `0` | USB camera index (mono). In stereo this is the left camera if `--left-device` is omitted |
+| `--stereo` / `--no-stereo` | config | Force two-camera stereo, or force mono even when `num_cameras: 2` |
+| `--left-device` / `--right-device` | `cameras.*` | Stereo camera indexes or `/dev/videoN` paths |
+| `--backend` | `model.yaml` | `pytorch`, `ncnn`, or `openvino` |
+| `--imgsz N` | `model.yaml` | Model input size (**640** for distant apples; `320` if you need FPS) |
 | `--width` / `--height` | `640` / `480` | Capture size |
 | `--headless` | off | No OpenCV window (also auto-on when sub/web server runs) |
 | `--print-on-detect` | off | Print ControlOutput table only when apple detected |
@@ -350,19 +372,31 @@ Open `http://<pi-ip>:8080` (or `--web-port`). Live MJPEG at `/video_feed`.
 
 ### Performance notes
 
-Expected on Pi 5 with yolov8n @ 640×480: roughly **8–15 FPS** end-to-end (HUD `FPS:` line). The FIT0819 endoscope captures MJPEG at ~25 FPS; YOLO is the main CPU load.
+Expected on Pi 5 with **yolov8n + NCNN @ imgsz=640**: one camera ~10–15 FPS; stereo is two sequential passes (~7 FPS). Latest-frame capture keeps latency low by dropping stale USB frames instead of queueing them. Use `img_size: 320` only if you need more FPS and can accept missing distant apples.
+
+Measured on this Pi 5 (yolov8n):
+
+| Backend | imgsz | Detector only | Notes |
+|---------|-------|---------------|-------|
+| `pytorch` | 640 | ~304 ms | Default Ultralytics `.pt` |
+| `ncnn` | 640 | ~68 ms | ~4.5× vs PyTorch |
+| `ncnn` | 320 | ~20 ms | Faster; misses small/distant apples |
+
+Stereo = two sequential NCNN passes on the shared model (~2× detector time), not two processes fighting for CPU.
 
 | Symptom | Likely cause |
 |---------|--------------|
-| ~1 FPS in terminal/HUD | OpenCV window over VNC — use `--web` / sub mode (headless) or `--headless` |
-| Slow `/sub/` camera vs HUD | Camera capture/YOLO is the bottleneck — check `--timing`; dashboard MJPEG matches `/video_feed` (~15 FPS server-side) |
-| Slow `yolo=` in `--timing` | Lower `img_size` to `320` in `config/model.yaml` |
+| ~1 s video lag in Firefox | Stream is latest-frame preview (not gated on YOLO). Use `/` or `/sub/`, not `/video_feed`. Boxes can lag one detect cycle; the pixels should not. |
+| ~0.5 s video lag on LAN or Tailscale, HUD FPS looks fine | Browser MJPEG buffer. Pages poll `/snapshot` as blobs. Compare HUD `Clk` to a phone clock. |
+| Slow `/sub/` camera vs HUD | Camera capture/YOLO is the bottleneck — check `--timing`; dashboard uses the same `/snapshot` poll as `/`. |
+| Slow `yolo=` in `--timing` | Confirm `backend: ncnn` and that `weights/best_ncnn_model/` exists; or lower `img_size` to `320` |
 | Slow `cap=` in `--timing` | Camera not in MJPEG — check startup line `fourcc=MJPG` |
 
 Example `--timing` output:
 
 ```
 [perf] cap=15ms yolo=70ms ctrl+draw=8ms total=93ms hud_fps=10.8
+[stereo] range=1.42m  z=1.40m  d=74.0px
 ```
 
 ---
@@ -383,6 +417,8 @@ Example `--timing` output:
 | `confidence` | Detection confidence |
 | `chosen_label` | Class name (e.g. `apple`) |
 | `proximity_t` | 0 = far, 1 = close (from bbox size) |
+| `range_m` | Stereo range from camera midpoint to apple (metres); `None` if mono / no pair |
+| `stereo_ok` / `stereo_note` | Whether triangulation succeeded; miss reason (`left_miss`, `y_mismatch`, …) |
 | `approach_note` | Human-readable safety/alignment notes |
 | `depth_m_used` | Display-only depth from telemetry (not used to steer) |
 | `timestamp` | `time.time()` |
@@ -451,7 +487,7 @@ Key sections:
 
 - **`interface`**: `stub` | `sub`
 - **`sub_serial`**: `port`, `baud_rate` (ESP32 link)
-- **`cameras.num_cameras`**: 1–3 (placeholder for future multi-camera)
+- **`cameras`**: `num_cameras` (1 = mono, 2 = stereo), `left_device`, `right_device`, `baseline_cm` (16), `fov_h_deg` (67), matching thresholds — see **§24**
 - **Control**: `deadzone`, `min_steer_command`, `min_tilt_command`, `min_drive_command`, `smoothing_alpha`, `confidence`, `hold_missed_frames`, etc.
 - **Size-based drive**: `use_size_for_drive`, `size_drive_far`, `size_drive_close`, `size_min_ratio`, `size_max_ratio`, `size_smoothing_alpha`, `size_curve` (`sqrt` or `linear`)
 - **`approach:`**: telemetry safety — `use_telemetry`, `stop_on_leak`, `min_battery_v`, `low_battery_drive_scale`, `max_error_x/y_for_drive`
@@ -477,11 +513,117 @@ local_path: "data/your-dataset-folder"
 
 ## 11. Swapping the YOLO Model
 
-Edit `config/model.yaml`:
+You can run **more than one trained model** on the Pi and switch between them without restarting inference. The catalog lives in **`config/model.yaml`** under `models:`; the sub dashboard exposes it when **Auto (YOLO)** mode is selected.
+
+### Current deployment
+
+| Catalog ID | Label | Weights | Task | Status |
+|------------|-------|---------|------|--------|
+| `detect` | Detect | `weights/best.pt` | detect | **Deployed** — YOLOv8n, 50 epochs, NCNN export |
+| `seg` | Seg (future) | `weights/best_seg.pt` | segment | Placeholder — add `.pt` + export later |
+| `seg_fast` | Seg 320 (future) | `weights/best_seg_320.pt` | segment | Placeholder — optional smaller/faster seg train |
+
+Startup loads whatever **`active_model:`** points at (today: `detect`).
+
+### Model catalog (`config/model.yaml`)
 
 ```yaml
-architecture: yolov8s
+active_model: detect
+
+models:
+  detect:
+    label: "Detect"
+    weights: weights/best.pt
+    task: detect
+    track_label: apple
+  seg:
+    label: "Seg (future)"
+    weights: weights/best_seg.pt
+    task: segment
+    track_label: apple
+```
+
+| Key (per entry) | Purpose |
+|-----------------|--------|
+| `label` | Button text on the `/sub/` dashboard |
+| `weights` | Path to the `.pt` file (relative to project root) |
+| `task` | `detect`, `segment`, or `auto` (infer from checkpoint) |
+| `track_label` | Class name the tracker follows (must match training labels) |
+
+Global keys still apply to every catalog entry:
+
+| Key | Purpose |
+|-----|---------|
+| `backend` | `ncnn` (Pi default), `pytorch`, or `openvino` |
+| `confidence` / `iou` | Detection thresholds |
+| `img_size` | Square input size — re-export NCNN after changing |
+| `architecture` | Fallback Ultralytics name when no weights (training only) |
+
+### Dashboard: switch models in Auto mode
+
+1. Run `python inference.py --web --timing` (inference must be running for a live reload).
+2. Open **`http://<pi-ip>:8080/sub/`**.
+3. Click **Auto (YOLO)** — a second row **YOLO model** appears under the mode tabs.
+4. Click a model button. Reload takes a few seconds; status shows `Loading…` then the active task.
+
+**UI behaviour:**
+
+- **Available** models are normal buttons; the active one is highlighted green.
+- **Unavailable** models (missing `.pt` or NCNN folder) are greyed out — hover for the reason.
+- Your last choice is saved in browser **`sessionStorage`** with mode/slider state.
+- **`track_label`** comes from the catalog entry, so detect vs seg can target different class strings without restarting with `--apple-label`.
+
+### API: list and select models
+
+| Route | Method | Body | Purpose |
+|-------|--------|------|---------|
+| `/sub/api/models` | GET | — | Catalog + `active_id` + load status |
+| `/sub/api/models/select` | POST | `{"id": "detect"}` | Switch model (reloads YOLO if inference is running) |
+
+Example:
+
+```bash
+curl http://localhost:8080/sub/api/models
+curl -X POST http://localhost:8080/sub/api/models/select \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"detect"}'
+```
+
+SSE payload from **`/sub/api/stream`** includes a top-level **`models`** object (same shape as `GET /sub/api/models`) so the dashboard stays in sync.
+
+If inference is **not** running (dashboard-only via `sub_server.py`), `POST …/select` stores the requested ID in `sub_state`; the next `inference.py` start loads that model.
+
+### How switching works (`src/model_runtime.py`)
+
+1. **`init_model_runtime()`** at inference startup reads the catalog and loads **`active_model`** (or a pending ID from a previous dashboard selection).
+2. Each frame, **`model_runtime.detect(frame)`** checks whether the dashboard requested a different ID and reloads if needed (thread-safe; brief pause while NCNN loads).
+3. **`Detector.reload()`** swaps weights/task without restarting the whole Pi process.
+4. Stale NCNN exports are rejected if the `.pt` is newer than the `*_ncnn_model/` folder — re-export after replacing weights.
+
+Segmentation models (`task: segment`) use **mask centroids** for tracking and stereo when masks are present; detect models use bbox centres.
+
+### Add a new model to the catalog
+
+1. Copy the trained **`.pt`** into `weights/` (e.g. `weights/best_seg.pt`).
+2. Export for NCNN (required when `backend: ncnn`):
+
+```bash
+python scripts/export_model.py --weights weights/best_seg.pt --format ncnn
+```
+
+3. Add or uncomment an entry under **`models:`** in `config/model.yaml` (set `task: segment` for YOLOv8-seg weights).
+4. Restart inference once so the new catalog entry is read, **or** hot-switch from the dashboard if the entry was already in YAML.
+5. Set **`active_model:`** if you want that model on every cold start.
+
+### Single-model / legacy swap (no catalog)
+
+To change the one default weights file without the picker, edit top-level keys:
+
+```yaml
+architecture: yolov8n
+task: detect
 weights: weights/best.pt
+active_model: detect
 ```
 
 Approximate Pi5 performance (CPU inference, varies by resolution):
@@ -492,7 +634,74 @@ Approximate Pi5 performance (CPU inference, varies by resolution):
 | yolov8s | Slower |
 | yolov8m | Much slower |
 
-Use `img_size: 320` or `640` per `model.yaml` to trade accuracy vs speed.
+`img_size: 640` is the Pi default (distant apples). Use `320` only if you need more FPS — then re-export NCNN.
+
+### Faster inference backends (NCNN / OpenVINO)
+
+PyTorch `.pt` inference is usable but slow on Pi CPU (~300 ms / frame). Ultralytics can run the **same trained weights** through an exported runtime. On Raspberry Pi (ARM64), **NCNN is the one to use**.
+
+| Backend | Pi 5 | Notes |
+|---------|------|-------|
+| `pytorch` | ~304 ms | No export step; keep for training / fallback |
+| `ncnn` | **~68 ms @ 640** (~20 ms @ 320) | Fastest on ARM; 640 preferred for range |
+| `openvino` | variable | Intel-optimised; supported if you want to compare |
+
+`Detector` reads `backend` from `config/model.yaml` (or `--backend` on the CLI) and loads:
+
+| Backend | What is loaded |
+|---------|----------------|
+| `pytorch` | `weights/best.pt` |
+| `ncnn` | `weights/best_ncnn_model/` (sibling of the `.pt`) |
+| `openvino` | `weights/best_openvino_model/` |
+
+**One-time export** after training (on the Pi, or on Colab/x86 if Pi wheels fail):
+
+```bash
+pip install -r requirements-export.txt
+python scripts/export_model.py --format ncnn
+# optional comparison:
+python scripts/export_model.py --format openvino
+```
+
+`export_model.py` uses `img_size` from `model.yaml` unless you pass `--imgsz`. The export must match the size you run at inference.
+
+Set in `config/model.yaml`:
+
+```yaml
+backend: ncnn
+weights: weights/best.pt
+```
+
+Then:
+
+```bash
+python inference.py --web --timing
+# or override without editing YAML:
+python inference.py --web --timing --backend ncnn
+```
+
+If the exported folder is missing you get:
+
+```
+Exported ncnn model not found: .../weights/best_ncnn_model
+Run: python scripts/export_model.py --format ncnn
+```
+
+**Re-export whenever you replace a `.pt`.** The NCNN folder is not updated automatically. Each catalog entry has its own weights path and export folder (e.g. `best.pt` → `best_ncnn_model/`, `best_seg.pt` → `best_seg_ncnn_model/`).
+
+For **segmentation** weights, set `task: segment` on the catalog entry (or top-level `task:`). A detect NCNN export will not run a seg checkpoint. Class names must match each entry's `track_label` (default `apple`). The dashboard model picker switches `track_label` automatically when you change models.
+
+If `best_ncnn_model/` still came from an older train, delete that folder and export again from the current `.pt`.
+
+If `pip install ncnn` / `pnnx` fails on the Pi (Python 3.13 / SSL / missing wheels), export on Colab:
+
+```python
+from ultralytics import YOLO
+model = YOLO("best.pt")
+model.export(format="ncnn", imgsz=640)
+```
+
+Copy the resulting `best_ncnn_model/` directory onto the Pi under `weights/`.
 
 ---
 
@@ -533,6 +742,18 @@ ls /dev/video*
 python inference.py --device 1
 ```
 
+UVC cameras often expose **two** `/dev/video*` nodes each (capture + metadata). A second physical camera is usually index **2**, not 1. See **§24**.
+
+### Stereo camera / range problems
+
+| Symptom | Fix |
+|---------|-----|
+| Right camera fails to open | Linux never saw a second USB camera. `v4l2-ctl --list-devices` should show **two** `HD Camera` (or similar) entries. One entry = unplugged, unpowered, or dead camera/cable. Inference now falls back to mono instead of exiting. |
+| `negative_disparity (swap left/right…)` | Swap `left_device` / `right_device` in `hardware.yaml` |
+| `y_mismatch` | Cameras not level, or two different apples; raise `match_max_dy_px` or mount them parallel |
+| Range wildly wrong | Confirm `baseline_cm: 16` and `fov_h_deg: 67`; measure a known distance and compare HUD `Range` |
+| No `Range` on HUD | Both cameras must see the same apple in the same frame |
+
 ### Weights missing
 
 Train or set `weights:` in `config/model.yaml`, or use empty `weights` to download pretrained backbone (development only).
@@ -558,6 +779,13 @@ pip install roboflow
 
 ### Slow inference on Pi
 
+- **Use NCNN** (recommended on Pi 5): export once, then set `backend: ncnn` in `config/model.yaml`:
+  ```bash
+  pip install -r requirements-export.txt
+  python scripts/export_model.py --format ncnn
+  python inference.py --web --timing
+  ```
+  Measured here: **~68 ms** NCNN vs **~304 ms** PyTorch (~4.5×). OpenVINO (`--format openvino`) is supported but tuned for Intel CPUs.
 - Use `yolov8n`, lower `img_size` to `320` in `config/model.yaml`.
 - Run with `--web` or `interface: sub` so OpenCV window is skipped (headless).
 - Use `--timing` to see whether `cap` or `yolo` dominates.
@@ -568,6 +796,7 @@ v4l2-ctl -d /dev/video0 --set-fmt-video=width=640,height=480,pixelformat=MJPG
 ```
 
 - Judge FPS from HUD `FPS:` or `[perf]` lines — dashboard camera uses the same MJPEG feed as `/video_feed`.
+- **~0.5 s lag** is usually a USB frame backlog (camera still sending 1600×1200 MJPEG while we decode every queued frame). The grabber now drains compressed frames and JPEG-decodes only the newest one. If startup still prints `native=1600x1200 forcing=640x480`, the camera ignored the format request — latency will stay high until `v4l2-ctl --get-fmt-video` shows 640×480 MJPG.
 
 ### Camera not connected
 
@@ -606,9 +835,9 @@ The sub dashboard uses three modes (stored in `src/sub_state.py`):
 |------|--------|-------------|
 | `manual` | Web UI or `POST /sub/api/control` | **Default on bench** — sliders stay put until you move them |
 | `xbox` | Xbox/gamepad sticks and triggers | Manual driving when a pad is connected |
-| `auto` | `sub_motion.plan_sub_motion()` | When inference is running (YOLO + layered actuators) |
+| `auto` | `sub_motion.plan_sub_motion()` | When inference is running (YOLO + layered actuators). Shows **YOLO model** picker row. |
 
-**Inference auto mode:** On startup, inference sets server mode to **auto**. The dashboard may restore **manual** from browser `sessionStorage` on first load — click **Auto (YOLO)** on the dashboard if actuators stay at zero.
+**Inference auto mode:** On startup, inference sets server mode to **auto**. The dashboard may restore **manual** from browser `sessionStorage` on first load — click **Auto (YOLO)** on the dashboard if actuators stay at zero. In Auto mode, use the **YOLO model** buttons to switch between catalog entries (see **§11**).
 
 **Xbox fallback:** If mode is `xbox` but no controller is connected, the Pi keeps sending your **manual slider values** (not stale stick input).
 
@@ -903,6 +1132,7 @@ When YOLO is running and sub mode is **auto**:
 | **Ballast** | `cmd ±X · FILL/DRAIN` from ESP telemetry when YOLO commands height trim |
 | **Serial monitor** | Live `S2 …` and `B …` TX lines plus `TEL …` RX |
 | **Mode badge** | May show browser-saved mode — click **Auto (YOLO)** if needed |
+| **YOLO model row** | Visible in Auto mode only — switch detect / seg / … from `models:` catalog (**§11**) |
 
 Example serial during approach with apple below centre:
 
@@ -922,6 +1152,8 @@ TEL gyro 2.1 -8.4 0.0
 | `/sub/api/status` | GET | ESP/Xbox connection, leak alarm, control mode |
 | `/sub/api/telemetry` | GET | Aggregated battery, gyro, depth, leaks, ballast |
 | `/sub/api/control` | GET/POST | Control mode + manual actuator values |
+| `/sub/api/models` | GET | YOLO catalog, active model ID, load status |
+| `/sub/api/models/select` | POST | Switch YOLO model (`{"id": "detect"}`) — hot reload when inference runs |
 | `/sub/api/actuators` | GET | Effective/auto/manual/xbox-mapped actuators |
 | `/sub/api/control/ballast` | POST | Ballast fill/drain/stop or raw fore/aft values |
 | `/sub/api/ballast/calibrate` | POST | Send `CAL B <tank> top\|bottom` to ESP |
@@ -946,7 +1178,7 @@ The dashboard opens one **`EventSource`** to `/sub/api/stream`. The server pushe
 |-------|---------|
 | **Telemetry** | Battery, depth, gyro horizon, leak grid |
 | **Ballast** | Fore/aft level bars, fill/drain/stop, per-tank sliders, calibration |
-| **Control** | Mode tabs (Manual / Xbox / Auto), stick viz, manual actuator sliders, live actuator bars |
+| **Control** | Mode tabs (Manual / Xbox / Auto), **YOLO model picker (Auto only)**, stick viz, manual sliders, actuator bars |
 | **Pin diagnostics** | Expected vs ESP-reported pins, PING/PINS/TEST checklist |
 | **ESP Serial Monitor** | Live Pi ↔ ESP log (TX/RX) and raw command input |
 
@@ -973,7 +1205,7 @@ Send raw ESP commands in the input box (e.g. `PING`, `PINS`, `HELP`). Line endin
 
 The dashboard keeps your control choices across normal page reloads:
 
-1. **Saved in `sessionStorage`** — mode, all manual actuator sliders, fore/aft ballast slider values.
+1. **Saved in `sessionStorage`** — mode, selected **YOLO model ID**, manual actuator sliders, fore/aft ballast slider values.
 2. **Restored on load** — before the SSE stream connects, saved values are applied to the UI and POSTed to `/sub/api/control`, `/sub/api/control/actuators`, and `/sub/api/control/ballast`.
 3. **Stream does not move sliders** — live updates refresh actuator **bars** only; slider positions stay where you set them.
 4. **Server re-sync** — if the backend mode drifts (e.g. after `sub_server.py` restart), the dashboard re-applies your saved mode and values.
@@ -1326,7 +1558,22 @@ Creates **`dataset.zip`** from **`data/images/`** (must contain `data.yaml`). Co
 
 ---
 
-### 19.6 `train_colab.ipynb`
+### 19.6 `scripts/export_model.py`
+
+Export `weights/best.pt` to **NCNN** (recommended on Pi) or **OpenVINO**.
+
+```bash
+pip install -r requirements-export.txt
+python scripts/export_model.py --format ncnn
+python scripts/export_model.py --format openvino
+python scripts/export_model.py --weights weights/best.pt --imgsz 320
+```
+
+Creates `weights/best_ncnn_model/` or `weights/best_openvino_model/`. Then set `backend:` in `config/model.yaml`. Re-run after every retrain. Full notes: **§11**.
+
+---
+
+### 19.7 `train_colab.ipynb`
 
 Self-contained Google Colab notebook at project root. Typical flow:
 
@@ -1347,8 +1594,12 @@ All YAML lives in **`config/`**. Paths are relative to project root unless absol
 
 | Key | Example | Used by | Description |
 |-----|---------|---------|-------------|
-| `architecture` | `yolov8n` | `train.py`, `inference.py` | Ultralytics model name |
-| `weights` | `weights/best.pt` | `inference.py` | Trained `.pt` path; empty = pretrained backbone only |
+| `architecture` | `yolov8n` | `train.py`, fallback | Ultralytics model name when no weights |
+| `task` | `detect` | `Detector` | `detect` \| `segment` \| `auto` — must match weights |
+| `backend` | `ncnn` | `Detector` | `pytorch` \| `ncnn` \| `openvino` — see **§11** |
+| `weights` | `weights/best.pt` | legacy default | Top-level default `.pt`; catalog entries override per model |
+| `active_model` | `detect` | `ModelRuntime` | Catalog ID loaded at startup |
+| `models` | see **§11** | `ModelRuntime`, dashboard | Map of switchable models (`label`, `weights`, `task`, `track_label`) |
 | `confidence` | `0.50` | `Detector` | Detection confidence threshold |
 | `iou` | `0.45` | `Detector` | NMS IoU threshold |
 | `img_size` | `640` | train + infer | Square input size |
@@ -1379,7 +1630,7 @@ All YAML lives in **`config/`**. Paths are relative to project root unless absol
 | **Size drive** | `use_size_for_drive`, `size_drive_far`, `size_drive_close`, `size_min_ratio`, `size_max_ratio`, `size_smoothing_alpha`, `size_curve` | Bbox area → forward speed |
 | **`approach`** | `use_telemetry`, `stop_on_leak`, `min_battery_v`, `low_battery_drive_scale`, `max_error_x_for_drive`, `max_error_y_for_drive` | Telemetry safety on drive |
 | **`sub_motion`** | `level_roll_gain`, `level_pitch_gain`, `max_fin_command`, `max_roll_deg`, `max_pitch_deg`, `require_level_for_steer`, `require_level_for_drive`, `use_ballast_for_height`, `ballast_height_gain`, `ballast_error_deadzone`, `ballast_max_command` | Layered auto actuators (**§15**) |
-| **`cameras`** | `num_cameras` | Placeholder for future multi-cam (1–3) |
+| **`cameras`** | `num_cameras`, `left_device`, `right_device`, `baseline_cm`, `fov_h_deg`, `focal_length_px`, `match_max_dy_px`, `min_disparity_px` | Mono vs stereo; **§24** |
 
 ---
 
@@ -1504,7 +1755,9 @@ See **§16** for narrative docs. Summary:
 | `/sub/api/telemetry/depth` | `{ meters, connected }` |
 | `/sub/api/telemetry/leaks` | `{ sensors[], triggered, connected }` |
 | `/sub/api/telemetry/ballast` | Fore/aft levels and commands |
-| `/sub/api/control` | Mode, effective/auto/manual/xbox actuators, ballast commands |
+| `/sub/api/control` | Mode, effective/auto/manual/xbox actuators, ballast commands, **yolo_model_id**, **yolo_model_status** |
+| `/sub/api/models` | Catalog entries, `active_id`, per-model `available` flag, load status |
+| `/sub/api/models/select` | POST `{"id": "…"}` — switch YOLO weights (see **§11**) |
 | `/sub/api/actuators` | Same actuator breakdown |
 | `/sub/api/xbox` | Raw pad state |
 | `/sub/api/serial?limit=N` | Serial log lines (1–500) |
@@ -1517,6 +1770,7 @@ See **§16** for narrative docs. Summary:
 | Route | Body (JSON) | Effect |
 |-------|-------------|--------|
 | `/sub/api/control` | `{ "mode": "auto"\|"manual"\|"xbox", "aftSteerY": 0.5, ... }` | Set mode and/or manual actuators |
+| `/sub/api/models/select` | `{ "id": "detect" }` | Switch active YOLO model from catalog |
 | `/sub/api/control/actuators` | `{ "aftSteerY", "thrusterX", "finLeft", ... }` | Manual actuators (forces manual) |
 | `/sub/api/control/ballast` | `{ "action": "fill"\|"drain"\|"stop", "tank": "fore"\|"aft"\|"both" }` or `{ "fore": 1.0, "aft": -1.0 }` or `{ "value": 0.5, "tank": "fore" }` | Ballast command |
 | `/sub/api/ballast/calibrate` | `{ "tank": "fore", "end": "top"\|"bottom" }` | Send `CAL B` to ESP |
@@ -1578,6 +1832,22 @@ print('ok')
 | `test_thruster_gated_when_rolled` | High roll reduces thruster |
 | `test_ballast_apple_below_fills` | Positive `error_y` → fill command |
 
+### 23.1b `tests/test_stereo.py`
+
+Pinhole triangulation checks (`src/stereo.py`).
+
+```bash
+pytest tests/test_stereo.py -v
+```
+
+| Test | Verifies |
+|------|----------|
+| `test_focal_length_from_67deg` | FOV 67° @ 640 px → f ≈ 483 px |
+| `test_range_on_axis_one_metre` | 16 cm baseline recovers ~1 m |
+| `test_closer_object_has_larger_disparity` | Near > far disparity |
+| `test_y_mismatch_rejected` | Vertical mismatch is not paired |
+| `test_negative_disparity_suggests_swap` | Swapped cameras flagged |
+
 ### 23.2 End-to-end checklists
 
 **YOLO + camera:**
@@ -1614,6 +1884,99 @@ python scripts/test_telemetry.py --leak-alarm
 ```bash
 python -m src.xbox_controller
 python sub_server.py   # then open /sub/ and switch to Xbox mode
+```
+
+---
+
+## 24. Stereo Cameras & Range
+
+Two USB cameras share **one YOLO model**. Left and right frames are detected **sequentially** (two NCNN nets in parallel oversubscribe the Pi). When both see the same apple, the system triangulates range from the **matched centres** (mask centroid for *-seg, bbox centre for detect).
+
+### Geometry
+
+Cameras are treated as a **parallel** stereo pair (optical axes pointing the same way, same height, no toe-in):
+
+```
+        left                         right
+          *---------------------------*
+                     16 cm
+                       │
+                       ▼
+                 stereo midpoint
+                       │
+                       │  range
+                       ▼
+                     apple
+```
+
+```
+Z     = (f × B) / d
+range = sqrt(X² + Y² + Z²)
+```
+
+| Symbol | Meaning | Config |
+|--------|---------|--------|
+| B | Baseline (lens-centre spacing) | `cameras.baseline_cm: 16` |
+| FOV | View angle (usually **diagonal** on USB cams) | `cameras.fov_h_deg: 67`, `fov_is_diagonal: true` |
+| f | Focal length in pixels | diagonal: `f = (diag/2) / tan(FOV/2)`; or set `focal_length_px` |
+| d | Disparity | `x_left − x_right` of the matched bbox centres |
+
+`range_m` is the 3D distance from the **midpoint between the two cameras** to the apple. HUD shows `Range: 1.23 m`. `--timing` logs `[stereo] range=… z=… d=…px`.
+
+### Config (`config/hardware.yaml`)
+
+```yaml
+cameras:
+  num_cameras: 2
+  left_device: 0
+  right_device: 2
+  baseline_cm: 16.0
+  fov_h_deg: 67.0
+  fov_is_diagonal: true
+  match_max_dy_px: 40
+  min_disparity_px: 2.0
+```
+
+Set `num_cameras: 1` (or pass `--no-stereo`) to go back to a single camera.
+
+### Run
+
+```bash
+python inference.py --web --timing
+# force device indexes if UVC nodes are not 0 and 2:
+python inference.py --web --left-device 0 --right-device 2
+```
+
+The web stream is **side-by-side** (L | R) with each camera’s box and the shared range.
+
+Both cameras are forced to the same working size (`--width`/`--height`, default 640×480). If a UVC camera ignores that request and stays at native res (e.g. 1600×1200), frames are resized before YOLO so disparity is in one pixel grid.
+
+### Assumptions (tell us if any of these are wrong)
+
+1. Both cameras have the same **67°** view (treated as **diagonal** unless `fov_is_diagonal: false`).
+2. Lens centres are **16 cm** apart.
+3. Cameras are **level** and **parallel** (not aimed inward).
+4. `left_device` is the camera on the **port / left** side of the sub when looking forward.
+5. Correspondence uses the **bbox centre**, not a calibrated stereo map (no undistort / rectify yet).
+
+Treating a USB “67°” spec as horizontal FOV under-reads range (a 50 cm apple showed ~38 cm). If it is still consistently high or low, set `range_scale: tape_m / HUD_m` (e.g. `0.50 / 0.48`) or `focal_length_px` after a one-point check on the centreline.
+
+### Device indexes
+
+Many UVC cameras register **two** V4L nodes. Typical layout:
+
+| Node | Role |
+|------|------|
+| `/dev/video0` | Camera A capture |
+| `/dev/video1` | Camera A metadata (do not use) |
+| `/dev/video2` | Camera B capture |
+| `/dev/video3` | Camera B metadata |
+
+If the right image is black or identical to the left, you opened the metadata node — bump the index.
+
+```bash
+bash scripts/check_camera.sh
+v4l2-ctl --list-devices
 ```
 
 ---

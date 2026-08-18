@@ -30,8 +30,17 @@ esp32:
     serial_timeout_ms: 8000
 
   i2c:
-    sda_gpio: 21    # was 29 — GPIO 29/30 are flash SPI on ESP32-S3 (do not use)
-    scl_gpio: 22    # was 30
+    sda_gpio: 8     # NOT 29/30 — those are flash pins on ESP32-S3 (boot loop)
+    scl_gpio: 9
+    # Shared bus — wire SDA/SCL in parallel to each module
+    devices:
+      - name: PCA9685
+        address: 0x40
+        role: 16-channel servo driver (aft steer Y/Z, fore fins L/R)
+      - name: MPU6050
+        module: GY-521
+        address: 0x68    # AD0 → GND; use 0x69 if AD0 → 3.3V
+        role: gyro + accelerometer (pitch/roll telemetry)
 
 # ---------------------------------------------------------------------------
 # PCA9685 (servo driver)
@@ -67,6 +76,11 @@ pca9685:
     fin_right:
       channel: 3
       role: sub_fore_fin_right
+    sonar_servo:
+      channel: 4
+      role: sub_sonar_sweep
+      sweep_deg: [-180, 180]
+      step_deg: 5
 
 # ---------------------------------------------------------------------------
 # Motor driver (L298N) — thruster
@@ -96,26 +110,38 @@ sub:
     baud_rate: 115200
 
   ballast:
-    # 5 wires per tank: INA, INB, pot wiper (ADC), pot 3.3V, pot GND
-    # Motor is on/off fill/drain only — no PWM speed control
+    # Makerverse Motor Driver 2 Channel — DIR/PWM mode (on/off fill/drain, no speed PWM)
+    # 5 wires per tank: DIR, PWM, pot wiper (ADC), pot 3.3V, pot GND
+    driver: makerverse_2ch
     fore:
-      ina_gpio: 13
-      inb_gpio: 14
-      pot_adc_gpio: 7
-    aft:
-      ina_gpio: 9
-      inb_gpio: 8
+      dir_gpio: 13    # DIR A
+      pwm_gpio: 14    # PWM A
       pot_adc_gpio: 11
+    aft:
+      dir_gpio: 8     # DIR B
+      pwm_gpio: 9     # PWM B
+      pot_adc_gpio: 7
 
   leaks:
-    gpios: []    # set to [5] when wired; PIN_LEAK in sub_rc.ino
+    gpios: [5]    # Blue Robotics SOS leak detector (active HIGH)
 
   adc:
     battery: 1
     depth: 3
 
-  imu_i2c_addr: 0x68
+  imu:
+    module: GY-521
+    chip: MPU6050
+    i2c_address: 0x68
+    bus: i2c    # same SDA/SCL as PCA9685
   depth_i2c_addr: 0
+
+  sonar:
+    module: HC-SR04_or_JSN-SR04T
+    trig_gpio: 15
+    echo_gpio: 16
+    max_range_m: 6.0
+    servo_channel: 4   # PCA9685
 
   axes:
     aftSteerY: float in [-1,1]

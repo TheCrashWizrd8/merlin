@@ -5,12 +5,13 @@ Main inference loop.  Run this on the Raspberry Pi 5.
 
 What it does each frame
 -----------------------
-1.  Capture frame from USB camera  (src/camera.py)
-2.  Run YOLO detection             (src/detector.py)
+1.  Capture frame(s) from USB camera(s)  (src/camera.py)
+2.  Run YOLO detection (one or two models)  (src/detector.py)
 3.  Pick best apple + compute error (src/tracker.py)
-4.  Compute servo/motor commands   (src/controller.py)
-5.  Print ControlOutput table      (controller.ControlOutput.pretty())
-6.  Draw annotated camera view     (src/display.py)
+4.  Optional stereo range from bbox centres (src/stereo.py)
+5.  Compute servo/motor commands   (src/controller.py)
+6.  Print ControlOutput table      (controller.ControlOutput.pretty())
+7.  Draw annotated camera view     (src/display.py)
 
 Usage
 -----
@@ -22,6 +23,9 @@ Usage
 
     # Different camera device
     python inference.py --device 1
+
+    # Two-camera stereo (also the default when cameras.num_cameras: 2)
+    python inference.py --web --timing --left-device 0 --right-device 2
 
     # Skip printing every frame (only print when apple is detected)
     python inference.py --print-on-detect
@@ -52,8 +56,28 @@ def parse_args() -> argparse.Namespace:
         description="YOLO apple detection inference on Raspberry Pi 5."
     )
     parser.add_argument(
-        "--device", type=int, default=0,
-        help="USB camera device index (default: 0)",
+        "--device", type=int, default=None,
+        help="USB camera device index (mono mode; default: 0, or cameras.left_device)",
+    )
+    parser.add_argument(
+        "--stereo",
+        action="store_true",
+        help="Force two-camera stereo (overrides cameras.num_cameras)",
+    )
+    parser.add_argument(
+        "--no-stereo",
+        action="store_true",
+        help="Force single-camera mode even when cameras.num_cameras is 2",
+    )
+    parser.add_argument(
+        "--left-device",
+        default=None,
+        help="Left stereo camera index or /dev/videoN (default: cameras.left_device)",
+    )
+    parser.add_argument(
+        "--right-device",
+        default=None,
+        help="Right stereo camera index or /dev/videoN (default: cameras.right_device)",
     )
     parser.add_argument(
         "--width", type=int, default=640,
@@ -80,6 +104,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--apple-label", type=str, default="apple",
         help="Class label string used by the dataset (default: 'apple')",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["pytorch", "ncnn", "openvino"],
+        default=None,
+        help="Override inference backend from config/model.yaml (ncnn recommended on Pi)",
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=None,
+        help="Override model input size from config/model.yaml (320 is faster on Pi)",
     )
     parser.add_argument(
         "--web", action="store_true",
@@ -140,6 +176,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _quiet_third_party_logs() -> None:
+    """Stop Flask/Ultralytics/OpenCV from printing on every request/frame."""
+    import logging
+    import os
+
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    logging.getLogger("ultralytics").setLevel(logging.ERROR)
+
+
 def _print_web_urls(web_host: str, web_port: int) -> None:
     """Print URLs for the web stream, including Tailscale IP when available."""
     if web_host != "0.0.0.0":
@@ -187,6 +233,123 @@ def _sub_stack_enabled(args: argparse.Namespace, hw_config: dict) -> bool:
     return (hw_config.get("interface") or "").strip().lower() == "sub"
 
 
+def _parse_device(value) -> int | str:
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if text.lstrip("-").isdigit():
+        return int(text)
+    return text
+
+
+def _stereo_enabled(args: argparse.Namespace, stereo_cfg) -> bool:
+    if args.no_stereo:
+        return False
+    if args.stereo:
+        return True
+    return bool(stereo_cfg.enabled)
+
+
+def _attach_stereo(output, stereo_result):
+    from dataclasses import replace
+
+    return replace(
+        output,
+        range_m=stereo_result.range_m if stereo_result.ok else None,
+        stereo_ok=stereo_result.ok,
+        stereo_note="" if stereo_result.ok else stereo_result.reason,
+    )
+
+
+def _output_for_view(output, track):
+    """Copy actuator/range fields onto a per-camera bbox for drawing."""
+    from dataclasses import replace
+    from src.tracker import TrackResult
+
+    if not isinstance(track, TrackResult) or not track.apple_detected:
+        return replace(
+            output,
+            apple_detected=False,
+            target_x=0,
+            target_y=0,
+            bbox_x1=0,
+            bbox_y1=0,
+            bbox_x2=0,
+            bbox_y2=0,
+            confidence=0.0,
+        )
+    return replace(
+        output,
+        apple_detected=True,
+        target_x=track.target_x,
+        target_y=track.target_y,
+        bbox_x1=track.bbox_x1,
+        bbox_y1=track.bbox_y1,
+        bbox_x2=track.bbox_x2,
+        bbox_y2=track.bbox_y2,
+        bbox_width=track.bbox_width,
+        bbox_height=track.bbox_height,
+        bbox_area=track.bbox_area,
+        frame_area=track.frame_area,
+        confidence=track.confidence,
+        error_x=track.error_x,
+        error_y=track.error_y,
+    )
+
+
+def _start_web_preview(
+    *,
+    grabber,
+    grabber_right,
+    display,
+    use_stereo: bool,
+    hud_holder: dict,
+    stop_event: threading.Event,
+) -> None:
+    """Publish L/R camera frames as soon as they arrive; overlay last YOLO boxes."""
+    from src.stereo import compose_side_by_side
+    from src.web_stream import set_latest_frame
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            t0 = time.monotonic()
+            ok_l, left = grabber.peek() if grabber is not None else (False, None)
+            if not ok_l or left is None:
+                stop_event.wait(0.02)
+                continue
+            ok_r, right = (False, None)
+            if use_stereo and grabber_right is not None:
+                ok_r, right = grabber_right.peek()
+            with hud_holder["lock"]:
+                output = hud_holder.get("output")
+                track_left = hud_holder.get("track_left")
+                track_right = hud_holder.get("track_right")
+            if output is not None:
+                view_l = (
+                    _output_for_view(output, track_left)
+                    if track_left is not None
+                    else output
+                )
+                left = display.draw(left, view_l, count_fps=True, copy=False)
+            if use_stereo and ok_r and right is not None:
+                if output is not None:
+                    view_r = (
+                        _output_for_view(output, track_right)
+                        if track_right is not None
+                        else output
+                    )
+                    right = display.draw(
+                        right, view_r, count_fps=False, copy=False
+                    )
+                left = compose_side_by_side(left, right)
+            set_latest_frame(left)
+            stop_event.wait(max(0.0, 0.05 - (time.monotonic() - t0)))
+
+    threading.Thread(target=_loop, name="web-preview", daemon=True).start()
+
+
 def _start_sub_stack(args: argparse.Namespace, serial_port: str | None) -> object | None:
     """Start ESP bridge, optional Xbox polling, and /sub/ routes. Returns bridge or None."""
     from src.esp_bridge import get_esp_bridge
@@ -212,27 +375,133 @@ def _start_sub_stack(args: argparse.Namespace, serial_port: str | None) -> objec
 
 def main() -> None:
     args = parse_args()
+    _quiet_third_party_logs()
 
     # ------------------------------------------------------------------
     # Import modules (deferred so path is set up first)
     # ------------------------------------------------------------------
-    from src.camera import Camera, CameraError
-    from src.detector import Detector
+    from src.camera import Camera, CameraError, FrameGrabber, format_usb_camera_report
+
+    try:
+        import cv2
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+    from src.model_runtime import init_model_runtime
     from src.tracker import Tracker
     from src.controller import Controller
     from src.display import Display
+    from src.stereo import (
+        compose_side_by_side,
+        fuse_tracks,
+        load_stereo_config,
+        pair_tracks,
+        triangulate,
+    )
+
+    hw_config = _load_hw_config()
+    stereo_cfg = load_stereo_config()
+    use_stereo = _stereo_enabled(args, stereo_cfg)
+    left_device = _parse_device(
+        args.left_device
+        if args.left_device is not None
+        else (args.device if args.device is not None else stereo_cfg.left_device)
+    )
+    right_device = _parse_device(
+        args.right_device if args.right_device is not None else stereo_cfg.right_device
+    )
+    mono_device = _parse_device(
+        args.device if args.device is not None else stereo_cfg.left_device
+    )
+
+    # ------------------------------------------------------------------
+    # Open cameras first so we only load a second model if both exist
+    # ------------------------------------------------------------------
+    print(format_usb_camera_report())
+    cam = None
+    cam_right = None
+    grabber = None
+    grabber_right = None
+    detect_pool = None
+    manual_only = False
+    try:
+        if use_stereo:
+            print(
+                f"[inference] Stereo requested  baseline={stereo_cfg.baseline_m * 100:.1f}cm  "
+                f"fov={stereo_cfg.fov_h_deg:g}°"
+                f"{' diagonal' if stereo_cfg.fov_is_diagonal else ' horizontal'}  "
+                f"left={left_device}  right={right_device}"
+            )
+            print(f"[inference] Opening left camera {left_device} …")
+            cam = Camera(device=left_device, width=args.width, height=args.height)
+            cam.open()
+            print(f"[inference] Opening right camera {right_device} …")
+            try:
+                cam_right = Camera(device=right_device, width=args.width, height=args.height)
+                cam_right.open()
+            except CameraError as right_exc:
+                print(f"[WARN] Right camera failed: {right_exc}")
+                print("[WARN] Falling back to single-camera mode (no stereo range).")
+                print(format_usb_camera_report())
+                use_stereo = False
+                cam_right = None
+        else:
+            print(f"[inference] Opening camera device {mono_device} …")
+            cam = Camera(device=mono_device, width=args.width, height=args.height)
+            cam.open()
+    except CameraError as exc:
+        if args.tolerate_missing_devices:
+            manual_only = True
+            print(f"[WARN] Camera init failed; skipping YOLO loop (manual-only): {exc}")
+        else:
+            print(f"[ERROR] {exc}")
+            print(format_usb_camera_report())
+            sys.exit(1)
+
+    grabber = FrameGrabber(cam) if cam is not None else None
+    grabber_right = FrameGrabber(cam_right) if cam_right is not None else None
+    if grabber is not None:
+        grabber.start()
+    if grabber_right is not None:
+        grabber_right.start()
+    if grabber is not None:
+        print("[inference] Async capture started (latest-frame, drop stale)")
+    if cam is not None and cam_right is not None:
+        ln, rn = cam.native_size, cam_right.native_size
+        print(
+            f"[inference] Stereo working size {cam.width}x{cam.height}  "
+            f"left native={ln[0]}x{ln[1]}  right native={rn[0]}x{rn[1]}"
+        )
+        if ln != rn:
+            print(
+                "[inference] Native resolutions differ — both streams are resized "
+                f"to {cam.width}x{cam.height} before YOLO/stereo"
+            )
 
     # ------------------------------------------------------------------
     # Initialise components
     # ------------------------------------------------------------------
     print("[inference] Initialising detector …")
     try:
-        detector = Detector()
+        from src.model_runtime import init_model_runtime
+
+        model_runtime = init_model_runtime(
+            backend=args.backend,
+            imgsz_override=args.imgsz,
+        )
+        if use_stereo:
+            print("[inference] Stereo uses one shared NCNN model (avoids CPU oversubscribe)")
+        print(
+            f"[inference] YOLO model={model_runtime.active_id!r} "
+            f"track_label={model_runtime.track_label!r}"
+        )
     except Exception as exc:
         print(f"[ERROR] Could not load model: {exc}")
         sys.exit(1)
 
-    tracker    = Tracker(strategy=args.tracker_strategy)
+    tracker = Tracker(strategy=args.tracker_strategy)
+    tracker_right = Tracker(strategy=args.tracker_strategy) if use_stereo else None
+    detect_pool = None
     controller = Controller.from_hardware_config(profile=args.control_profile)
     if args.control_profile != "config":
         print(f"[inference] Control profile override: {args.control_profile}")
@@ -240,13 +509,19 @@ def main() -> None:
     from src.hardware import from_config as hardware_from_config
     from src.hardware import StubOutput
 
-    hw_config = _load_hw_config()
     use_sub = _sub_stack_enabled(args, hw_config)
     serve_http = args.web or use_sub
     # Browser/sub dashboard mode: skip OpenCV window (imshow over VNC/SSH kills FPS).
     display = Display(headless=args.headless or serve_http)
     quiet_terminal = args.quiet or serve_http
     esp_bridge = None
+    preview_stop = threading.Event()
+    hud_holder: dict = {
+        "lock": threading.Lock(),
+        "output": None,
+        "track_left": None,
+        "track_right": None,
+    }
 
     hardware: object
     hardware_init_error: Exception | None = None
@@ -268,7 +543,7 @@ def main() -> None:
 
     if serve_http:
         try:
-            from src.web_stream import _get_app, set_latest_frame, run_server, register_sub_dashboard
+            from src.web_stream import _get_app, run_server, register_sub_dashboard
         except ImportError as e:
             if "flask" in str(e).lower():
                 print("[ERROR] Flask is required for --web/--sub. Install with: pip install flask")
@@ -298,23 +573,19 @@ def main() -> None:
             server_thread.start()
             time.sleep(0.5)
             print(f"[inference] Sub server: http://{args.web_host}:{args.web_port}/sub/")
+        if grabber is not None:
+            _start_web_preview(
+                grabber=grabber,
+                grabber_right=grabber_right,
+                display=display,
+                use_stereo=use_stereo,
+                hud_holder=hud_holder,
+                stop_event=preview_stop,
+            )
+            print("[inference] Web preview = latest camera frame (does not wait for YOLO)")
     elif use_sub:
         # Headless YOLO + ESP telemetry/actuators (no browser UI).
         esp_bridge = _start_sub_stack(args, args.serial_port)
-
-    cam = None
-    manual_only = False
-    try:
-        print(f"[inference] Opening camera device {args.device} …")
-        cam = Camera(device=args.device, width=args.width, height=args.height)
-        cam.open()
-    except CameraError as exc:
-        if args.tolerate_missing_devices:
-            manual_only = True
-            print(f"[WARN] Camera init failed; skipping YOLO loop (manual-only): {exc}")
-        else:
-            print(f"[ERROR] {exc}")
-            sys.exit(1)
 
     # ------------------------------------------------------------------
     # Graceful shutdown on Ctrl-C
@@ -404,25 +675,66 @@ def main() -> None:
                             print(f"[inference] Still waiting for hardware: {exc}")
 
                 t_loop = time.monotonic()
-                ok, frame = cam.read()
+                if grabber is not None:
+                    ok, frame = grabber.peek()
+                    if use_stereo and grabber_right is not None:
+                        ok_right, frame_right = grabber_right.peek()
+                    else:
+                        ok_right, frame_right = True, None
+                else:
+                    ok, frame = cam.read()
+                    ok_right, frame_right = True, None
+                    if use_stereo and cam_right is not None:
+                        ok_right, frame_right = cam_right.read()
                 t_cap = time.monotonic()
                 if not ok or frame is None:
-                    print("[WARN] Failed to read frame — retrying …")
-                    time.sleep(0.05)
+                    time.sleep(0.005)
                     continue
+                if use_stereo:
+                    if not ok_right or frame_right is None:
+                        time.sleep(0.005)
+                        continue
 
                 frame_count += 1
 
-                # 1. Detect
-                detections = detector.detect(frame)
+                # 1. Detect — one shared model (sequential). Two NCNN nets in
+                # parallel oversubscribe the Pi and are usually slower.
+                detections = model_runtime.detect(frame)
+                detections_right = (
+                    model_runtime.detect(frame_right)
+                    if use_stereo and frame_right is not None
+                    else []
+                )
+                track_label = model_runtime.track_label
                 t_yolo = time.monotonic()
 
                 # 2. Track
-                track = tracker.update(
+                track_left = tracker.update(
                     detections,
                     frame.shape,
-                    apple_label=args.apple_label,
+                    apple_label=track_label,
                 )
+                track = track_left
+                track_right = None
+                stereo_result = None
+                if use_stereo and tracker_right is not None and frame_right is not None:
+                    track_right = tracker_right.update(
+                        detections_right,
+                        frame_right.shape,
+                        apple_label=track_label,
+                    )
+                    stereo_result = triangulate(
+                        track_left,
+                        track_right,
+                        frame.shape[1],
+                        frame.shape[0],
+                        stereo_cfg,
+                    )
+                    track = fuse_tracks(
+                        track_left,
+                        track_right,
+                        pair_tracks(track_left, track_right, stereo_cfg.match_max_dy_px),
+                    )
 
                 # 3. Control (vision + live ESP telemetry when sub stack is active)
                 telemetry = None
@@ -430,6 +742,14 @@ def main() -> None:
                     from src.telemetry_context import TelemetryContext
                     telemetry = TelemetryContext.from_sub_state()
                 output = controller.compute(track, telemetry=telemetry)
+                if stereo_result is not None:
+                    output = _attach_stereo(output, stereo_result)
+                    if args.timing and frame_count % 30 == 0 and stereo_result.ok:
+                        print(
+                            f"[stereo] range={stereo_result.range_m:.2f}m  "
+                            f"z={stereo_result.z_m:.2f}m  "
+                            f"d={stereo_result.disparity_px:.1f}px"
+                        )
                 if args.web or use_sub:
                     from dataclasses import replace
                     from src.control_source import get_current_sdt
@@ -455,7 +775,7 @@ def main() -> None:
                         print(f"[WARN] Hardware apply failed; using stub: {exc}")
                     else:
                         raise
-                if use_sub and frame_count % 30 == 0:
+                if use_sub and args.timing and frame_count % 30 == 0:
                     esp = "ESP OK" if telemetry and telemetry.fresh else "ESP --"
                     bat_s = (
                         f"{telemetry.battery_v:.1f}V"
@@ -482,13 +802,33 @@ def main() -> None:
                     print(output.pretty())
                     sys.stdout.flush()
 
-                # 5. Display
-                annotated = display.draw(frame, output)
+                # 5. Display — web preview thread owns the JPEG; do not wait on YOLO.
                 t_draw = time.monotonic()
                 if serve_http:
-                    set_latest_frame(annotated)
-                if not display.show(annotated):
-                    break   # user pressed q
+                    with hud_holder["lock"]:
+                        hud_holder["output"] = output
+                        hud_holder["track_left"] = track_left
+                        hud_holder["track_right"] = track_right
+                else:
+                    if use_stereo and frame_right is not None and track_right is not None:
+                        annotated = compose_side_by_side(
+                            display.draw(
+                                frame,
+                                _output_for_view(output, track_left),
+                                copy=False,
+                            ),
+                            display.draw(
+                                frame_right,
+                                _output_for_view(output, track_right),
+                                count_fps=False,
+                                copy=False,
+                            ),
+                        )
+                    else:
+                        annotated = display.draw(frame, output, copy=False)
+                    t_draw = time.monotonic()
+                    if not display.show(annotated):
+                        break   # user pressed q
 
                 if args.timing and frame_count % 30 == 0:
                     total_ms = (t_draw - t_loop) * 1000
@@ -503,8 +843,17 @@ def main() -> None:
                     )
 
     finally:
+        preview_stop.set()
+        if grabber is not None:
+            grabber.stop()
+        if grabber_right is not None:
+            grabber_right.stop()
         if cam is not None:
             cam.release()
+        if cam_right is not None:
+            cam_right.release()
+        if detect_pool is not None:
+            detect_pool.shutdown(wait=False)
         display.close()
         hardware.close()
         if esp_bridge is not None:

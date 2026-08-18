@@ -103,6 +103,10 @@ class ControlOutput:
     proximity_t: float = 0.0
     depth_m_used: float | None = None
     approach_note: str = ""
+    # Stereo range (metres from midpoint between cameras); None if not stereo / no pair
+    range_m: float | None = None
+    stereo_ok: bool = False
+    stereo_note: str = ""
     # Timing
     timestamp: float = 0.0
 
@@ -170,12 +174,22 @@ class ControlOutput:
             f"│ {'error_x':<17} │ {self.error_x:+.4f}{'':<{w - 28}}│",
             f"│ {'error_y':<17} │ {self.error_y:+.4f}{'':<{w - 28}}│",
             f"│ {'confidence':<17} │ {self.confidence:.4f}{'':<{w - 28}}│",
+        ]
+        if self.range_m is not None:
+            lines.append(
+                f"│ {'range_m':<17} │ {self.range_m:.2f} m{'':<{w - 31}}│"
+            )
+        elif self.stereo_note:
+            lines.append(
+                f"│ {'stereo':<17} │ {self.stereo_note:<{w - 23}}│"
+            )
+        lines.extend([
             sep_mid2,
             fmt_servo("steering_servo", self.steering_servo,  "left",    "right")   + " " * max(0, w - 54) + "│",
             fmt_servo("drive_motor",    self.drive_motor,     "reverse", "forward") + " " * max(0, w - 57) + "│",
             fmt_servo("camera_tilt",    self.camera_tilt_servo, "down",  "up")      + " " * max(0, w - 52) + "│",
             sep_bot,
-        ]
+        ])
         return "\n".join(lines)
 
 

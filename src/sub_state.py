@@ -32,7 +32,7 @@ class BallastTankState:
             "moving": self.moving,
             "direction": self.direction,
             "command": self.command,
-            "connected": self.cal_valid and self.level is not None,
+            "connected": self.adc is not None and self.adc >= 0,
             "cal_top_adc": self.cal_top_adc,
             "cal_bottom_adc": self.cal_bottom_adc,
             "cal_valid": self.cal_valid,
@@ -44,6 +44,17 @@ class GyroReading:
     pitch: float | None = None
     roll: float | None = None
     yaw: float | None = None
+
+
+@dataclass
+class GpsFix:
+    lat: float | None = None
+    lon: float | None = None
+    speed_knots: float | None = None
+    heading_deg: float | None = None
+    fix_quality: int = 0
+    satellites: int = 0
+    hdop: float | None = None
 
 
 @dataclass
@@ -120,12 +131,38 @@ class SubState:
         self.last_heartbeat_ts: float = 0.0
         self.telemetry_timestamp: float = 0.0
 
+        # Sonar (servo sweep from ESP)
+        self.sonar_max_range_m: float = 6.0
+        self.sonar_points: dict[int, float | None] = {}
+        self.sonar_servo_deg: int | None = None
+        self.sonar_connected: bool = False
+        self.sonar_last_ts: float = 0.0
+
+        # GPS (USB NMEA on Pi)
+        self.gps = GpsFix()
+        self.gps_connected: bool = False
+        self.gps_device_online: bool = False
+        self.gps_status: str = "scanning"  # scanning | online | fix
+        self.gps_port: str = ""
+        self.gps_track: deque[dict[str, float]] = deque(maxlen=1000)
+        self.gps_track_origin: tuple[float, float] | None = None
+        self.gps_last_ts: float = 0.0
+
         # Control — manual default so bench/dashboard starts idle without a gamepad
         self.control_mode: str = "manual"  # xbox | manual | auto
         self.manual_actuators = SubActuators()
         self.auto_actuators = SubActuators()
         self.xbox_actuators = SubActuators()
         self.effective_actuators = SubActuators()
+
+        # YOLO model selection (Auto mode on dashboard)
+        self.yolo_model_id: str = ""
+        self.yolo_model_status: dict[str, Any] = {
+            "state": "idle",
+            "error": None,
+            "task": None,
+            "label": "",
+        }
 
         # ESP diagnostic responses (PING, PINS, TEST)
         self.last_pong_ts: float | None = None
@@ -311,14 +348,95 @@ class SubState:
 
     def mark_esp_stale(self, stale_after_s: float = 3.0) -> None:
         stale = False
+        sonar_stale = False
         with self._lock:
             if self.telemetry_timestamp <= 0:
-                return
-            if time.time() - self.telemetry_timestamp > stale_after_s:
+                pass
+            elif time.time() - self.telemetry_timestamp > stale_after_s:
                 stale = self.esp_connected
                 self.esp_connected = False
-        if stale:
+            if self.sonar_last_ts > 0 and time.time() - self.sonar_last_ts > stale_after_s:
+                sonar_stale = self.sonar_connected
+                self.sonar_connected = False
+        if stale or sonar_stale:
             self._notify()
+
+    def update_sonar_point(self, angle_deg: int, range_m: float | None) -> None:
+        with self._lock:
+            self.sonar_points[int(angle_deg)] = range_m
+            self.sonar_servo_deg = int(angle_deg)
+            self.sonar_connected = True
+            self.sonar_last_ts = time.time()
+        self._notify()
+
+    def clear_sonar_scan(self) -> None:
+        with self._lock:
+            self.sonar_points.clear()
+        self._notify()
+
+    def update_gps(
+        self,
+        lat: float,
+        lon: float,
+        *,
+        speed_knots: float | None = None,
+        heading_deg: float | None = None,
+        fix_quality: int = 0,
+        satellites: int = 0,
+        hdop: float | None = None,
+        port: str = "",
+    ) -> None:
+        with self._lock:
+            self.gps = GpsFix(
+                lat=lat,
+                lon=lon,
+                speed_knots=speed_knots,
+                heading_deg=heading_deg,
+                fix_quality=fix_quality,
+                satellites=satellites,
+                hdop=hdop,
+            )
+            self.gps_connected = True
+            self.gps_device_online = True
+            self.gps_status = "fix"
+            self.gps_last_ts = time.time()
+            if port:
+                self.gps_port = port
+            if self.gps_track_origin is None:
+                self.gps_track_origin = (lat, lon)
+            self.gps_track.append({
+                "lat": lat,
+                "lon": lon,
+                "ts": time.time(),
+            })
+        self._notify()
+
+    def clear_gps_track(self) -> None:
+        with self._lock:
+            self.gps_track.clear()
+            self.gps_track_origin = None
+        self._notify()
+
+    def set_gps_scanning(self) -> None:
+        with self._lock:
+            self.gps_device_online = False
+            self.gps_status = "scanning"
+            self.gps_port = ""
+        self._notify()
+
+    def set_gps_device(self, port: str) -> None:
+        with self._lock:
+            self.gps_device_online = True
+            self.gps_status = "online" if not self.gps_connected else "fix"
+            self.gps_port = port
+        self._notify()
+
+    def set_gps_disconnected(self) -> None:
+        with self._lock:
+            self.gps_device_online = False
+            if not self.gps_connected:
+                self.gps_status = "scanning"
+        self._notify()
 
     def set_esp_connected(self, connected: bool, port: str = "") -> None:
         with self._lock:
@@ -396,6 +514,24 @@ class SubState:
     def get_control_mode(self) -> str:
         with self._lock:
             return self.control_mode
+
+    def set_yolo_model_id(self, model_id: str) -> None:
+        with self._lock:
+            self.yolo_model_id = str(model_id)
+        self._notify()
+
+    def get_yolo_model_id(self) -> str:
+        with self._lock:
+            return self.yolo_model_id
+
+    def set_yolo_model_status(self, status: dict[str, Any]) -> None:
+        with self._lock:
+            self.yolo_model_status = dict(status)
+        self._notify()
+
+    def get_yolo_model_status(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self.yolo_model_status)
 
     def set_ballast_command(
         self, value: float, tank: str = "both"
@@ -524,6 +660,36 @@ class SubState:
                     "count": self.last_heartbeat,
                     "last_ts": self.last_heartbeat_ts,
                 },
+                "sonar": {
+                    "connected": self.sonar_connected,
+                    "max_range_m": self.sonar_max_range_m,
+                    "servo_deg": self.sonar_servo_deg,
+                    "last_ts": self.sonar_last_ts,
+                    "points": [
+                        {"angle_deg": a, "range_m": r}
+                        for a, r in sorted(self.sonar_points.items())
+                    ],
+                },
+                "gps": {
+                    "connected": self.gps_connected,
+                    "device_online": self.gps_device_online,
+                    "status": self.gps_status,
+                    "port": self.gps_port,
+                    "last_ts": self.gps_last_ts,
+                    "lat": self.gps.lat,
+                    "lon": self.gps.lon,
+                    "speed_knots": self.gps.speed_knots,
+                    "heading_deg": self.gps.heading_deg,
+                    "fix_quality": self.gps.fix_quality,
+                    "satellites": self.gps.satellites,
+                    "hdop": self.gps.hdop,
+                    "track": list(self.gps_track),
+                    "origin": (
+                        {"lat": self.gps_track_origin[0], "lon": self.gps_track_origin[1]}
+                        if self.gps_track_origin
+                        else None
+                    ),
+                },
             }
 
     def control_snapshot(self) -> dict[str, Any]:
@@ -539,6 +705,8 @@ class SubState:
                 "manual": self.manual_actuators.as_dict(),
                 "xbox_mapped": self.xbox_actuators.as_dict(),
                 "timestamp": time.time(),
+                "yolo_model_id": self.yolo_model_id,
+                "yolo_model_status": dict(self.yolo_model_status),
             }
 
     def status_snapshot(self) -> dict[str, Any]:

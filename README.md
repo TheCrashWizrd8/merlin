@@ -1,7 +1,7 @@
 # YOLO Apple RC Sub Detection System
 
 Modular YOLO-based apple detection for an RC submarine running on a Raspberry Pi 5 (8 GB).  
-The Pi uses a USB endoscope camera, runs YOLO each frame, and produces a structured `ControlOutput` that drives steering, thruster, and camera tilt to keep an apple centred in view.
+The Pi uses one or two USB endoscope cameras, runs YOLO each frame (NCNN on the Pi), and produces a structured `ControlOutput` that drives steering, thruster, and camera tilt to keep an apple centred in view. With two cameras (centres 16 cm apart, 67° FOV) it also reports stereo range.
 
 A separate **sub vehicle stack** adds an ESP32-S3 sensor/actuator hub, ballast control, leak/depth/IMU telemetry, an Xbox controller input path, and a web dashboard at `/sub/`.
 
@@ -23,9 +23,9 @@ Edit the YAML files in `config/`:
 
 | File | Purpose |
 |------|---------|
-| `config/model.yaml` | YOLO architecture, weights path, confidence |
+| `config/model.yaml` | YOLO architecture, `backend` (`ncnn` / `pytorch` / `openvino`), weights path, confidence, **model catalog** (Auto-mode picker on `/sub/`) |
 | `config/dataset.yaml` | Dataset source (`local` or optional `roboflow`) |
-| `config/hardware.yaml` | Control tuning, ESP serial (sub), Xbox deadzone |
+| `config/hardware.yaml` | Control tuning, stereo cameras, ESP serial (sub), Xbox deadzone |
 | `config/xbox_mapping.yaml` | Xbox button/stick → actuator bindings |
 | `config/pins.yaml` | Pin/channel reference (documentation; not read at runtime yet) |
 
@@ -51,7 +51,7 @@ local_path: "data/images"   # folder containing data.yaml
 !python train.py
 ```
 
-5. Download **`weights/best.pt`** to the Pi and confirm `weights:` in **`config/model.yaml`**.
+5. Download **`weights/best.pt`** to the Pi, export NCNN (`python scripts/export_model.py --format ncnn`), and confirm `active_model: detect` / `weights:` in **`config/model.yaml`**.
 
 Full Colab steps are in **`docs/GUIDE.md`** §5–6. A ready-made notebook is at **`train_colab.ipynb`**.
 
@@ -117,6 +117,8 @@ Open **http://\<pi-ip\>:8080/sub/** — telemetry, ballast, actuators, pin tests
 
 **Control:** bench default is **Manual** (sliders at zero). During inference the server runs **auto**; click **Auto (YOLO)** on the dashboard if your browser restored Manual from a previous session.
 
+**Multiple YOLO models:** In **Auto (YOLO)** mode the dashboard shows a second row of model buttons (detect, seg, …). Models are defined in **`config/model.yaml`** under `models:`; only entries with weights + NCNN export on disk are clickable. Today only **`detect`** (`weights/best.pt`) is deployed — add new `.pt` files and catalog entries as you train. Full details: **`docs/GUIDE.md`** §11.
+
 **Xbox controller (Bluetooth):** pair once at the OS level, verify with `python -m src.xbox_controller`. Bindings in **`config/xbox_mapping.yaml`**; stick drift tuning in **`config/hardware.yaml`** (`xbox.deadzone`). Full steps in **`docs/GUIDE.md`** (§ Connecting the Xbox controller).
 
 Simulated telemetry (no ESP hardware):
@@ -124,6 +126,50 @@ Simulated telemetry (no ESP hardware):
 ```bash
 python scripts/test_telemetry.py
 ```
+
+---
+
+## Multiple YOLO models (catalog & dashboard picker)
+
+Inference can run **several trained models** and switch between them **without restarting** the Pi process. Configuration is in **`config/model.yaml`**.
+
+### Catalog (current)
+
+| ID | Dashboard label | Weights | Task | On Pi today |
+|----|-----------------|---------|------|-------------|
+| `detect` | Detect | `weights/best.pt` | detect | Yes — YOLOv8n + `best_ncnn_model/` |
+| `seg` | Seg (future) | `weights/best_seg.pt` | segment | No — add when trained |
+| `seg_fast` | Seg 320 (future) | `weights/best_seg_320.pt` | segment | No — optional faster seg variant |
+
+`active_model: detect` controls which entry loads on startup.
+
+### Switch from the dashboard
+
+1. `python inference.py --web --timing`
+2. Open **`/sub/`** → **Auto (YOLO)**
+3. A **YOLO model** button row appears — click a model to reload (few seconds)
+
+Unavailable models are greyed out (missing `.pt` or NCNN export). Your choice persists in browser `sessionStorage`.
+
+### Switch from the API
+
+```bash
+curl http://<pi-ip>:8080/sub/api/models
+curl -X POST http://<pi-ip>:8080/sub/api/models/select \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"detect"}'
+```
+
+### Add a new model
+
+1. Put `weights/your_model.pt` on the Pi  
+2. `python scripts/export_model.py --weights weights/your_model.pt --format ncnn`  
+3. Add an entry under `models:` in `config/model.yaml` (`task: segment` for YOLOv8-seg)  
+4. Restart inference once (to pick up new YAML keys) or select from the dashboard if already listed  
+
+Each entry can set its own **`track_label`** (class name to follow). Segmentation models use mask centroids for aim and stereo when masks are available.
+
+See **`docs/GUIDE.md`** §11 for architecture notes (`src/model_runtime.py`, stale-export guard, SSE `models` payload).
 
 ---
 
@@ -155,12 +201,14 @@ yolo-project/
 ├── config/
 │   ├── model.yaml
 │   ├── dataset.yaml
-│   ├── hardware.yaml           # Control tuning + serial ports
+│   ├── hardware.yaml           # Control tuning + stereo cameras + serial
 │   └── pins.yaml               # Pin reference (ESP32, PCA9685, L298N)
 ├── data/                       # YOLO datasets
-├── weights/                    # Trained .pt weights (best.pt)
+├── weights/                    # best.pt + best_ncnn_model/ (detect today; add more .pt later)
 ├── src/
-│   ├── detector.py             # YOLO inference wrapper
+│   ├── detector.py             # YOLO wrapper (pytorch / ncnn / openvino)
+│   ├── model_runtime.py        # Model catalog + hot-swap for Auto mode
+│   ├── stereo.py               # Dual-cam triangulation → range_m
 │   ├── tracker.py              # Apple centroid, bbox, normalised error
 │   ├── controller.py           # ControlOutput + size-based drive + telemetry safety
 │   ├── telemetry_context.py    # ESP snapshot for controller + sub motion
@@ -187,6 +235,7 @@ yolo-project/
 │   ├── test_telemetry.py       # Simulated ESP telemetry for UI dev
 │   ├── simulate_esp_serial.py  # Fake ESP on a PTY
 │   ├── probe_esp_uart.py       # Probe GPIO UART (PING + listen)
+│   ├── export_model.py         # Export .pt → NCNN / OpenVINO
 │   └── check_camera.sh         # Camera sanity check
 └── docs/
     ├── GUIDE.md                # Full system guide
@@ -212,6 +261,7 @@ Every inference frame produces a `ControlOutput`:
 | `apple_detected` | bool | Whether an apple was found |
 | `bbox_x1`…`bbox_y2` | px | Tracked apple bounding box |
 | `size_ratio_raw` / `size_ratio_filtered` | 0–1 | `bbox_area/frame_area` |
+| `range_m` | metres or `None` | Stereo distance from camera midpoint to apple |
 | `timestamp` | float | `time.time()` |
 
 Size-based forward drive is configured in `config/hardware.yaml`. See **`docs/GUIDE.md`** for the full system guide.

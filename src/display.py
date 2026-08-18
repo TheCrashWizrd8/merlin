@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from datetime import datetime
 from typing import Optional
 
 import cv2
@@ -76,24 +77,13 @@ class Display:
         self,
         frame: np.ndarray,
         output: ControlOutput,
+        count_fps: bool = True,
+        copy: bool = True,
     ) -> np.ndarray:
-        """
-        Draw all overlays onto a copy of `frame` and return the annotated image.
-
-        Parameters
-        ----------
-        frame : np.ndarray
-            Raw BGR frame from the camera.
-        output : ControlOutput
-            Latest control output to visualise.
-
-        Returns
-        -------
-        np.ndarray
-            Annotated BGR frame.
-        """
-        self._timestamps.append(time.monotonic())
-        annotated = frame.copy()
+        """Draw overlays onto `frame` and return the annotated image."""
+        if count_fps:
+            self._timestamps.append(time.monotonic())
+        annotated = frame.copy() if copy else frame
 
         h, w = annotated.shape[:2]
         cx, cy = w // 2, h // 2
@@ -172,9 +162,9 @@ class Display:
             x2 = output.target_x + 10
             y2 = output.target_y + 10
 
-        label = f"apple {output.confidence:.2f}"
         cv2.rectangle(img, (x1, y1), (x2, y2), COL_BBOX, 2)
         cv2.circle(img, (output.target_x, output.target_y), 4, COL_BBOX, -1)
+        label = f"apple {output.confidence:.2f}"
         (tw, th), _ = cv2.getTextSize(label, FONT, FONT_SCALE, FONT_THICKNESS)
         cv2.rectangle(img, (x1, y1 - th - 6), (x1 + tw + 4, y1), COL_BBOX, -1)
         cv2.putText(img, label, (x1 + 2, y1 - 4), FONT, FONT_SCALE,
@@ -197,12 +187,18 @@ class Display:
         if size_f <= 0.0 and output.frame_area > 0 and output.bbox_area > 0:
             size_f = output.bbox_area / output.frame_area
         lines = [
+            datetime.now().strftime("Clk:  %H:%M:%S.%f")[:-3],
             f"FPS: {self.fps:5.1f}",
             f"Apple: {'YES' if output.apple_detected else 'NO '}",
             f"Conf:  {output.confidence:.3f}",
             f"Size:  {size_f:.3f} (r{size_r:.3f})",
             f"Prox:  {getattr(output, 'proximity_t', 0.0):.3f}",
         ]
+        range_m = getattr(output, "range_m", None)
+        if range_m is not None:
+            lines.append(f"Range: {range_m:.2f} m")
+        elif getattr(output, "stereo_note", ""):
+            lines.append(f"Stereo:{output.stereo_note}")
         depth_used = getattr(output, "depth_m_used", None)
         if depth_used is not None:
             lines.append(f"Depth: {depth_used:.2f}m")

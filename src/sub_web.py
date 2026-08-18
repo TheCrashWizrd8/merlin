@@ -62,10 +62,13 @@ def _recent_rx_contains(state, needle: str, since_ts: float) -> bool:
 
 def _stream_payload(state) -> dict:
     """Combined dashboard snapshot for SSE push."""
+    from src.model_runtime import models_dashboard_snapshot
+
     diag = state.diagnostics_snapshot()
     return {
         "telemetry": state.telemetry_snapshot(),
         "control": state.control_snapshot(),
+        "models": models_dashboard_snapshot(),
         "status": state.status_snapshot(),
         "serial": {"lines": state.get_serial_log(200)},
         "pins": {
@@ -93,10 +96,14 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     state = get_sub_state()
 
     if start_services:
-        get_esp_bridge(autostart=True).start()
+        bridge = get_esp_bridge(autostart=True)
+        bridge.start()
         from src.xbox_controller import connect_xbox, is_xbox_enabled
         if is_xbox_enabled():
             connect_xbox()
+        from src.gps_reader import connect_gps, is_gps_enabled
+        if is_gps_enabled():
+            connect_gps(esp_port=bridge.port)
 
     # ------------------------------------------------------------------
     # Dashboard
@@ -175,6 +182,21 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         snap = state.telemetry_snapshot()
         return jsonify({"timestamp": snap["timestamp"], **snap["depth"]})
 
+    @app.route("/sub/api/telemetry/sonar")
+    def sub_api_sonar():
+        snap = state.telemetry_snapshot()
+        return jsonify({"timestamp": snap["timestamp"], **snap["sonar"]})
+
+    @app.route("/sub/api/telemetry/gps")
+    def sub_api_gps():
+        snap = state.telemetry_snapshot()
+        return jsonify({"timestamp": snap["timestamp"], **snap["gps"]})
+
+    @app.route("/sub/api/gps/clear", methods=["POST"])
+    def sub_api_gps_clear():
+        state.clear_gps_track()
+        return jsonify({"ok": True})
+
     @app.route("/sub/api/telemetry/leaks")
     def sub_api_leaks():
         snap = state.telemetry_snapshot()
@@ -247,6 +269,43 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
             state.set_control_mode("manual")
         state.recompute_effective()
         return jsonify(state.control_snapshot())
+
+    @app.route("/sub/api/models", methods=["GET"])
+    def sub_api_models_get():
+        from src.model_runtime import models_dashboard_snapshot
+        return jsonify(models_dashboard_snapshot())
+
+    @app.route("/sub/api/models/select", methods=["POST"])
+    def sub_api_models_select():
+        from src.model_runtime import get_model_runtime
+
+        data = request.get_json(silent=True) or {}
+        model_id = str(data.get("id", "")).strip()
+        if not model_id:
+            return jsonify({"ok": False, "error": "missing id"}), 400
+
+        runtime = get_model_runtime()
+        if runtime is not None:
+            result = runtime.select(model_id)
+            code = 200 if result.get("ok") else 400
+            return jsonify(result), code
+
+        state.set_yolo_model_id(model_id)
+        from src.model_runtime import catalog_snapshot, load_model_catalog, CONFIG_PATH
+        catalog = load_model_catalog(CONFIG_PATH)
+        if model_id not in catalog:
+            return jsonify({"ok": False, "error": f"Unknown model {model_id!r}"}), 400
+        entry = catalog[model_id]
+        state.set_yolo_model_status({
+            "state": "pending",
+            "error": None,
+            "task": entry.get("task"),
+            "label": entry.get("label", model_id),
+        })
+        snap = catalog_snapshot(active_id=model_id, status=state.get_yolo_model_status())
+        snap["ok"] = True
+        snap["pending"] = True
+        return jsonify(snap)
 
     @app.route("/sub/api/control/ballast", methods=["POST"])
     def sub_api_ballast_post():

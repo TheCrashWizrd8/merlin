@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--camera-device", type=int, default=0, help="USB camera index")
     p.add_argument("--no-xbox", action="store_true", help="Skip Xbox controller polling")
     p.add_argument("--no-esp", action="store_true", help="Skip ESP serial bridge")
+    p.add_argument("--no-gps", action="store_true", help="Skip USB GPS auto-scan")
     return p.parse_args()
 
 
@@ -71,7 +72,7 @@ def _camera_loop(device: int, running: threading.Event) -> None:
     from src.web_stream import set_latest_frame
 
     try:
-        cam = Camera(device=device, width=640, height=480)
+        cam = Camera(device=device, width=1600, height=1200)
         cam.open()
     except CameraError as exc:
         print(f"[sub] Camera unavailable: {exc}")
@@ -108,8 +109,18 @@ def main() -> None:
         bridge = get_esp_bridge(port=args.serial_port, autostart=False)
         bridge.start()
         print(f"[sub] ESP bridge on {bridge.port}")
+        esp_port = bridge.port
     else:
         print("[sub] No ESP bridge (--no-esp). Use scripts/test_telemetry.py for fake data.")
+        esp_port = ""
+
+    if not args.no_gps:
+        from src.gps_reader import connect_gps, is_gps_enabled
+        if is_gps_enabled():
+            connect_gps(esp_port=esp_port)
+            print("[sub] GPS auto-scan started (plug in USB GPS anytime)")
+        else:
+            print("[sub] GPS disabled in config/hardware.yaml (gps.enabled: false)")
 
     if not args.no_xbox:
         from src.xbox_controller import connect_xbox, is_xbox_enabled

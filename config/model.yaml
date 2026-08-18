@@ -3,22 +3,67 @@
 # ---------------------------------------------------------------------------
 # architecture: any Ultralytics model string, e.g.
 #   yolov8n  yolov8s  yolov8m  yolov8l  yolov8x
+#   yolov8n-seg  yolov8s-seg   (instance segmentation)
 #   yolov9c  yolov9e
 #   yolo11n  yolo11s  yolo11m
-# The value is passed directly to YOLO() so swapping version = change one line.
+# Ignored when `weights` points at a trained .pt — the checkpoint defines the net.
 architecture: yolov8n
+
+# task: detect | segment | auto
+# Currently deployed: detect (weights/best.pt). Set segment when you add a *-seg .pt.
+task: detect
+
+# backend: inference runtime. On Pi 5, ncnn is much faster than pytorch.
+#   pytorch  — default Ultralytics .pt (slowest on Pi, no export step)
+#   ncnn     — recommended on ARM/Pi (export with scripts/export_model.py)
+#   openvino — Intel-optimised; usable on Pi but usually slower than ncnn
+backend: ncnn
 
 # weights: path to a .pt file to resume training or run inference.
 # Leave blank to train from the Ultralytics pretrained backbone.
 # On the Pi point this to weights/best.pt after training.
+# For ncnn/openvino, export once (see scripts/export_model.py); inference loads
+# the sibling directory, e.g. weights/best_ncnn_model/ or best_openvino_model/.
+# After swapping a new .pt you MUST re-export — the old folder is not updated:
+#   python scripts/export_model.py --format ncnn
 weights: "weights/best.pt"
+
+# Which catalog entry loads at startup (see models: below).
+active_model: detect
+
+# Switchable models for Auto (YOLO) mode on the /sub/ dashboard.
+# Only entries with a .pt (+ matching *_ncnn_model/ when backend is ncnn) are clickable.
+# Currently on the Pi: detect → weights/best.pt. Add seg entries when you drop new weights.
+models:
+  detect:
+    label: "Detect"
+    weights: weights/best.pt
+    task: detect
+    track_label: apple
+  seg:
+    label: "Seg (future)"
+    weights: weights/best_seg.pt
+    task: segment
+    track_label: apple
+  seg_fast:
+    label: "Seg 320 (future)"
+    weights: weights/best_seg_320.pt
+    task: segment
+    track_label: apple
 
 # Detection thresholds
 confidence: 0.50
 iou: 0.45
 
-# Input image size fed to the model (pixels, square)
+# Input image size fed to the model (pixels, square).
+# 640 = better far/small apples (preferred). 320 = faster, misses distant fruit.
+# Re-export NCNN after changing:
+#   python scripts/export_model.py --format ncnn
 img_size: 640
+
+# NCNN threads. 3 leaves one Pi 5 core for USB/ESP so YOLO isn't fighting
+# the grabber (4 threads at 70% often means contention, not spare capacity).
+ncnn_threads: 3
 
 # Training hyperparameters (used by train.py, ignored during inference)
 epochs: 50

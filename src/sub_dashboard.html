@@ -51,6 +51,7 @@
       color: var(--muted);
     }
     .badge.ok { color: var(--ok); border-color: #166534; }
+    .badge.warn { color: var(--warn); border-color: #92400e; }
     .badge.off { color: var(--muted); }
     .badge.alarm {
       color: #fff;
@@ -96,12 +97,13 @@
     .camera-panel { grid-row: span 2; }
     .camera-wrap {
       background: #000;
-      aspect-ratio: 4/3;
+      aspect-ratio: 8 / 3;
       min-height: 240px;
       position: relative;
       overflow: hidden;
     }
-    .camera-wrap img {
+    .camera-wrap img,
+    .camera-wrap canvas {
       position: absolute;
       inset: 0;
       width: 100%;
@@ -329,6 +331,39 @@
       border-color: var(--accent);
       color: #bfdbfe;
     }
+    .model-tabs {
+      display: none;
+      margin-top: 0.65rem;
+    }
+    .model-tabs.visible {
+      display: block;
+    }
+    .model-tabs-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+    .model-tabs-row button {
+      font-size: 0.72rem;
+      padding: 0.3rem 0.55rem;
+    }
+    .model-tabs-row button.active {
+      background: #1a3d2e;
+      border-color: var(--ok);
+      color: #bbf7d0;
+    }
+    .model-tabs-row button.unavailable {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .model-status {
+      margin-top: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      min-height: 1rem;
+    }
+    .model-status.error { color: var(--danger); }
+    .model-status.loading { color: var(--warn); }
     .actuator-row {
       display: flex;
       align-items: center;
@@ -407,6 +442,48 @@
     .slider-row label { width: 4.5rem; color: var(--muted); }
     .slider-row input[type=range] { flex: 1; accent-color: var(--accent); }
     .slider-row .val { width: 2.5rem; text-align: right; font-variant-numeric: tabular-nums; }
+    .viz-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    @media (max-width: 900px) {
+      .viz-grid { grid-template-columns: 1fr; }
+    }
+    .viz-canvas-wrap {
+      background: #080d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      position: relative;
+      aspect-ratio: 1;
+      min-height: 220px;
+    }
+    .viz-canvas-wrap.wide { aspect-ratio: 4 / 3; }
+    .viz-canvas-wrap canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .viz-meta {
+      margin-top: 0.55rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      line-height: 1.6;
+    }
+    .viz-meta span { color: var(--text); }
+    .viz-actions { margin-top: 0.45rem; }
+    .viz-actions button { flex: 0 1 auto; min-width: 90px; }
+    .viz-offline {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.78rem;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -416,6 +493,8 @@
       <span class="badge off" id="badgeEsp">ESP — …</span>
       <span class="badge off" id="badgeXbox">Xbox — …</span>
       <span class="badge off" id="badgeLeak">Leaks — OK</span>
+      <span class="badge off" id="badgeSonar">Sonar — …</span>
+      <span class="badge off" id="badgeGps">GPS — …</span>
       <span class="badge off" id="badgeMode">Mode — …</span>
     </div>
   </header>
@@ -424,7 +503,7 @@
     <section class="panel camera-panel">
       <div class="panel-head">Camera POV <span id="camStatus">USB</span></div>
       <div class="camera-wrap">
-        <img src="/video_feed" alt="Live camera" id="camFeed">
+        <img alt="Live camera" id="camFeed" decoding="async">
       </div>
     </section>
 
@@ -517,6 +596,35 @@
     </section>
 
     <section class="panel span-full">
+      <div class="panel-head">Sonar &amp; GPS</div>
+      <div class="panel-body viz-grid">
+        <div>
+          <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.4rem;text-transform:uppercase;letter-spacing:0.05em;">
+            Sonar radar · 0° bow · ±180° aft
+          </div>
+          <div class="viz-canvas-wrap" id="sonarWrap">
+            <canvas id="sonarCanvas"></canvas>
+            <div class="viz-offline" id="sonarOffline">Waiting for sonar sweep…</div>
+          </div>
+          <div class="viz-meta" id="sonarMeta">Servo — · points —</div>
+        </div>
+        <div>
+          <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.4rem;text-transform:uppercase;letter-spacing:0.05em;">
+            GPS track · local metres
+          </div>
+          <div class="viz-canvas-wrap wide" id="gpsWrap">
+            <canvas id="gpsCanvas"></canvas>
+            <div class="viz-offline" id="gpsOffline">Scanning for USB GPS…</div>
+          </div>
+          <div class="viz-meta" id="gpsMeta">Lat — · Lon — · Speed —</div>
+          <div class="viz-actions btn-row">
+            <button type="button" id="gpsClearTrack">Clear track</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel span-full">
       <div class="panel-head">
         Pin Diagnostics
         <span id="pinDiagStatus">—</span>
@@ -565,6 +673,11 @@
             <button data-mode="manual">Manual</button>
             <button data-mode="auto">Auto (YOLO)</button>
           </div>
+          <div class="model-tabs" id="modelTabs">
+            <div style="color:var(--muted);font-size:0.7rem;margin-bottom:0.25rem;">YOLO model</div>
+            <div class="model-tabs-row" id="modelTabsRow"></div>
+            <div class="model-status" id="modelStatus"></div>
+          </div>
           <div class="xbox-grid">
             <div>
               <div style="color:var(--muted);font-size:0.7rem;margin-bottom:0.25rem;">Left stick</div>
@@ -601,7 +714,10 @@
     </section>
   </main>
 
+  <script src="/live_jpeg.js"></script>
   <script>
+    attachLiveJpeg(document.getElementById('camFeed'));
+
     const ACTUATORS = [
       { key: 'aftSteerY', label: 'Aft Y' },
       { key: 'aftSteerZ', label: 'Aft Z' },
@@ -625,7 +741,9 @@
     const manualValues = {};
     const CONTROL_STORE_KEY = 'subDashboardControl';
     let localControlMode = 'manual';
+    let localModelId = '';
     let controlRestored = false;
+    let catalogModels = [];
 
     function readControlState() {
       try {
@@ -645,6 +763,7 @@
       });
       sessionStorage.setItem(CONTROL_STORE_KEY, JSON.stringify({
         mode: localControlMode,
+        modelId: localModelId,
         manual: { ...manualValues },
         ballast,
       }));
@@ -675,6 +794,81 @@
         b.classList.toggle('active', b.dataset.mode === localControlMode);
       });
       document.getElementById('manualSliders').classList.toggle('visible', localControlMode === 'manual');
+      document.getElementById('modelTabs').classList.toggle('visible', localControlMode === 'auto');
+    }
+
+    function renderModelTabs(modelsPayload) {
+      if (!modelsPayload) return;
+      catalogModels = modelsPayload.models || [];
+      const activeId = modelsPayload.active_id || localModelId;
+      if (activeId) localModelId = activeId;
+
+      const row = document.getElementById('modelTabsRow');
+      row.innerHTML = '';
+      catalogModels.forEach(m => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.modelId = m.id;
+        btn.textContent = m.label || m.id;
+        btn.classList.toggle('active', m.id === localModelId);
+        btn.classList.toggle('unavailable', !m.available);
+        btn.disabled = !m.available;
+        btn.title = m.available ? (m.task || '') : (m.unavailable_reason || 'unavailable');
+        btn.addEventListener('click', () => selectModel(m.id));
+        row.appendChild(btn);
+      });
+      updateModelStatus(modelsPayload.status);
+    }
+
+    function updateModelStatus(status) {
+      const el = document.getElementById('modelStatus');
+      if (!el) return;
+      el.classList.remove('error', 'loading');
+      if (!status || !status.state || status.state === 'idle' || status.state === 'ready') {
+        const active = catalogModels.find(m => m.id === localModelId);
+        el.textContent = active
+          ? `${active.label} · ${status?.task || active.task || 'yolo'}`
+          : '';
+        return;
+      }
+      if (status.state === 'loading' || status.state === 'pending') {
+        el.textContent = `Loading ${status.label || localModelId}…`;
+        el.classList.add('loading');
+        return;
+      }
+      if (status.state === 'error') {
+        el.textContent = status.error || 'Model load failed';
+        el.classList.add('error');
+      }
+    }
+
+    async function selectModel(modelId) {
+      if (!modelId || modelId === localModelId) return;
+      localModelId = modelId;
+      syncModelTabActive();
+      saveControlState();
+      updateModelStatus({ state: 'loading', label: modelId });
+      try {
+        const r = await fetch('/sub/api/models/select', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: modelId }),
+        });
+        const data = await r.json();
+        if (data.active_id) localModelId = data.active_id;
+        renderModelTabs(data);
+        if (!data.ok && data.error) {
+          updateModelStatus({ state: 'error', error: data.error });
+        }
+      } catch (e) {
+        updateModelStatus({ state: 'error', error: String(e) });
+      }
+    }
+
+    function syncModelTabActive() {
+      document.querySelectorAll('#modelTabsRow button').forEach(b => {
+        b.classList.toggle('active', b.dataset.modelId === localModelId);
+      });
     }
 
     async function pushControlStateToServer() {
@@ -709,10 +903,24 @@
     async function restoreControlState() {
       const saved = readControlState();
       localControlMode = saved?.mode || 'manual';
+      localModelId = saved?.modelId || '';
       applyManualToUi(saved?.manual || {});
       applyBallastToUi(saved?.ballast || { fore: 0, aft: 0 });
       syncModeUi();
       await pushControlStateToServer();
+      if (localModelId) {
+        try {
+          await fetch('/sub/api/models/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: localModelId }),
+          });
+        } catch (_) { /* inference may not be running yet */ }
+      }
+      try {
+        const r = await fetch('/sub/api/models');
+        renderModelTabs(await r.json());
+      } catch (_) { /* catalog loads on first SSE tick */ }
       if (!saved) saveControlState();
       controlRestored = true;
     }
@@ -759,10 +967,10 @@
       const lines = [
         `I2C SDA=${pins.expected?.esp32?.i2c?.sda_gpio ?? '?'} SCL=${pins.expected?.esp32?.i2c?.scl_gpio ?? '?'}`,
         `Servos: ch0=${pca.aft_steer_y?.channel ?? '?'} ch1=${pca.aft_steer_z?.channel ?? '?'}`,
-        `        ch2=${pca.fin_left?.channel ?? '?'} ch3=${pca.fin_right?.channel ?? '?'}`,
+        `        ch2=${pca.fin_left?.channel ?? '?'} ch3=${pca.fin_right?.channel ?? '?'} ch4=${pca.sonar_servo?.channel ?? '?'}`,
         `Thruster: IN1=${thr.in1_gpio ?? '?'} IN2=${thr.in2_gpio ?? '?'} PWM=${thr.pwm_gpio ?? '?'}`,
-        `Fore ballast INA=${sub.ballast?.fore?.ina_gpio ?? '?'} INB=${sub.ballast?.fore?.inb_gpio ?? '?'} pot=${sub.ballast?.fore?.pot_adc_gpio ?? '?'}`,
-        `Aft ballast INA=${sub.ballast?.aft?.ina_gpio ?? '?'} INB=${sub.ballast?.aft?.inb_gpio ?? '?'} pot=${sub.ballast?.aft?.pot_adc_gpio ?? '?'}`,
+        `Fore ballast DIR=${sub.ballast?.fore?.dir_gpio ?? '?'} PWM=${sub.ballast?.fore?.pwm_gpio ?? '?'} pot=${sub.ballast?.fore?.pot_adc_gpio ?? '?'}`,
+        `Aft ballast DIR=${sub.ballast?.aft?.dir_gpio ?? '?'} PWM=${sub.ballast?.aft?.pwm_gpio ?? '?'} pot=${sub.ballast?.aft?.pot_adc_gpio ?? '?'}`,
         `Leak GPIO ${(sub.leaks?.gpios || [])[0] ?? '?'}`,
         `ADC battery=${sub.adc?.battery ?? '?'} depth=${sub.adc?.depth ?? '?'}`,
         `Pi UART: ESP RX=${sub.pi_uart?.esp_rx ?? '?'} TX=${sub.pi_uart?.esp_tx ?? '?'}`,
@@ -880,6 +1088,195 @@
         `rotate(${roll}deg) translateY(${pitch * 1.2}px)`;
     }
 
+    const sonarCanvas = document.getElementById('sonarCanvas');
+    const sonarCtx = sonarCanvas.getContext('2d');
+    const gpsCanvas = document.getElementById('gpsCanvas');
+    const gpsCtx = gpsCanvas.getContext('2d');
+    let lastSonar = {};
+    let lastGps = {};
+
+    function resizeVizCanvas(canvas, wrap) {
+      const rect = wrap.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.floor(rect.width * dpr));
+      const h = Math.max(1, Math.floor(rect.height * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      return { w, h, dpr };
+    }
+
+    function sonarPolarXY(cx, cy, radius, angleDeg, rangeM, maxRange) {
+      const rad = angleDeg * Math.PI / 180;
+      const r = Math.min(1, rangeM / maxRange) * radius;
+      return {
+        x: cx + r * Math.sin(rad),
+        y: cy - r * Math.cos(rad),
+      };
+    }
+
+    function updateSonar(sonar) {
+      const wrap = document.getElementById('sonarWrap');
+      const offline = document.getElementById('sonarOffline');
+      const meta = document.getElementById('sonarMeta');
+      const { w, h } = resizeVizCanvas(sonarCanvas, wrap);
+      const cx = w / 2;
+      const cy = h / 2;
+      const radius = Math.min(cx, cy) * 0.88;
+      const maxRange = sonar.max_range_m || 6;
+
+      sonarCtx.clearRect(0, 0, w, h);
+      sonarCtx.fillStyle = '#080d12';
+      sonarCtx.fillRect(0, 0, w, h);
+
+      sonarCtx.strokeStyle = '#243044';
+      sonarCtx.lineWidth = 1;
+      for (let ring = 1; ring <= 3; ring++) {
+        sonarCtx.beginPath();
+        sonarCtx.arc(cx, cy, (radius * ring) / 3, 0, Math.PI * 2);
+        sonarCtx.stroke();
+      }
+      sonarCtx.strokeStyle = '#334155';
+      sonarCtx.beginPath();
+      sonarCtx.moveTo(cx, cy - radius);
+      sonarCtx.lineTo(cx, cy + radius);
+      sonarCtx.moveTo(cx - radius, cy);
+      sonarCtx.lineTo(cx + radius, cy);
+      sonarCtx.stroke();
+
+      sonarCtx.fillStyle = '#3b82f6';
+      sonarCtx.beginPath();
+      sonarCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+      sonarCtx.fill();
+
+      const points = sonar.points || [];
+      const valid = points.filter(p => p.range_m != null && p.range_m > 0);
+      offline.style.display = sonar.connected && valid.length ? 'none' : 'flex';
+
+      if (valid.length >= 2) {
+        sonarCtx.strokeStyle = 'rgba(34, 197, 94, 0.55)';
+        sonarCtx.lineWidth = 2;
+        sonarCtx.beginPath();
+        valid.forEach((p, i) => {
+          const pt = sonarPolarXY(cx, cy, radius, p.angle_deg, p.range_m, maxRange);
+          if (i === 0) sonarCtx.moveTo(pt.x, pt.y);
+          else sonarCtx.lineTo(pt.x, pt.y);
+        });
+        sonarCtx.closePath();
+        sonarCtx.stroke();
+      }
+
+      valid.forEach(p => {
+        const pt = sonarPolarXY(cx, cy, radius, p.angle_deg, p.range_m, maxRange);
+        const isNear = p.range_m < maxRange * 0.75;
+        sonarCtx.fillStyle = isNear ? '#f59e0b' : '#22c55e';
+        sonarCtx.beginPath();
+        sonarCtx.arc(pt.x, pt.y, isNear ? 4 : 3, 0, Math.PI * 2);
+        sonarCtx.fill();
+      });
+
+      meta.innerHTML =
+        `Servo <span>${sonar.servo_deg != null ? sonar.servo_deg + '°' : '—'}</span> · ` +
+        `points <span>${valid.length}</span> · max <span>${fmt(maxRange, 1)} m</span>`;
+    }
+
+    function latLonToLocalM(lat, lon, origin) {
+      if (!origin) return { x: 0, y: 0 };
+      const latRad = origin.lat * Math.PI / 180;
+      const y = (lat - origin.lat) * 110540;
+      const x = (lon - origin.lon) * 111320 * Math.cos(latRad);
+      return { x, y };
+    }
+
+    function updateGps(gps) {
+      const wrap = document.getElementById('gpsWrap');
+      const offline = document.getElementById('gpsOffline');
+      const meta = document.getElementById('gpsMeta');
+      const { w, h } = resizeVizCanvas(gpsCanvas, wrap);
+
+      gpsCtx.clearRect(0, 0, w, h);
+      gpsCtx.fillStyle = '#080d12';
+      gpsCtx.fillRect(0, 0, w, h);
+
+      const track = gps.track || [];
+      const hasFix = gps.connected && gps.lat != null && gps.lon != null;
+      const online = gps.device_online;
+      if (!online) {
+        offline.textContent = 'Scanning for USB GPS…';
+        offline.style.display = hasFix ? 'none' : 'flex';
+      } else if (!hasFix) {
+        offline.textContent = 'GPS connected — acquiring fix…';
+        offline.style.display = 'flex';
+      } else {
+        offline.style.display = 'none';
+      }
+
+      const origin = gps.origin || (hasFix ? { lat: gps.lat, lon: gps.lon } : null);
+      if (!origin || track.length === 0) {
+        meta.innerHTML = 'Lat <span>—</span> · Lon <span>—</span> · Speed <span>—</span>';
+        return;
+      }
+
+      const locals = track.map(pt => latLonToLocalM(pt.lat, pt.lon, origin));
+      let minX = locals[0].x, maxX = locals[0].x, minY = locals[0].y, maxY = locals[0].y;
+      locals.forEach(p => {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      });
+      const pad = 8;
+      const spanX = Math.max(maxX - minX, 1);
+      const spanY = Math.max(maxY - minY, 1);
+      const scale = Math.min((w - pad * 2) / spanX, (h - pad * 2) / spanY);
+      const toCanvas = (p) => ({
+        x: pad + (p.x - minX) * scale,
+        y: h - pad - (p.y - minY) * scale,
+      });
+
+      if (locals.length >= 2) {
+        gpsCtx.strokeStyle = '#3b82f6';
+        gpsCtx.lineWidth = 2;
+        gpsCtx.beginPath();
+        locals.forEach((p, i) => {
+          const c = toCanvas(p);
+          if (i === 0) gpsCtx.moveTo(c.x, c.y);
+          else gpsCtx.lineTo(c.x, c.y);
+        });
+        gpsCtx.stroke();
+      }
+
+      const cur = latLonToLocalM(gps.lat, gps.lon, origin);
+      const curC = toCanvas(cur);
+      gpsCtx.fillStyle = '#22c55e';
+      gpsCtx.beginPath();
+      gpsCtx.arc(curC.x, curC.y, 5, 0, Math.PI * 2);
+      gpsCtx.fill();
+
+      if (gps.heading_deg != null) {
+        const headRad = (gps.heading_deg - 90) * Math.PI / 180;
+        gpsCtx.strokeStyle = '#22c55e';
+        gpsCtx.beginPath();
+        gpsCtx.moveTo(curC.x, curC.y);
+        gpsCtx.lineTo(curC.x + Math.cos(headRad) * 14, curC.y + Math.sin(headRad) * 14);
+        gpsCtx.stroke();
+      }
+
+      const speedKmh = gps.speed_knots != null ? (gps.speed_knots * 1.852) : null;
+      meta.innerHTML =
+        `Lat <span>${fmt(gps.lat, 6)}</span> · Lon <span>${fmt(gps.lon, 6)}</span> · ` +
+        `Speed <span>${speedKmh != null ? fmt(speedKmh, 2) + ' km/h' : '—'}</span> · ` +
+        `Sats <span>${gps.satellites ?? '—'}</span>`;
+    }
+
+    document.getElementById('gpsClearTrack').addEventListener('click', () => {
+      fetch('/sub/api/gps/clear', { method: 'POST' });
+    });
+
+    window.addEventListener('resize', () => {
+      updateSonar(lastSonar);
+      updateGps(lastGps);
+    });
+
     let serialFollow = true;
     let serialLastKey = '';
     const serialLogEl = document.getElementById('serialLog');
@@ -956,6 +1353,21 @@
 
       updateGyro(tel.gyro);
       updateLeaks(tel.leaks);
+      lastSonar = tel.sonar || {};
+      lastGps = tel.gps || {};
+      updateSonar(lastSonar);
+      updateGps(lastGps);
+
+      setBadge(document.getElementById('badgeSonar'),
+        tel.sonar?.connected ? 'Sonar — live' : 'Sonar — offline',
+        tel.sonar?.connected ? 'ok' : 'off');
+      const gpsFix = tel.gps?.connected && tel.gps?.lat != null;
+      const gpsOnline = tel.gps?.device_online;
+      setBadge(document.getElementById('badgeGps'),
+        gpsFix && gpsOnline ? 'GPS — fix'
+          : gpsOnline ? 'GPS — acquiring'
+          : 'GPS — scanning',
+        gpsFix && gpsOnline ? 'ok' : gpsOnline ? 'warn' : 'off');
 
       updateBallastTank('fore', tel.ballast.fore);
       updateBallastTank('aft', tel.ballast.aft);
@@ -970,6 +1382,17 @@
         b.classList.toggle('active', b.dataset.mode === localControlMode);
       });
       document.getElementById('manualSliders').classList.toggle('visible', localControlMode === 'manual');
+      document.getElementById('modelTabs').classList.toggle('visible', localControlMode === 'auto');
+
+      if (data.models) {
+        renderModelTabs(data.models);
+      } else if (ctrl.yolo_model_id && ctrl.yolo_model_id !== localModelId) {
+        localModelId = ctrl.yolo_model_id;
+        syncModelTabActive();
+      }
+      if (ctrl.yolo_model_status) {
+        updateModelStatus(ctrl.yolo_model_status);
+      }
 
       // When a pad connects, follow server xbox mode — don't overwrite with stale manual.
       if (controlRestored && ctrl.xbox.connected && ctrl.mode === 'xbox' && localControlMode !== 'xbox') {
@@ -1006,24 +1429,32 @@
     function updateBallastTank(tankName, b) {
       const root = document.querySelector(`.ballast-tank[data-tank="${tankName}"]`);
       if (!root || !b) return;
-      const wired = b.cal_valid && b.level != null && b.level >= 0;
+      const hasAdc = b.adc != null && b.adc >= 0;
+      const hasLevel = b.level != null && b.level >= 0;
+      const wired = hasAdc || hasLevel;
       const bar = root.querySelector('.ballast-bar');
       const lvlEl = root.querySelector('.ballast-level');
       const adcEl = root.querySelector('.ballast-adc');
       bar.classList.toggle('unwired', !wired);
-      if (wired) {
-        lvlEl.textContent = fmt(b.level * 100, 0) + '%';
+      if (wired && hasLevel) {
+        const pct = b.level * 100;
+        const rawTag = b.cal_valid ? '' : ' (raw)';
+        lvlEl.textContent = fmt(pct, 0) + '%' + rawTag;
         lvlEl.classList.remove('unwired');
-        root.querySelector('.ballast-fill').style.width = (b.level * 100) + '%';
-        adcEl.textContent = 'ADC ' + b.adc;
+        root.querySelector('.ballast-fill').style.width = pct + '%';
+      } else if (hasAdc) {
+        const pct = (b.adc / 4095) * 100;
+        lvlEl.textContent = fmt(pct, 0) + '% (raw)';
+        lvlEl.classList.remove('unwired');
+        root.querySelector('.ballast-fill').style.width = pct + '%';
       } else {
         lvlEl.textContent = 'no pot';
         lvlEl.classList.add('unwired');
         root.querySelector('.ballast-fill').style.width = '0%';
-        adcEl.textContent = b.adc != null && b.adc >= 0
-          ? `ADC ${b.adc} (floating pin — ignore)`
-          : 'ADC — (pot not wired)';
       }
+      adcEl.textContent = hasAdc
+        ? `ADC ${b.adc} · ${(b.adc * 3.3 / 4095).toFixed(2)} V`
+        : 'ADC — (check wiper on GPIO 7 aft / 11 fore)';
       const bdir = b.direction && b.direction !== 'STOP' ? b.direction : '';
       root.querySelector('.ballast-cmd').textContent =
         'cmd ' + fmt(b.command) + (bdir ? ' · ' + bdir : '');

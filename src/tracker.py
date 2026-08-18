@@ -118,14 +118,13 @@ class Tracker:
 
         chosen = self._select(apples, cx_frame, cy_frame)
 
-        # Bounding-box centre
-        target_x = (chosen.x1 + chosen.x2) // 2
-        target_y = (chosen.y1 + chosen.y2) // 2
+        # Mask centroid when the model is *-seg; otherwise bounding-box centre
+        target_x, target_y = chosen.center()
 
-        # Bbox size for distance estimation (larger apple = closer)
+        # Size for proximity / drive (mask area is tighter than the bbox)
         bbox_w = chosen.x2 - chosen.x1
         bbox_h = chosen.y2 - chosen.y1
-        bbox_area = bbox_w * bbox_h
+        bbox_area = chosen.mask_area if chosen.mask_area > 0 else bbox_w * bbox_h
         frame_area = w * h
 
         # Pixel error from frame centre (positive = apple is right/below centre)
@@ -165,8 +164,7 @@ class Tracker:
 
         # closest_to_centre
         def dist_sq(d: Detection) -> float:
-            cx = (d.x1 + d.x2) / 2
-            cy = (d.y1 + d.y2) / 2
+            cx, cy = d.center()
             return (cx - cx_frame) ** 2 + (cy - cy_frame) ** 2
 
         return min(apples, key=dist_sq)

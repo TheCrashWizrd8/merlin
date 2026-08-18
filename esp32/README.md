@@ -35,14 +35,18 @@ Edit `#define` values at the top of **`sub_rc/sub_rc.ino`** to match your wiring
 | 44 | RX | Pi GPIO14 TX (header pin 8) |
 | 43 | TX | Pi GPIO15 RX (header pin 10) |
 
-### I2C / PCA9685 (set `ENABLE_PCA9685=1` when wired)
+### I2C bus (GPIO 8 SDA, GPIO 9 SCL)
 
-| ESP32 GPIO | Function |
-|------------|----------|
-| 21 | I2C SDA |
-| 22 | I2C SCL |
+**Do not use GPIO 26–32** (including 29/30) on ESP32-S3 — they connect to internal flash and will cause a boot loop.
 
-**Do not use GPIO 26–32 or 29/30** on ESP32-S3 — those are internal flash/PSRAM.
+Wire **SDA and SCL in parallel** to every module on the bus:
+
+| Module | I2C address | Role |
+|--------|-------------|------|
+| **PCA9685** | 0x40 | Servo driver — aft steer + fore fins |
+| **MPU6050 (GY-521)** | 0x68 | Gyro + accelerometer — pitch/roll telemetry |
+
+**Note:** On some ESP32-S3 modules GPIO 26–32 are tied to internal flash/PSRAM — confirm these pins are broken out and usable on your board before wiring.
 
 | PCA9685 channel | Actuator |
 |-----------------|----------|
@@ -59,21 +63,21 @@ Edit `#define` values at the top of **`sub_rc/sub_rc.ino`** to match your wiring
 | 12 | IN2 |
 | 6 | Enable PWM |
 
-### Ballast tanks
+### Ballast tanks (Makerverse Motor Driver 2 Channel)
 
-Each tank: **5 wires** — INA, INB, pot wiper (ADC), pot 3.3 V, pot GND.  
-Fill/drain is **on/off** via INA/INB (no PWM).
+Each tank: **5 wires** — DIR, PWM, pot wiper (ADC), pot 3.3 V, pot GND.  
+Fill/drain is **on/off** via DIR + PWM enable (no speed control).
 
-| Tank | INA GPIO | INB GPIO | Pot ADC |
+| Tank | DIR GPIO | PWM GPIO | Pot ADC |
 |------|----------|----------|---------|
-| Fore | 13 | 14 | 7 |
-| Aft | 9 | 8 | 11 |
+| Fore | 13 (DIR A) | 14 (PWM A) | 11 |
+| Aft | 8 (DIR B) | 9 (PWM B) | 7 |
 
-| State | INA | INB |
+| State | DIR | PWM |
 |-------|-----|-----|
-| Fill | HIGH | LOW |
+| Fill | HIGH | HIGH |
 | Drain | LOW | HIGH |
-| Stop | LOW | LOW |
+| Stop | — | LOW |
 
 ### Sensors
 
@@ -81,7 +85,7 @@ Fill/drain is **on/off** via INA/INB (no PWM).
 |------------|--------|
 | 1 | Battery ADC |
 | 3 | Depth ADC (or I2C depth later) |
-| 5 | Leak detector (active HIGH = leak) |
+| 5 | Blue Robotics SOS leak detector (active HIGH = leak) |
 
 ---
 
@@ -92,11 +96,11 @@ Pi header pin 8  (GPIO14 TX) ──► ESP GPIO 44 (RX)
 Pi header pin 10 (GPIO15 RX) ◄── ESP GPIO 43 (TX)
 Pi GND ──────────────────────── ESP GND
 
-PCA9685 SDA/SCL ──► ESP GPIO 21/22
-Servo signals ────► PCA9685 channels 0–3
+PCA9685 + GY-521 SDA/SCL ──► ESP GPIO 8/9 (shared I2C bus)
+Servo signals ─────────────► PCA9685 channels 0–3
 L298N IN1/IN2/PWM ► ESP GPIO 4/12/6
-Ballast INA/INB ──► ESP GPIO 13/14 (fore), 9/8 (aft) + pot wiper on 7/11
-Leak sensor ──────► ESP GPIO 5
+Ballast DIR/PWM ──► ESP GPIO 13/14 (fore), 8/9 (aft) + pot wiper on 11/7
+Leak sensor ──────► ESP GPIO 5 (Blue Robotics SOS)
 Battery / depth ──► ESP ADC GPIO 1/3
 ```
 
@@ -179,8 +183,8 @@ Default control mode is **manual** (sliders at zero). The dashboard serial monit
 | `Failed to connect to ESP32-S3: No serial data received` | Wrong upload port — use `arduino-cli board list`; hold **BOOT** during upload if needed |
 | `partitions.bin: No such file or directory` | Clean build: `arduino-cli compile --clean ...` |
 | Sub dashboard disconnected | Check GPIO UART wiring; run `python scripts/probe_esp_uart.py` |
-| ESP watchdog resets | Don't use GPIO 26–32 or 29/30 for I2C — use 21/22 |
-| PCA9685 not responding | Set `ENABLE_PCA9685=1` in sketch after wiring SDA/SCL to 21/22 |
+| ESP watchdog / boot loop on I2C | GPIO 29/30 are flash pins — rewire SDA/SCL to **GPIO 8/9** |
+| PCA9685 / MPU6050 not found | Both share SDA/SCL on GPIO 8/9; boot should print `OK PCA9685` and `OK MPU6050` |
 
 ---
 

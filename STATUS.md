@@ -18,9 +18,12 @@ A parallel **sub vehicle stack** on the same Pi provides ESP32 telemetry (batter
 
 | Area | Detail |
 |------|--------|
-| **Camera** | DFRobot FIT0819 USB endoscope on `/dev/video0`, MJPEG 640×480 @ ~25 fps capture; fourcc logged at open |
-| **Inference pipeline** | Camera → YOLO → tracker → controller → hardware / web stream |
-| **Trained model** | `weights/best.pt` configured in `config/model.yaml` (YOLOv8n, 50 epochs) |
+| **Camera** | Dual FIT0819 USB endoscopes (stereo). Centres **16 cm** apart, **67°** FOV. Working size 640×480 (native size is resized if the two cameras differ) |
+| **Inference pipeline** | Camera(s) → YOLO (NCNN) → tracker → optional stereo range → controller → hardware / web stream |
+| **NCNN backend** | `backend: ncnn` in `config/model.yaml`; export via `scripts/export_model.py`. Pi 5: ~68 ms vs ~304 ms PyTorch |
+| **Stereo range** | One shared YOLO model; left/right frames detected sequentially; `src/stereo.py` triangulates centres → HUD `Range` (metres) |
+| **Trained model** | **`detect` only today:** `weights/best.pt` + `weights/best_ncnn_model/` (YOLOv8n, 50 epochs). Seg / other weights: add to catalog when ready |
+| **YOLO model picker** | `/sub/` **Auto (YOLO)** → second button row switches catalog models live (`src/model_runtime.py`). API: `GET/POST /sub/api/models`. SSE stream includes `models` snapshot |
 | **Dataset** | 697 labelled apple images (489 train / 178 val / 30 test), classes: `apple` + `damaged_apple` |
 | **Controller** | Proportional + sustain-until-centred steering/tilt; size-based drive mapping |
 | **Telemetry safety** | `src/telemetry_context.py` — leak stop, low-battery drive scale, alignment gating; **camera drives steer/tilt/drive** (not depth fusion) |
@@ -38,22 +41,21 @@ A parallel **sub vehicle stack** on the same Pi provides ESP32 telemetry (batter
 | **Hardware config** | `config/hardware.yaml` — `interface: sub`, `sub_serial`, `approach:`, `sub_motion:` |
 | **Colab notebook** | `train_colab.ipynb` for upload → train → download `best.pt` |
 | **Utility scripts** | Camera check, UART probe, telemetry simulation |
-| **Tests** | `tests/test_sub_motion.py` — fin/thruster gating and ballast height sign |
+| **Tests** | `tests/test_sub_motion.py`, `tests/test_stereo.py`, `tests/test_model_runtime.py`, `tests/test_detector.py` |
 
 ### In Progress
 
 | Area | Detail |
 |------|--------|
 | **Field testing** | End-to-end YOLO auto + layered sub actuators on real hardware |
-| **PCA9685 on sub** | `ENABLE_PCA9685` is `0` in firmware until I2C wiring is confirmed (GPIO 21/22) |
-| **IMU / depth sensor** | Telemetry stubs present; gyro may read zeros until IMU wired — fins/thruster gating need real pitch/roll for full effect |
+| **I2C peripherals** | PCA9685 @ 0x40 + MPU6050 GY-521 @ 0x68 on shared SDA/SCL (GPIO 29/30) |
 
 ### Not Started / Future
 
 | Area | Detail |
 |------|--------|
 | **Spektrum AR8020T receiver** | RC receiver decoding on ESP32 (manual mode currently uses web/Xbox) |
-| **Multi-camera triangulation** | `cameras.num_cameras` placeholder in config |
+| **Stereo calibration** | Parallel-camera pinhole model (no undistort/rectify). Tune `fov_h_deg` / `focal_length_px` against a known distance |
 | **Runtime pin config** | `config/pins.yaml` is reference-only; code still reads `hardware.yaml` and firmware defines |
 | **Motion phase on dashboard** | `level` / `point` / `approach` computed in code; not yet shown as a UI badge |
 
@@ -70,6 +72,7 @@ python inference.py --web --timing
 # YOLO stream: http://<pi-ip>:8080/
 # Sub dashboard: http://<pi-ip>:8080/sub/
 # Inference sets sub control mode to auto; ESP bridge starts automatically
+# In Auto mode, use the YOLO model buttons to switch AI (see Key Settings → models)
 ```
 
 With `interface: sub`, you do **not** need `--sub` — the sub dashboard and ESP bridge start automatically. Use `--no-sub` to disable.
@@ -115,21 +118,48 @@ python scripts/probe_esp_uart.py
 | File | Setting | Current Value |
 |------|---------|---------------|
 | `config/model.yaml` | `architecture` | `yolov8n` |
-| `config/model.yaml` | `weights` | `weights/best.pt` |
-| `config/model.yaml` | `img_size` | `640` (use `320` for more FPS) |
+| `config/model.yaml` | `task` | `detect` |
+| `config/model.yaml` | `backend` | `ncnn` |
+| `config/model.yaml` | `weights` | `weights/best.pt` (loads `best_ncnn_model/`) |
+| `config/model.yaml` | `active_model` | `detect` (only deployed catalog entry today) |
+| `config/model.yaml` | `models` | Catalog for dashboard picker — `seg` / `seg_fast` are placeholders until you add weights |
+| `config/model.yaml` | `img_size` | `640` (use `320` only if you need more FPS; re-export NCNN) |
 | `config/model.yaml` | `confidence` | `0.50` |
+| `config/hardware.yaml` | `cameras.num_cameras` | `2` |
+| `config/hardware.yaml` | `cameras.baseline_cm` | `16` |
+| `config/hardware.yaml` | `cameras.fov_h_deg` | `67` |
 | `config/hardware.yaml` | `interface` | `sub` |
 | `config/hardware.yaml` | `sub_serial.port` | `/dev/ttyACM0` (USB) or `/dev/serial0` (GPIO UART) |
 | `config/hardware.yaml` | `approach.use_telemetry` | `true` (safety only) |
 | `config/hardware.yaml` | `sub_motion.use_ballast_for_height` | `true` |
 | `config/hardware.yaml` | `use_size_for_drive` | `true` |
 
+### YOLO model catalog (multiple AIs)
+
+The Pi can run **several YOLO weights** and switch between them in **Auto** mode without a full restart. Catalog: **`config/model.yaml`** → `models:`.
+
+| ID | Label | Weights | Task | Deployed |
+|----|-------|---------|------|----------|
+| `detect` | Detect | `weights/best.pt` | detect | **Yes** |
+| `seg` | Seg (future) | `weights/best_seg.pt` | segment | No — add when trained |
+| `seg_fast` | Seg 320 (future) | `weights/best_seg_320.pt` | segment | No |
+
+**Use:** `/sub/` → **Auto (YOLO)** → **YOLO model** buttons. Or `POST /sub/api/models/select` with `{"id":"detect"}`. Implementation: `src/model_runtime.py` (hot reload via `Detector.reload()`).
+
+**Per entry:** `label`, `weights`, `task`, `track_label`. With `backend: ncnn`, each `.pt` needs its own `weights/<stem>_ncnn_model/` export.
+
+**Add later:** copy `.pt` → `python scripts/export_model.py --weights … --format ncnn` → add YAML entry → restart inference or pick from dashboard.
+
+Full write-up: **`docs/GUIDE.md`** §11 and **`README.md`** § Multiple YOLO models.
+
 ---
 
 ## Architecture (high level)
 
 ```
-USB Camera ──► YOLO ──► Tracker ──► Controller ──► ControlOutput
+USB Camera(s) ──► YOLO (one model, hot-swappable) ──► Tracker ──► Controller ──► ControlOutput
+                         │                                ▲
+                         └── stereo.triangulate (range_m) ─┘
                          │              │
                          │              └── TelemetryContext (leak, battery, alignment)
                          │
@@ -171,6 +201,7 @@ yolo-project/
 ├── train_colab.ipynb     # Colab notebook
 ├── config/               # model, dataset, hardware, pins
 ├── src/
+│   ├── model_runtime.py  # YOLO catalog + hot-swap
 │   ├── sub_motion.py     # Layered auto: fins, steer, thruster, ballast
 │   ├── telemetry_context.py
 │   ├── hardware.py       # SubBridgeOutput
@@ -180,6 +211,7 @@ yolo-project/
 ├── esp32/sub_rc/         # Primary ESP32 firmware
 ├── scripts/              # test_telemetry, probe_esp_uart, etc.
 ├── data/images/          # Training dataset
-├── weights/best.pt       # Trained model
+├── weights/best.pt       # Detect model (catalog: detect)
+├── weights/best_ncnn_model/
 └── docs/                 # GUIDE, ESP32_SERIAL, etc.
 ```

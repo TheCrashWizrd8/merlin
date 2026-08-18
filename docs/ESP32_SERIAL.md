@@ -73,7 +73,7 @@ B <fore> <aft>\n
 
 Example: `B 1.000 -1.000` — fill fore, drain aft.
 
-On the ESP, each tank uses **INA + INB** (digital on/off, no PWM) plus a **3-wire linear pot** (3.3 V, wiper → ADC, GND). See `config/pins.yaml` and `esp32/README.md`.
+On the ESP, each tank uses a **Makerverse Motor Driver 2 Channel** in DIR/PWM mode (on/off fill/drain) plus a **3-wire linear pot** (3.3 V, wiper → ADC, GND). See `config/pins.yaml` and `esp32/README.md`.
 
 **Sub actuators** (all values -1.0 … +1.0):
 
@@ -121,7 +121,11 @@ TEL thruster 0.400 128
 TEL status READY
 TEL fault NONE
 TEL heartbeat 42
+TEL sonarpt <angle_deg> <range_m>   # per ping during servo sweep (-1 = no echo)
+TEL sonar sweep                     # sent when sweep reverses at ±180°
 ```
+
+Sonar sweep runs on the ESP: PCA9685 **channel 4** rotates +180° → −180° → +180° while pinging. Each hit is a `TEL sonarpt` line; the Pi accumulates points by angle for the dashboard radar plot.
 
 Diagnostic replies (not prefixed with `TEL`):
 
@@ -147,7 +151,7 @@ With **`sub_rc`** powered and UART linked but **no battery divider, depth sensor
 | `TEL fault NONE` | present | No leak alarm |
 | `TEL heartbeat N` | N increments ~5 Hz | Live telemetry loop |
 | `TEL leak 0 0 0 0` | all zero | OK (`PIN_LEAK = -1` or pulled low) |
-| `TEL gyro 0 0 0` | zeros | No IMU — hardcoded in firmware |
+| `TEL gyro 0 0 0` | zeros | MPU6050 not found or not wired on I2C |
 | `TEL thruster 0 0` | zeros | Idle |
 | `B 0.000 0.000` | zeros | Pi sending ballast stop (manual mode) |
 | `S2 0 … 0` | all zeros | Pi sending idle actuators (manual mode) |
