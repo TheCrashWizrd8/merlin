@@ -42,14 +42,55 @@ def resolve_active_model_id(
     catalog: dict[str, dict],
     cfg: dict,
     requested_id: str = "",
+    backend: str = "",
 ) -> str:
+    if not backend:
+        backend = str(cfg.get("backend") or "pytorch").lower()
+
+    def available(model_id: str) -> bool:
+        entry = catalog.get(model_id)
+        if not entry:
+            return False
+        ok, _ = model_availability(entry, backend)
+        return ok
+
+    if requested_id and available(requested_id):
+        return requested_id
+    if requested_id and requested_id in catalog and not available(requested_id):
+        print(
+            f"[ModelRuntime] Requested model {requested_id!r} unavailable; "
+            "picking another catalog entry."
+        )
+
+    active = str(cfg.get("active_model") or "").strip()
+    if active and available(active):
+        return active
+    if active and active in catalog and not available(active):
+        print(
+            f"[ModelRuntime] active_model={active!r} unavailable; "
+            "picking first available entry."
+        )
+
+    for model_id, entry in catalog.items():
+        if model_availability(entry, backend)[0]:
+            return model_id
+
     if requested_id and requested_id in catalog:
         return requested_id
-    active = str(cfg.get("active_model") or "").strip()
     if active and active in catalog:
         return active
     if catalog:
         return next(iter(catalog))
+    return ""
+
+
+def first_available_model_id(
+    catalog: dict[str, dict],
+    backend: str,
+) -> str:
+    for model_id, entry in catalog.items():
+        if model_availability(entry, backend)[0]:
+            return model_id
     return ""
 
 
@@ -65,6 +106,10 @@ def model_availability(
         return False, f"missing {weights}"
     if backend == "pytorch":
         return True, None
+    if backend == "hailo":
+        from src.hailo_runtime import hailo_export_dir, package_status
+
+        return package_status(hailo_export_dir(weights_path))
     exported = _exported_model_dir(weights_path, backend)
     if not exported.is_dir():
         return False, f"run: python scripts/export_model.py --weights {weights} --format {backend}"
@@ -83,7 +128,7 @@ def catalog_snapshot(
     if not backend:
         backend = str(cfg.get("backend") or "pytorch").lower()
     if not active_id:
-        active_id = resolve_active_model_id(catalog, cfg)
+        active_id = resolve_active_model_id(catalog, cfg, backend=backend)
     models: list[dict] = []
     for model_id, entry in catalog.items():
         avail, reason = model_availability(entry, backend)
@@ -168,9 +213,34 @@ class ModelRuntime:
         except Exception:
             requested = ""
 
-        start_id = resolve_active_model_id(self._catalog, self._cfg, requested)
+        start_id = resolve_active_model_id(
+            self._catalog,
+            self._cfg,
+            requested,
+            backend=str(
+                self._backend_override or self._cfg.get("backend") or "pytorch"
+            ).lower(),
+        )
         if start_id:
-            self._load_model(start_id)
+            try:
+                self._load_model(start_id)
+            except (FileNotFoundError, RuntimeError) as exc:
+                fallback = first_available_model_id(
+                    self._catalog,
+                    str(
+                        self._backend_override
+                        or self._cfg.get("backend")
+                        or "pytorch"
+                    ).lower(),
+                )
+                if fallback and fallback != start_id:
+                    print(
+                        f"[ModelRuntime] Could not load {start_id!r} ({exc}); "
+                        f"falling back to {fallback!r}"
+                    )
+                    self._load_model(fallback)
+                else:
+                    raise
         else:
             # Fallback: legacy single weights entry in model.yaml
             self._detector = Detector(
@@ -301,6 +371,22 @@ class ModelRuntime:
             return
         if not wanted or wanted == self._active_id:
             return
+        entry = self._catalog.get(wanted)
+        if entry is None:
+            return
+        backend = str(
+            self._backend_override or self._cfg.get("backend") or "pytorch"
+        ).lower()
+        avail, reason = model_availability(entry, backend)
+        if not avail:
+            self._status = {
+                "state": "error",
+                "error": reason or f"model {wanted!r} unavailable",
+                "task": entry.get("task"),
+                "label": entry.get("label", wanted),
+            }
+            self._sync_state()
+            return
         with self._lock:
             if wanted == self._active_id:
                 return
@@ -320,6 +406,17 @@ class ModelRuntime:
         model_id = str(model_id).strip()
         if model_id not in self._catalog:
             return {"ok": False, "error": f"Unknown model {model_id!r}"}
+
+        entry = self._catalog[model_id]
+        backend = str(
+            self._backend_override or self._cfg.get("backend") or "pytorch"
+        ).lower()
+        avail, reason = model_availability(entry, backend)
+        if not avail:
+            snap = self.snapshot()
+            snap["ok"] = False
+            snap["error"] = reason or f"model {model_id!r} unavailable"
+            return snap
 
         try:
             from src.sub_state import get_sub_state

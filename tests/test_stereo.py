@@ -81,11 +81,34 @@ def test_fuse_tracks_averages_when_paired():
 
     left = _track(400, 200)
     left.error_x = 0.4
+    left.bbox_area = 1000
     right = _track(240, 200)
     right.error_x = -0.2
+    right.bbox_area = 2000
     fused = fuse_tracks(left, right, paired=True)
     assert fused.apple_detected
     assert abs(fused.error_x - 0.1) < 1e-6
+    assert fused.bbox_area == 1500
+
+
+def test_triangulate_with_swap():
+    from src.stereo import triangulate_with_swap
+
+    cfg = StereoConfig(baseline_m=0.16, fov_h_deg=67.0, fov_is_diagonal=False)
+    f = focal_length_px(640, 67.0, diagonal=False)
+    z = 1.0
+    disparity = f * cfg.baseline_m / z
+    cx, cy = 320, 240
+    # Labels reversed: "left" is actually the right camera
+    mislabeled_left = _track(int(round(cx - disparity / 2.0)), cy)
+    mislabeled_right = _track(int(round(cx + disparity / 2.0)), cy)
+    result, swapped = triangulate_with_swap(
+        mislabeled_left, mislabeled_right, 640, 480, cfg
+    )
+    assert swapped
+    assert result.ok
+    assert result.range_m is not None
+    assert abs(result.range_m - 1.0) < 0.03
 
 
 def test_known_geometry_matches_pinhole():
@@ -139,6 +162,7 @@ if __name__ == "__main__":
     test_negative_disparity_suggests_swap()
     test_pair_tracks_requires_both()
     test_fuse_tracks_averages_when_paired()
+    test_triangulate_with_swap()
     test_known_geometry_matches_pinhole()
     test_diagonal_fov_recovers_50cm()
     test_horizontal_67_underreads_true_50cm()

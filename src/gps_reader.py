@@ -9,17 +9,27 @@ from __future__ import annotations
 
 import glob
 import math
+import sys
 import threading
 import time
 from pathlib import Path
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import yaml
 
-from src.serial_util import open_serial_port
+from src.serial_util import (
+    is_esp_usb_device,
+    is_gps_usb_device,
+    open_serial_port,
+    realpath_port,
+    serial_by_id_path,
+)
 from src.sub_state import get_sub_state
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "hardware.yaml"
-_ESP_SKIP_PATTERNS = ("espressif", "esp32", "usb jtag", "usb-jtag")
+CONFIG_PATH = _PROJECT_ROOT / "config" / "hardware.yaml"
 _GPS_HINT_PATTERNS = (
     "gps", "gnss", "u-blox", "ublox", "navis", "vk-172", "vk172",
     "neo-6", "neo-7", "neo-m", "globalSat", "globalsat", "bu-353",
@@ -47,16 +57,15 @@ def _load_gps_config() -> dict:
     }
 
 
-def _realpath(port: str) -> str:
-    try:
-        return str(Path(port).resolve())
-    except OSError:
-        return port
-
-
-def _is_esp_by_id(path: str) -> bool:
-    low = path.lower()
-    return any(p in low for p in _ESP_SKIP_PATTERNS)
+def _is_reserved_esp_port(path: str, esp_port: str = "") -> bool:
+    """Skip the ESP32 serial device — never skip a USB GPS, even on ttyACM0."""
+    if is_gps_usb_device(path):
+        return False
+    if is_esp_usb_device(path):
+        return True
+    if esp_port and realpath_port(path) == realpath_port(esp_port):
+        return not is_gps_usb_device(esp_port)
+    return False
 
 
 def _looks_like_nmea(line: bytes) -> bool:
@@ -66,18 +75,17 @@ def _looks_like_nmea(line: bytes) -> bool:
 
 def list_gps_candidates(*, esp_port: str = "", prefer_port: str = "") -> list[str]:
     """Rank serial devices most likely to be a USB GPS module."""
-    esp_real = _realpath(esp_port) if esp_port else ""
-    prefer_real = _realpath(prefer_port) if prefer_port else ""
+    prefer_real = realpath_port(prefer_port) if prefer_port else ""
     ranked: list[tuple[int, str]] = []
     seen: set[str] = set()
 
     def add(path: str, score: int) -> None:
         if not path or not Path(path).exists():
             return
-        real = _realpath(path)
+        real = realpath_port(path)
         if real in seen:
             return
-        if esp_real and real == esp_real:
+        if _is_reserved_esp_port(path, esp_port):
             return
         seen.add(real)
         ranked.append((score, path))
@@ -86,20 +94,20 @@ def list_gps_candidates(*, esp_port: str = "", prefer_port: str = "") -> list[st
         add(prefer_port, 200)
 
     for path in sorted(glob.glob("/dev/serial/by-id/*")):
-        if _is_esp_by_id(path):
+        if is_esp_usb_device(path) and not is_gps_usb_device(path):
             continue
-        low = path.lower()
+        low = serial_by_id_path(path).lower()
         score = 20
         if any(h in low for h in _GPS_HINT_PATTERNS):
             score = 120
-        if prefer_real and _realpath(path) == prefer_real:
+        if prefer_real and realpath_port(path) == prefer_real:
             score = 200
         add(path, score)
 
     for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
         for path in sorted(glob.glob(pattern)):
             score = 10
-            if prefer_real and _realpath(path) == prefer_real:
+            if prefer_real and realpath_port(path) == prefer_real:
                 score = 200
             add(path, score)
 
@@ -170,12 +178,17 @@ def _nmea_deg(value: str, direction: str) -> float | None:
         return None
 
 
+def _strip_checksum(text: str) -> str:
+    star = text.find("*")
+    return text[:star] if star >= 0 else text
+
+
 def parse_nmea_line(line: str, state=None) -> bool:
     """Parse one NMEA sentence. Returns True if a fix was applied."""
     if state is None:
         state = get_sub_state()
 
-    text = line.strip()
+    text = _strip_checksum(line.strip())
     if not text.startswith("$"):
         return False
 
@@ -195,6 +208,7 @@ def parse_nmea_line(line: str, state=None) -> bool:
                 hdop = float(parts[8])
         except ValueError:
             pass
+        state.update_gps_reception(satellites=sats, hdop=hdop, fix_quality=quality)
         if quality <= 0:
             return False
         lat = _nmea_deg(parts[2], parts[3])
@@ -209,6 +223,15 @@ def parse_nmea_line(line: str, state=None) -> bool:
             hdop=hdop,
         )
         return True
+
+    if sentence.endswith("GSV") and len(parts) >= 4:
+        try:
+            in_view = int(parts[3] or "0")
+        except ValueError:
+            return False
+        if in_view > 0:
+            state.update_gps_reception(satellites=in_view)
+        return False
 
     if sentence.endswith("RMC") and len(parts) >= 10:
         if parts[2] != "A":
@@ -250,6 +273,8 @@ class GpsReader:
         self._serial = None
         self._ser_lock = threading.Lock()
         self._last_nmea_ts = 0.0
+        self._scan_fails = 0
+        self._logged_no_fix = False
 
     @property
     def device_online(self) -> bool:
@@ -286,8 +311,19 @@ class GpsReader:
             baud_rates=self._baud_rates,
         )
         if not found:
+            self._scan_fails += 1
+            if self._scan_fails <= 2 or self._scan_fails % 10 == 0:
+                candidates = list_gps_candidates(
+                    esp_port=self._esp_port,
+                    prefer_port=self._prefer_port,
+                )
+                print(
+                    f"[gps] Still scanning ({self._scan_fails}). "
+                    f"devices={candidates or 'none'} esp={self._esp_port or 'none'}"
+                )
             self._state.set_gps_scanning()
             return False
+        self._scan_fails = 0
 
         port, baud = found
         try:
@@ -349,7 +385,16 @@ class GpsReader:
                 raw, buf = buf.split(b"\n", 1)
                 line = raw.decode("ascii", errors="ignore").strip("\r")
                 if line.startswith("$"):
-                    parse_nmea_line(line, self._state)
+                    got_fix = parse_nmea_line(line, self._state)
+                    if got_fix:
+                        self._logged_no_fix = False
+                    elif not self._logged_no_fix and ("GGA" in line or "RMC" in line):
+                        sats = self._state.gps.satellites
+                        print(
+                            f"[gps] NMEA alive, no fix yet ({sats} sats). "
+                            "Place the USB GPS outdoors or in a window."
+                        )
+                        self._logged_no_fix = True
 
 
 _reader: GpsReader | None = None
@@ -397,6 +442,8 @@ def latlon_to_local_m(
 
 def _cli_main() -> int:
     print("[gps] Scanning for USB GPS modules …")
+    print("[gps] Diagnostic mode: this process holds the serial port.")
+    print("[gps] Ctrl+C before starting the dashboard — it has its own GPS reader.")
     cfg = _load_gps_config()
     candidates = list_gps_candidates(prefer_port=cfg["port"])
     if not candidates:

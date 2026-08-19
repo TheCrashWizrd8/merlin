@@ -23,10 +23,11 @@ _PINS_YAML = Path(__file__).parent.parent / "config" / "pins.yaml"
 _PIN_CHECKLIST: list[tuple[str, str]] = [
     ("PING", "OK PONG"),
     ("PINS", "OK PINS"),
-    ("TEST S 0 0", "OK TEST servo"),
     ("TEST S 1 0", "OK TEST servo"),
     ("TEST S 2 0", "OK TEST servo"),
     ("TEST S 3 0", "OK TEST servo"),
+    ("TEST S 4 0", "OK TEST servo"),
+    ("TEST S 5 0", "OK TEST servo"),
     ("TEST T 0", "OK TEST thruster"),
     ("TEST B fore stop", "OK TEST ballast"),
     ("TEST B aft stop", "OK TEST ballast"),
@@ -268,6 +269,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
             state.set_manual_actuators(act)
             state.set_control_mode("manual")
         state.recompute_effective()
+        get_esp_bridge().set_diag_mode(False)
         return jsonify(state.control_snapshot())
 
     @app.route("/sub/api/models", methods=["GET"])
@@ -327,6 +329,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
                 state.set_ballast_command(0.0, tank=tank)
         elif "value" in data:
             state.set_ballast_command(float(data["value"]), tank=tank)
+        get_esp_bridge().set_diag_mode(False)
         return jsonify(state.telemetry_snapshot()["ballast"])
 
     @app.route("/sub/api/ballast/calibrate", methods=["POST"])
@@ -353,6 +356,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         state.set_manual_actuators(act)
         state.set_control_mode("manual")
         state.recompute_effective()
+        get_esp_bridge().set_diag_mode(False)
         return jsonify(state.control_snapshot())
 
     @app.route("/sub/api/serial", methods=["POST"])
@@ -390,7 +394,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         if not cmd:
             return jsonify({"ok": False, "error": "empty command"}), 400
         bridge = get_esp_bridge()
-        bridge.set_diag_mode(True)
+        bridge.set_diag_mode(True, resume_after_s=3.5)
         ok = bridge.send_raw(cmd)
         return jsonify({"ok": ok, "command": cmd})
 

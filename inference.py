@@ -45,6 +45,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
@@ -107,9 +108,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["pytorch", "ncnn", "openvino"],
+        choices=["pytorch", "ncnn", "openvino", "hailo"],
         default=None,
-        help="Override inference backend from config/model.yaml (ncnn recommended on Pi)",
+        help="Override inference backend from config/model.yaml (hailo = Hailo-8L HAT)",
     )
     parser.add_argument(
         "--imgsz",
@@ -162,6 +163,11 @@ def parse_args() -> argparse.Namespace:
         "--no-xbox",
         action="store_true",
         help="With --sub, skip Xbox controller polling",
+    )
+    parser.add_argument(
+        "--no-gps",
+        action="store_true",
+        help="With --sub, skip USB GPS auto-scan",
     )
     parser.add_argument(
         "--timing",
@@ -252,17 +258,6 @@ def _stereo_enabled(args: argparse.Namespace, stereo_cfg) -> bool:
     return bool(stereo_cfg.enabled)
 
 
-def _attach_stereo(output, stereo_result):
-    from dataclasses import replace
-
-    return replace(
-        output,
-        range_m=stereo_result.range_m if stereo_result.ok else None,
-        stereo_ok=stereo_result.ok,
-        stereo_note="" if stereo_result.ok else stereo_result.reason,
-    )
-
-
 def _output_for_view(output, track):
     """Copy actuator/range fields onto a per-camera bbox for drawing."""
     from dataclasses import replace
@@ -299,6 +294,15 @@ def _output_for_view(output, track):
     )
 
 
+def _compose_stereo_view(left_drawn, right_drawn, rig_reversed: bool = False):
+    """Side-by-side L|R; flip panel order when config labels ≠ physical rig."""
+    from src.stereo import compose_side_by_side
+
+    if rig_reversed:
+        return compose_side_by_side(right_drawn, left_drawn)
+    return compose_side_by_side(left_drawn, right_drawn)
+
+
 def _start_web_preview(
     *,
     grabber,
@@ -309,7 +313,6 @@ def _start_web_preview(
     stop_event: threading.Event,
 ) -> None:
     """Publish L/R camera frames as soon as they arrive; overlay last YOLO boxes."""
-    from src.stereo import compose_side_by_side
     from src.web_stream import set_latest_frame
 
     def _loop() -> None:
@@ -326,38 +329,67 @@ def _start_web_preview(
                 output = hud_holder.get("output")
                 track_left = hud_holder.get("track_left")
                 track_right = hud_holder.get("track_right")
-            if output is not None:
-                view_l = (
-                    _output_for_view(output, track_left)
-                    if track_left is not None
-                    else output
+                rig_reversed = bool(hud_holder.get("rig_reversed"))
+                loop_fps = hud_holder.get("loop_fps")
+            if output is not None and track_left is not None:
+                left = display.draw(
+                    left,
+                    _output_for_view(output, track_left),
+                    count_fps=False,
+                    copy=False,
+                    overlay_fps=loop_fps,
                 )
-                left = display.draw(left, view_l, count_fps=True, copy=False)
+            elif output is not None:
+                left = display.draw(
+                    left,
+                    output,
+                    count_fps=False,
+                    copy=False,
+                    overlay_fps=loop_fps,
+                )
             if use_stereo and ok_r and right is not None:
-                if output is not None:
-                    view_r = (
-                        _output_for_view(output, track_right)
-                        if track_right is not None
-                        else output
-                    )
+                if output is not None and track_right is not None:
                     right = display.draw(
-                        right, view_r, count_fps=False, copy=False
+                        right,
+                        _output_for_view(output, track_right),
+                        count_fps=False,
+                        copy=False,
+                        hud=False,
+                        gauges=False,
                     )
-                left = compose_side_by_side(left, right)
+                elif output is not None:
+                    right = display.draw(
+                        right,
+                        output,
+                        count_fps=False,
+                        copy=False,
+                        hud=False,
+                        gauges=False,
+                    )
+                left = _compose_stereo_view(left, right, rig_reversed)
             set_latest_frame(left)
-            stop_event.wait(max(0.0, 0.05 - (time.monotonic() - t0)))
+            # Preview is JPEG/HUD only; cap so it does not starve Hailo.
+            stop_event.wait(max(0.0, 0.066 - (time.monotonic() - t0)))
 
     threading.Thread(target=_loop, name="web-preview", daemon=True).start()
 
 
 def _start_sub_stack(args: argparse.Namespace, serial_port: str | None) -> object | None:
-    """Start ESP bridge, optional Xbox polling, and /sub/ routes. Returns bridge or None."""
+    """Start ESP bridge, GPS, optional Xbox polling, and /sub/ routes. Returns bridge or None."""
     from src.esp_bridge import get_esp_bridge
     from src.sub_state import get_sub_state
 
     bridge = get_esp_bridge(port=serial_port, autostart=False)
     bridge.start()
     print(f"[inference] ESP bridge on {bridge.port} (telemetry + S2/B actuators)")
+
+    if not getattr(args, "no_gps", False):
+        from src.gps_reader import connect_gps, is_gps_enabled
+        if is_gps_enabled():
+            connect_gps(esp_port=bridge.port)
+            print("[inference] GPS auto-scan started (plug in USB GPS anytime)")
+        else:
+            print("[inference] GPS disabled in config/hardware.yaml (gps.enabled: false)")
 
     if not args.no_xbox:
         try:
@@ -380,7 +412,13 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Import modules (deferred so path is set up first)
     # ------------------------------------------------------------------
-    from src.camera import Camera, CameraError, FrameGrabber, format_usb_camera_report
+    from src.camera import (
+        Camera,
+        CameraError,
+        FrameGrabber,
+        assign_camera_device,
+        format_usb_camera_report,
+    )
 
     try:
         import cv2
@@ -392,11 +430,10 @@ def main() -> None:
     from src.controller import Controller
     from src.display import Display
     from src.stereo import (
-        compose_side_by_side,
         fuse_tracks,
         load_stereo_config,
         pair_tracks,
-        triangulate,
+        triangulate_with_swap,
     )
 
     hw_config = _load_hw_config()
@@ -413,11 +450,23 @@ def main() -> None:
     mono_device = _parse_device(
         args.device if args.device is not None else stereo_cfg.left_device
     )
+    print(format_usb_camera_report())
+    if use_stereo:
+        left_device, left_note = assign_camera_device(left_device)
+        right_device, right_note = assign_camera_device(
+            right_device, exclude=(str(left_device),)
+        )
+        for note in (left_note, right_note):
+            if note:
+                print(f"[inference] {note}")
+    else:
+        mono_device, mono_note = assign_camera_device(mono_device)
+        if mono_note:
+            print(f"[inference] {mono_note}")
 
     # ------------------------------------------------------------------
     # Open cameras first so we only load a second model if both exist
     # ------------------------------------------------------------------
-    print(format_usb_camera_report())
     cam = None
     cam_right = None
     grabber = None
@@ -521,7 +570,12 @@ def main() -> None:
         "output": None,
         "track_left": None,
         "track_right": None,
+        "rig_reversed": False,
+        "loop_fps": 0.0,
     }
+    loop_stamps: deque[float] = deque(maxlen=30)
+    stereo_swap_streak = 0
+    stereo_rig_reversed = False
 
     hardware: object
     hardware_init_error: Exception | None = None
@@ -696,6 +750,13 @@ def main() -> None:
                         continue
 
                 frame_count += 1
+                loop_stamps.append(time.monotonic())
+                if len(loop_stamps) >= 2:
+                    loop_fps = (len(loop_stamps) - 1) / (
+                        loop_stamps[-1] - loop_stamps[0]
+                    )
+                else:
+                    loop_fps = 0.0
 
                 # 1. Detect — one shared model (sequential). Two NCNN nets in
                 # parallel oversubscribe the Pi and are usually slower.
@@ -723,33 +784,56 @@ def main() -> None:
                         frame_right.shape,
                         apple_label=track_label,
                     )
-                    stereo_result = triangulate(
+                    stereo_result, stereo_swapped = triangulate_with_swap(
                         track_left,
                         track_right,
                         frame.shape[1],
                         frame.shape[0],
                         stereo_cfg,
                     )
-                    track = fuse_tracks(
-                        track_left,
-                        track_right,
-                        pair_tracks(track_left, track_right, stereo_cfg.match_max_dy_px),
+                    if stereo_swapped:
+                        stereo_swap_streak += 1
+                        if stereo_swap_streak >= 5 and not stereo_rig_reversed:
+                            stereo_rig_reversed = True
+                            hud_holder["rig_reversed"] = True
+                            print(
+                                "[stereo] Config left/right labels appear reversed — "
+                                "flipping side-by-side display (swap left_device/right_device "
+                                "in hardware.yaml to fix permanently)"
+                            )
+                    else:
+                        stereo_swap_streak = 0
+                    paired = pair_tracks(
+                        track_left, track_right, stereo_cfg.match_max_dy_px
                     )
+                    track = fuse_tracks(track_left, track_right, paired)
 
                 # 3. Control (vision + live ESP telemetry when sub stack is active)
                 telemetry = None
                 if use_sub:
                     from src.telemetry_context import TelemetryContext
                     telemetry = TelemetryContext.from_sub_state()
-                output = controller.compute(track, telemetry=telemetry)
                 if stereo_result is not None:
-                    output = _attach_stereo(output, stereo_result)
-                    if args.timing and frame_count % 30 == 0 and stereo_result.ok:
-                        print(
-                            f"[stereo] range={stereo_result.range_m:.2f}m  "
-                            f"z={stereo_result.z_m:.2f}m  "
-                            f"d={stereo_result.disparity_px:.1f}px"
-                        )
+                    output = controller.compute(
+                        track,
+                        telemetry=telemetry,
+                        range_m=stereo_result.range_m if stereo_result.ok else None,
+                        stereo_ok=stereo_result.ok,
+                        stereo_note="" if stereo_result.ok else stereo_result.reason,
+                    )
+                else:
+                    output = controller.compute(track, telemetry=telemetry)
+                if (
+                    args.timing
+                    and frame_count % 30 == 0
+                    and stereo_result is not None
+                    and stereo_result.ok
+                ):
+                    print(
+                        f"[stereo] range={stereo_result.range_m:.2f}m  "
+                        f"z={stereo_result.z_m:.2f}m  "
+                        f"d={stereo_result.disparity_px:.1f}px"
+                    )
                 if args.web or use_sub:
                     from dataclasses import replace
                     from src.control_source import get_current_sdt
@@ -809,9 +893,10 @@ def main() -> None:
                         hud_holder["output"] = output
                         hud_holder["track_left"] = track_left
                         hud_holder["track_right"] = track_right
+                        hud_holder["loop_fps"] = loop_fps
                 else:
                     if use_stereo and frame_right is not None and track_right is not None:
-                        annotated = compose_side_by_side(
+                        annotated = _compose_stereo_view(
                             display.draw(
                                 frame,
                                 _output_for_view(output, track_left),
@@ -823,6 +908,7 @@ def main() -> None:
                                 count_fps=False,
                                 copy=False,
                             ),
+                            stereo_rig_reversed,
                         )
                     else:
                         annotated = display.draw(frame, output, copy=False)
@@ -835,11 +921,16 @@ def main() -> None:
                     cap_ms = (t_cap - t_loop) * 1000
                     yolo_ms = (t_yolo - t_cap) * 1000
                     draw_ms = (t_draw - t_yolo) * 1000
-                    loop_fps = display.fps
+                    loop_fps = (
+                        (len(loop_stamps) - 1)
+                        / (loop_stamps[-1] - loop_stamps[0])
+                        if len(loop_stamps) >= 2
+                        else 0.0
+                    )
                     print(
                         f"[perf] cap={cap_ms:.0f}ms yolo={yolo_ms:.0f}ms "
                         f"ctrl+draw={draw_ms:.0f}ms total={total_ms:.0f}ms "
-                        f"hud_fps={loop_fps:.1f}"
+                        f"loop_fps={loop_fps:.1f}"
                     )
 
     finally:

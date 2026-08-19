@@ -2,13 +2,13 @@
 # Hardware configuration
 # ---------------------------------------------------------------------------
 # cameras: 1 = mono (bbox-size distance only).  2 = stereo triangulation.
-# UVC cameras often expose two /dev/video nodes each (capture + metadata),
-# so the second physical camera is usually index 2, not 1.
+# UVC cameras often expose two /dev/video nodes each (capture + metadata).
+# There is often no /dev/video0; capture nodes are typically video1 and video2.
 # ---------------------------------------------------------------------------
 cameras:
   num_cameras: 2
-  left_device: 0          # OpenCV index or "/dev/video0"
-  right_device: 2         # OpenCV index or "/dev/video2"
+  left_device: 0          # capture node of first USB cam; metadata nodes are skipped
+  right_device: 3         # capture node of second USB cam (not /dev/video1)
   baseline_cm: 16.0       # centre-to-centre spacing of the two lenses
   fov_h_deg: 67.0         # camera spec FOV (degrees)
   fov_is_diagonal: true   # USB specs are almost always diagonal, not horizontal
@@ -101,6 +101,9 @@ size_curve: sqrt                # linear | sqrt
 # ---------------------------------------------------------------------------
 approach:
   use_telemetry: true
+  use_stereo_range: true   # when stereo pairs, Prox/D use range_m (metres), not bbox size
+  range_far_m: 1.8        # at/ beyond → prox 0 (far, full drive)
+  range_near_m: 0.35       # at/ within → prox 1 (close, creep)
   stop_on_leak: true
   min_battery_v: 10.5
   low_battery_drive_scale: 0.45

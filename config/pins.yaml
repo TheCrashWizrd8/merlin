@@ -46,7 +46,7 @@ esp32:
 # PCA9685 (servo driver)
 # ---------------------------------------------------------------------------
 pca9685:
-  i2c_address: 0x40
+  i2c_address: 0x40    # all A0–A5 OPEN; closed A0=0x41 (Open=0 Closed=1)
   pwm_frequency_hz: 50
   servo_tick_calibration:
     min_tick: 205
@@ -65,19 +65,22 @@ pca9685:
       channel: 1
       role: sub_camera_tilt
     aft_steer_y:
-      channel: 0
+      channel: 3
       role: sub_aft_steering_y
+    aft_steer_x:
+      channel: 2
+      role: sub_aft_steering_x
     aft_steer_z:
-      channel: 1
+      channel: 2
       role: sub_aft_steering_z
     fin_left:
-      channel: 2
+      channel: 4
       role: sub_fore_fin_left
     fin_right:
-      channel: 3
+      channel: 5
       role: sub_fore_fin_right
     sonar_servo:
-      channel: 4
+      channel: 1
       role: sub_sonar_sweep
       sweep_deg: [-180, 180]
       step_deg: 5
@@ -87,14 +90,14 @@ pca9685:
 # ---------------------------------------------------------------------------
 l298n:
   motor:
-    in1_gpio: 4
-    in2_gpio: 12    # moved from 5 — GPIO 5 is leak sensor
+    in1_gpio: 13    # moved off GPIO 4 (aft ballast DIR B)
+    in2_gpio: 12
     pwm_gpio: 6
     motor_pwm_freq_hz: 5000
     motor_pwm_resolution_bits: 8
 
   thruster:
-    in1_gpio: 4
+    in1_gpio: 13
     in2_gpio: 12
     pwm_gpio: 6
 
@@ -114,20 +117,24 @@ sub:
     # 5 wires per tank: DIR, PWM, pot wiper (ADC), pot 3.3V, pot GND
     driver: makerverse_2ch
     fore:
-      dir_gpio: 13    # DIR A
-      pwm_gpio: 14    # PWM A
-      pot_adc_gpio: 11
+      dir_gpio: 16    # DIR A (IO16)
+      pwm_gpio: 15    # PWM A (IO15)
+      pot_adc_gpio: 10    # ADC1; GPIO 0 is boot strap and will brick boot
     aft:
-      dir_gpio: 8     # DIR B
-      pwm_gpio: 9     # PWM B
-      pot_adc_gpio: 7
+      dir_gpio: 4     # DIR B (IO4)
+      pwm_gpio: 5     # PWM B (IO5)
+      pot_adc_gpio: 3     # IO3
 
   leaks:
-    gpios: [5]    # Blue Robotics SOS leak detector (active HIGH)
+    board: 4_zone_combined      # one signal pin, four probes on the leak board
+    signal_gpio: 1    # IO1 / D1
+    gpios: [1]
+    zones: [fore, aft, electronics, battery]
+    active_high: true
 
   adc:
-    battery: 1
-    depth: 3
+    battery: 2
+    depth: 7    # moved off GPIO 3 (aft pot)
 
   imu:
     module: GY-521
@@ -138,10 +145,10 @@ sub:
 
   sonar:
     module: HC-SR04_or_JSN-SR04T
-    trig_gpio: 15
-    echo_gpio: 16
+    trig_gpio: 17    # moved off GPIO 15 (fore ballast PWM A)
+    echo_gpio: 18    # moved off GPIO 16 (fore ballast DIR A)
     max_range_m: 6.0
-    servo_channel: 4   # PCA9685
+    servo_channel: 1   # PCA9685
 
   axes:
     aftSteerY: float in [-1,1]
@@ -156,7 +163,7 @@ sub:
   diagnostics:
     ping: "PING"
     pins: "PINS"
-    test_servo: "TEST S <ch 0-3> <val -1..1>"
+    test_servo: "TEST S <ch 1-5> <val -1..1>"
     test_thruster: "TEST T <val -1..1>"
     test_ballast_fore: "TEST B fore fill|drain|stop"
     test_ballast_aft: "TEST B aft fill|drain|stop"

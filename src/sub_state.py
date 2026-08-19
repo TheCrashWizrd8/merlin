@@ -11,7 +11,26 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Any
+
+import yaml
+
+_PINS_YAML = Path(__file__).parent.parent / "config" / "pins.yaml"
+
+
+def _load_leak_meta() -> tuple[list[int], list[str], bool]:
+    try:
+        with open(_PINS_YAML) as f:
+            cfg = yaml.safe_load(f) or {}
+    except OSError:
+        cfg = {}
+    leaks = (cfg.get("sub") or {}).get("leaks") or {}
+    signal = leaks.get("signal_gpio")
+    gpios = [int(signal)] if signal is not None else [int(g) for g in (leaks.get("gpios") or [5])]
+    labels = [str(l) for l in (leaks.get("zones") or leaks.get("labels") or ["fore", "aft", "electronics", "battery"])]
+    combined = bool(leaks.get("board") or len(gpios) <= 1)
+    return gpios, labels, combined
 
 
 @dataclass
@@ -121,6 +140,10 @@ class SubState:
         self.depth_m: float | None = None
         self.leak_sensors: list[bool] = []
         self.leak_triggered: bool = False
+        leak_gpios, leak_labels, leak_combined = _load_leak_meta()
+        self.leak_gpios: list[int] = leak_gpios
+        self.leak_labels: list[str] = leak_labels
+        self.leak_combined: bool = leak_combined
         self.ballast_fore = BallastTankState()
         self.ballast_aft = BallastTankState()
         self.thruster_value: float | None = None
@@ -411,6 +434,27 @@ class SubState:
             })
         self._notify()
 
+    def update_gps_reception(
+        self,
+        *,
+        satellites: int | None = None,
+        hdop: float | None = None,
+        fix_quality: int | None = None,
+    ) -> None:
+        """NMEA is flowing but there may be no position fix yet."""
+        with self._lock:
+            if satellites is not None:
+                self.gps.satellites = satellites
+            if hdop is not None:
+                self.gps.hdop = hdop
+            if fix_quality is not None:
+                self.gps.fix_quality = fix_quality
+            self.gps_device_online = True
+            if not self.gps_connected:
+                self.gps_status = "online"
+            self.gps_last_ts = time.time()
+        self._notify()
+
     def clear_gps_track(self) -> None:
         with self._lock:
             self.gps_track.clear()
@@ -646,6 +690,9 @@ class SubState:
                     "sensors": list(self.leak_sensors),
                     "triggered": self.leak_triggered,
                     "connected": len(self.leak_sensors) > 0,
+                    "gpios": self.leak_gpios,
+                    "labels": self.leak_labels,
+                    "combined": self.leak_combined,
                 },
                 "ballast": {
                     "fore": self.ballast_fore.as_dict(),

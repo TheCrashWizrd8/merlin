@@ -79,6 +79,9 @@ class Display:
         output: ControlOutput,
         count_fps: bool = True,
         copy: bool = True,
+        overlay_fps: float | None = None,
+        hud: bool = True,
+        gauges: bool = True,
     ) -> np.ndarray:
         """Draw overlays onto `frame` and return the annotated image."""
         if count_fps:
@@ -94,8 +97,11 @@ class Display:
             self._draw_bbox(annotated, output)
             self._draw_error_vector(annotated, cx, cy, output.target_x, output.target_y)
 
-        self._draw_hud(annotated, output, w, h)
-        self._draw_gauges(annotated, output, w, h)
+        if hud:
+            fps_shown = self.fps if overlay_fps is None else overlay_fps
+            self._draw_hud(annotated, output, w, h, fps_shown=fps_shown)
+        if gauges:
+            self._draw_gauges(annotated, output, w, h)
 
         return annotated
 
@@ -179,20 +185,31 @@ class Display:
         )
 
     def _draw_hud(
-        self, img: np.ndarray, output: ControlOutput, w: int, h: int
+        self,
+        img: np.ndarray,
+        output: ControlOutput,
+        w: int,
+        h: int,
+        fps_shown: float | None = None,
     ) -> None:
         # Prefer controller-filtered ratio (smoothed; matches D)
         size_f = getattr(output, "size_ratio_filtered", 0.0) or 0.0
         size_r = getattr(output, "size_ratio_raw", 0.0) or 0.0
         if size_f <= 0.0 and output.frame_area > 0 and output.bbox_area > 0:
             size_f = output.bbox_area / output.frame_area
+        prox = getattr(output, "proximity_t", 0.0)
+        prox_tag = ""
+        if getattr(output, "stereo_ok", False) and getattr(output, "range_m", None) is not None:
+            prox_tag = " rng"
+        elif "size" in (getattr(output, "approach_note", "") or ""):
+            prox_tag = " sz"
         lines = [
             datetime.now().strftime("Clk:  %H:%M:%S.%f")[:-3],
-            f"FPS: {self.fps:5.1f}",
+            f"FPS: {(self.fps if fps_shown is None else fps_shown):5.1f}",
             f"Apple: {'YES' if output.apple_detected else 'NO '}",
             f"Conf:  {output.confidence:.3f}",
             f"Size:  {size_f:.3f} (r{size_r:.3f})",
-            f"Prox:  {getattr(output, 'proximity_t', 0.0):.3f}",
+            f"Prox:  {prox:.3f}{prox_tag}",
         ]
         range_m = getattr(output, "range_m", None)
         if range_m is not None:

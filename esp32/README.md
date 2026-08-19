@@ -50,16 +50,17 @@ Wire **SDA and SCL in parallel** to every module on the bus:
 
 | PCA9685 channel | Actuator |
 |-----------------|----------|
-| 0 | Aft steer Y |
-| 1 | Aft steer Z |
-| 2 | Fore fin left |
-| 3 | Fore fin right |
+| 1 | Sonar rotate |
+| 2 | Aft steer X (aftSteerZ) |
+| 3 | Aft steer Y |
+| 4 | Fore fin left |
+| 5 | Fore fin right |
 
 ### Thruster (L298N)
 
 | ESP32 GPIO | L298N pin |
 |------------|-----------|
-| 4 | IN1 |
+| 13 | IN1 |
 | 12 | IN2 |
 | 6 | Enable PWM |
 
@@ -70,8 +71,8 @@ Fill/drain is **on/off** via DIR + PWM enable (no speed control).
 
 | Tank | DIR GPIO | PWM GPIO | Pot ADC |
 |------|----------|----------|---------|
-| Fore | 13 (DIR A) | 14 (PWM A) | 11 |
-| Aft | 8 (DIR B) | 9 (PWM B) | 7 |
+| Fore (A) | 16 (DIR A) | 15 (PWM A) | 10 |
+| Aft (B) | 4 (DIR B) | 5 (PWM B) | 3 (IO3) |
 
 | State | DIR | PWM |
 |-------|-----|-----|
@@ -83,9 +84,9 @@ Fill/drain is **on/off** via DIR + PWM enable (no speed control).
 
 | ESP32 GPIO | Sensor |
 |------------|--------|
-| 1 | Battery ADC |
-| 3 | Depth ADC (or I2C depth later) |
-| 5 | Blue Robotics SOS leak detector (active HIGH = leak) |
+| 1 (IO1 / D1) | 4-zone leak board (combined signal — any zone wet → HIGH) |
+| 2 | Battery ADC |
+| 7 | Depth ADC (or I2C depth later) |
 
 ---
 
@@ -98,10 +99,11 @@ Pi GND ──────────────────────── 
 
 PCA9685 + GY-521 SDA/SCL ──► ESP GPIO 8/9 (shared I2C bus)
 Servo signals ─────────────► PCA9685 channels 0–3
-L298N IN1/IN2/PWM ► ESP GPIO 4/12/6
-Ballast DIR/PWM ──► ESP GPIO 13/14 (fore), 8/9 (aft) + pot wiper on 11/7
-Leak sensor ──────► ESP GPIO 5 (Blue Robotics SOS)
-Battery / depth ──► ESP ADC GPIO 1/3
+L298N IN1/IN2/PWM ► ESP GPIO 13/12/6
+Ballast DIR/PWM ──► ESP GPIO 16/15 (fore A), 4/5 (aft B) + pot wiper on 10/3
+Leak sensor ──────► ESP GPIO 1 (IO1 / D1, 4-zone combined)
+Battery / depth ──► ESP ADC GPIO 2/7
+Sonar TRIG/ECHO ──► ESP GPIO 17/18
 ```
 
 USB can remain connected for serial debug (`USB_DEBUG_MIRROR=1` mirrors key messages to USB Serial).
@@ -192,7 +194,7 @@ Default control mode is **manual** (sliders at zero). The dashboard serial monit
 
 - **Serial timeout:** 8000 ms — thruster/motor stops if Pi stops sending.
 - **Motor cap:** Lower `MOTOR_MAX_SPEED` (default 255) for bench testing.
-- **Leak sensor:** GPIO 5 active HIGH triggers leak alarm in telemetry and dashboard.
+- **Leak sensor:** GPIO 1 (IO1 / D1) active HIGH triggers leak alarm in telemetry and dashboard.
 
 ---
 

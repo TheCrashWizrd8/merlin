@@ -237,6 +237,9 @@ class Controller:
         low_battery_drive_scale: float = 0.45,
         max_error_x_for_drive: float = 0.40,
         max_error_y_for_drive: float = 0.45,
+        use_stereo_range: bool = True,
+        range_far_m: float = 1.8,
+        range_near_m: float = 0.35,
     ) -> None:
         self.gain_steer = gain_steer
         self.gain_tilt = gain_tilt
@@ -267,6 +270,11 @@ class Controller:
         self.low_battery_drive_scale = max(0.0, min(1.0, float(low_battery_drive_scale)))
         self.max_error_x_for_drive = max(0.05, float(max_error_x_for_drive))
         self.max_error_y_for_drive = max(0.05, float(max_error_y_for_drive))
+        self.use_stereo_range = bool(use_stereo_range)
+        self.range_far_m = max(0.05, float(range_far_m))
+        self.range_near_m = max(0.05, float(range_near_m))
+        if self.range_far_m <= self.range_near_m:
+            self.range_far_m = self.range_near_m + 0.5
 
         # Internal state for smoothing, derivative damping and persistence.
         self._filtered_ex = 0.0
@@ -317,6 +325,9 @@ class Controller:
             "low_battery_drive_scale": float(approach.get("low_battery_drive_scale", 0.45)),
             "max_error_x_for_drive": float(approach.get("max_error_x_for_drive", 0.40)),
             "max_error_y_for_drive": float(approach.get("max_error_y_for_drive", 0.45)),
+            "use_stereo_range": bool(approach.get("use_stereo_range", True)),
+            "range_far_m": float(approach.get("range_far_m", 1.8)),
+            "range_near_m": float(approach.get("range_near_m", 0.35)),
         })
         profile = (profile or "config").strip().lower()
         if profile != "config":
@@ -361,6 +372,15 @@ class Controller:
             t = (a - lo) / span
         return max(0.0, min(1.0, t))
 
+    def _range_m_to_proximity_t(self, range_m: float) -> float:
+        """Map stereo range (metres) to [0, 1]: far → 0, close → 1."""
+        far = self.range_far_m
+        near = self.range_near_m
+        if far <= near:
+            return 0.0
+        t = (far - range_m) / (far - near)
+        return max(0.0, min(1.0, t))
+
     def _with_min_command(self, value: float, minimum: float) -> float:
         """Keep motion alive when non-zero error exists, instead of tiny bursts."""
         if value == 0.0:
@@ -384,23 +404,43 @@ class Controller:
         frame_area: int,
         bbox_area: int,
         telemetry: TelemetryContext | None,
+        range_m: float | None = None,
+        stereo_ok: bool = False,
     ) -> tuple[float, float, str]:
         """
-        Forward drive from camera (bbox size + centre alignment).
+        Forward drive from camera (stereo range or bbox size + centre alignment).
         Telemetry only affects safety (leak stop, low-battery scale).
 
         Returns (drive, proximity_t, approach_note).
         """
         note_parts: list[str] = []
 
-        if self.use_size_for_drive and frame_area > 0 and bbox_area > 0:
+        if self.use_stereo_range and stereo_ok and range_m is not None and range_m > 0.0:
+            proximity_t = self._range_m_to_proximity_t(range_m)
+            note_parts.append("range")
+        elif self.use_size_for_drive and frame_area > 0 and bbox_area > 0:
             proximity_t = self._size_ratio_to_drive_t(size_filt)
-            far = max(-1.0, min(1.0, self.size_drive_far))
-            close = max(-1.0, min(1.0, self.size_drive_close))
-            drive = far - proximity_t * (far - close)
+            note_parts.append("size")
         else:
             proximity_t = 0.0
             drive = self.min_drive_command
+            drive *= self._alignment_drive_scale(ex, ey)
+            tel = telemetry
+            if tel and self.use_telemetry and tel.fresh:
+                if self.stop_on_leak and tel.leak_triggered:
+                    return 0.0, proximity_t, "leak"
+                if (
+                    tel.battery_v is not None
+                    and tel.battery_v < self.min_battery_v
+                ):
+                    drive *= self.low_battery_drive_scale
+                    note_parts.append("low_batt")
+            drive = self._clamp(drive)
+            return drive, proximity_t, ",".join(note_parts)
+
+        far = max(-1.0, min(1.0, self.size_drive_far))
+        close = max(-1.0, min(1.0, self.size_drive_close))
+        drive = far - proximity_t * (far - close)
 
         drive *= self._alignment_drive_scale(ex, ey)
 
@@ -423,6 +463,9 @@ class Controller:
         self,
         track: TrackResult,
         telemetry: TelemetryContext | None = None,
+        range_m: float | None = None,
+        stereo_ok: bool = False,
+        stereo_note: str = "",
     ) -> ControlOutput:
         """
         Compute actuator commands from a TrackResult.
@@ -513,9 +556,16 @@ class Controller:
                     )
                 size_filt = self._filtered_size_ratio
 
-        # Drive: camera bbox size + centre alignment; telemetry = safety only
+        # Drive: stereo range (when paired) or bbox size + centre alignment
         drive, proximity_t, approach_note = self._compute_drive(
-            ex, ey, size_filt, active.frame_area, active.bbox_area, telemetry
+            ex,
+            ey,
+            size_filt,
+            active.frame_area,
+            active.bbox_area,
+            telemetry,
+            range_m=range_m,
+            stereo_ok=stereo_ok,
         )
         depth_display = (
             telemetry.depth_m
@@ -547,5 +597,8 @@ class Controller:
             proximity_t=proximity_t,
             depth_m_used=depth_display,
             approach_note=approach_note,
+            range_m=range_m if stereo_ok else None,
+            stereo_ok=stereo_ok,
+            stereo_note=stereo_note if not stereo_ok else "",
             timestamp=time.time(),
         )

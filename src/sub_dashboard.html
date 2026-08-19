@@ -206,6 +206,10 @@
       border-color: var(--danger);
       background: rgba(239,68,68,0.12);
     }
+    .leak-cell.unwired {
+      opacity: 0.45;
+    }
+    .leak-cell.unwired span { color: var(--muted); }
     .ballast-bar {
       height: 14px;
       background: var(--panel2);
@@ -538,8 +542,9 @@
       </section>
 
       <section class="panel" id="leakPanel">
-        <div class="panel-head">Leak Sensors <span id="leakStatus">—</span></div>
+        <div class="panel-head">Leak Board <span id="leakStatus">—</span></div>
         <div class="panel-body">
+          <div style="font-size:0.68rem;color:var(--muted);margin-bottom:0.45rem;" id="leakBoardMeta">4 zones · GPIO —</div>
           <div class="leak-grid" id="leakGrid">
             <div class="leak-cell"><div class="dot"></div>L1</div>
           </div>
@@ -643,10 +648,11 @@
         <div class="test-grid" id="pinTestButtons">
           <button data-cmd="PING">PING</button>
           <button data-cmd="PINS">PINS</button>
-          <button data-cmd="TEST S 0 1.0">Servo 0</button>
-          <button data-cmd="TEST S 1 1.0">Servo 1</button>
-          <button data-cmd="TEST S 2 1.0">Servo 2</button>
-          <button data-cmd="TEST S 3 1.0">Servo 3</button>
+          <button data-cmd="TEST S 1 1.0">Sonar</button>
+          <button data-cmd="TEST S 2 1.0">Aft X</button>
+          <button data-cmd="TEST S 3 1.0">Aft Y</button>
+          <button data-cmd="TEST S 4 1.0">Fin L</button>
+          <button data-cmd="TEST S 5 1.0">Fin R</button>
           <button data-cmd="TEST T 0.5">Thr Fwd</button>
           <button data-cmd="TEST T -0.5">Thr Rev</button>
           <button data-cmd="TEST T 0">Thr Stop</button>
@@ -966,12 +972,12 @@
       const thr = pins.expected?.l298n?.thruster || {};
       const lines = [
         `I2C SDA=${pins.expected?.esp32?.i2c?.sda_gpio ?? '?'} SCL=${pins.expected?.esp32?.i2c?.scl_gpio ?? '?'}`,
-        `Servos: ch0=${pca.aft_steer_y?.channel ?? '?'} ch1=${pca.aft_steer_z?.channel ?? '?'}`,
-        `        ch2=${pca.fin_left?.channel ?? '?'} ch3=${pca.fin_right?.channel ?? '?'} ch4=${pca.sonar_servo?.channel ?? '?'}`,
+        `Servos: ch1=sonar ch2=aftX=${pca.aft_steer_z?.channel ?? pca.aft_steer_x?.channel ?? '?'} ch3=aftY=${pca.aft_steer_y?.channel ?? '?'}`,
+        `        ch4=finL=${pca.fin_left?.channel ?? '?'} ch5=finR=${pca.fin_right?.channel ?? '?'}`,
         `Thruster: IN1=${thr.in1_gpio ?? '?'} IN2=${thr.in2_gpio ?? '?'} PWM=${thr.pwm_gpio ?? '?'}`,
         `Fore ballast DIR=${sub.ballast?.fore?.dir_gpio ?? '?'} PWM=${sub.ballast?.fore?.pwm_gpio ?? '?'} pot=${sub.ballast?.fore?.pot_adc_gpio ?? '?'}`,
         `Aft ballast DIR=${sub.ballast?.aft?.dir_gpio ?? '?'} PWM=${sub.ballast?.aft?.pwm_gpio ?? '?'} pot=${sub.ballast?.aft?.pot_adc_gpio ?? '?'}`,
-        `Leak GPIO ${(sub.leaks?.gpios || [])[0] ?? '?'}`,
+        `Leak board GPIO ${sub.leaks?.signal_gpio ?? sub.leaks?.gpios?.[0] ?? '?'} (${(sub.leaks?.zones || sub.leaks?.labels || []).length || 4} zones)`,
         `ADC battery=${sub.adc?.battery ?? '?'} depth=${sub.adc?.depth ?? '?'}`,
         `Pi UART: ESP RX=${sub.pi_uart?.esp_rx ?? '?'} TX=${sub.pi_uart?.esp_tx ?? '?'}`,
       ];
@@ -1058,24 +1064,40 @@
       place(document.getElementById('stickR'), rs.x, rs.y);
     }
 
-    function updateLeaks(leaks) {
+    function updateLeaks(leaks, labels) {
       const grid = document.getElementById('leakGrid');
+      const meta = document.getElementById('leakBoardMeta');
+      const names = labels && labels.length ? labels : (leaks.labels || []);
+      const combined = leaks.combined !== false;
       const sensors = leaks.sensors && leaks.sensors.length ? leaks.sensors : [];
+      const gpio = leaks.gpios && leaks.gpios.length ? leaks.gpios[0] : '?';
+      if (meta) {
+        meta.textContent = combined
+          ? `${names.length || 4} zones · shared GPIO ${gpio}`
+          : `${sensors.length} sensor(s)`;
+      }
       if (!sensors.length) {
         grid.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;">No leak data yet</div>';
         return;
       }
-      grid.innerHTML = sensors.map((t, i) =>
-        `<div class="leak-cell ${t ? 'triggered' : ''}"><div class="dot"></div>L${i + 1}</div>`
-      ).join('');
-      document.body.classList.toggle('leak-alarm', leaks.triggered);
+      const triggered = !!leaks.triggered;
+      const displayCount = combined ? (names.length || sensors.length) : sensors.length;
+      grid.innerHTML = Array.from({ length: displayCount }, (_, i) => {
+        const name = names[i] || ('Zone ' + (i + 1));
+        const active = combined ? triggered : !!sensors[i];
+        return `<div class="leak-cell ${active ? 'triggered' : ''}">
+          <div class="dot"></div>
+          <span>${name}</span>
+        </div>`;
+      }).join('');
+      document.body.classList.toggle('leak-alarm', triggered);
       const badge = document.getElementById('badgeLeak');
-      if (leaks.triggered) {
+      if (triggered) {
         setBadge(badge, 'LEAK DETECTED', 'alarm');
       } else {
         setBadge(badge, 'Leaks — OK', 'ok');
       }
-      document.getElementById('leakStatus').textContent = leaks.triggered ? 'ALARM' : 'OK';
+      document.getElementById('leakStatus').textContent = triggered ? 'ALARM' : 'OK';
     }
 
     function updateGyro(g) {
@@ -1206,7 +1228,10 @@
         offline.textContent = 'Scanning for USB GPS…';
         offline.style.display = hasFix ? 'none' : 'flex';
       } else if (!hasFix) {
-        offline.textContent = 'GPS connected — acquiring fix…';
+        const sats = gps.satellites || 0;
+        offline.textContent = sats > 0
+          ? `GPS connected — ${sats} satellites, waiting for a 3D fix…`
+          : 'GPS connected — 0 satellites. Place the dongle outdoors or in a window.';
         offline.style.display = 'flex';
       } else {
         offline.style.display = 'none';
@@ -1214,7 +1239,9 @@
 
       const origin = gps.origin || (hasFix ? { lat: gps.lat, lon: gps.lon } : null);
       if (!origin || track.length === 0) {
-        meta.innerHTML = 'Lat <span>—</span> · Lon <span>—</span> · Speed <span>—</span>';
+        const sats = gps.satellites ?? '—';
+        const hdop = gps.hdop != null ? fmt(gps.hdop, 1) : '—';
+        meta.innerHTML = `Lat <span>—</span> · Lon <span>—</span> · Sats <span>${sats}</span> · HDOP <span>${hdop}</span>`;
         return;
       }
 
@@ -1352,7 +1379,7 @@
       batEl.classList.toggle('danger', tel.battery.voltage != null && tel.battery.voltage < 10.5);
 
       updateGyro(tel.gyro);
-      updateLeaks(tel.leaks);
+      updateLeaks(tel.leaks, pins.expected?.sub?.leaks?.zones || pins.expected?.sub?.leaks?.labels);
       lastSonar = tel.sonar || {};
       lastGps = tel.gps || {};
       updateSonar(lastSonar);
@@ -1365,7 +1392,7 @@
       const gpsOnline = tel.gps?.device_online;
       setBadge(document.getElementById('badgeGps'),
         gpsFix && gpsOnline ? 'GPS — fix'
-          : gpsOnline ? 'GPS — acquiring'
+          : gpsOnline ? `GPS — ${tel.gps?.satellites || 0} sats`
           : 'GPS — scanning',
         gpsFix && gpsOnline ? 'ok' : gpsOnline ? 'warn' : 'off');
 
@@ -1454,7 +1481,7 @@
       }
       adcEl.textContent = hasAdc
         ? `ADC ${b.adc} · ${(b.adc * 3.3 / 4095).toFixed(2)} V`
-        : 'ADC — (check wiper on GPIO 7 aft / 11 fore)';
+        : 'ADC — (check wiper on GPIO 3 aft / 10 fore)';
       const bdir = b.direction && b.direction !== 'STOP' ? b.direction : '';
       root.querySelector('.ballast-cmd').textContent =
         'cmd ' + fmt(b.command) + (bdir ? ' · ' + bdir : '');

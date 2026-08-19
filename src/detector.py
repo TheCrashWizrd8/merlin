@@ -19,7 +19,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config" / "model.yaml"
 
-BACKENDS = ("pytorch", "ncnn", "openvino")
+BACKENDS = ("pytorch", "ncnn", "openvino", "hailo")
 
 
 def _resolve_thread_count(configured: int) -> int:
@@ -93,6 +93,12 @@ def _resolve_weights_path(weights_value: str) -> Path:
 def _exported_model_dir(weights_path: Path, backend: str) -> Path:
     """Map weights/best.pt -> weights/best_ncnn_model/ (Ultralytics convention)."""
     return weights_path.with_name(f"{weights_path.stem}_{backend}_model")
+
+
+def _hailo_hef_path(export_dir: Path) -> Path | None:
+    from src.hailo_runtime import hailo_hef_path
+
+    return hailo_hef_path(export_dir)
 
 
 def _pt_is_newer_than_export(weights_path: Path, export_dir: Path) -> bool:
@@ -212,6 +218,13 @@ def resolve_model_source(
             f"Run: python scripts/export_model.py --format {backend}\n"
             "If export fails on the Pi, export on Colab/x86 and copy the folder to weights/."
         )
+    if backend == "hailo":
+        from src.hailo_runtime import hailo_unavailable_reason, hailo_hef_path
+
+        hef = hailo_hef_path(exported)
+        if hef is None:
+            raise FileNotFoundError(hailo_unavailable_reason(exported))
+        return str(hef), f"hailo HEF: {hef}"
     if _pt_is_newer_than_export(weights_path, exported):
         raise RuntimeError(
             f"weights {weights_path} is newer than the {backend} export at {exported}.\n"
@@ -295,7 +308,10 @@ class Detector:
         )
 
         if self.backend != "pytorch":
-            export_task = _read_export_task(Path(model_source))
+            export_dir = Path(model_source)
+            if export_dir.is_file():
+                export_dir = export_dir.parent
+            export_task = _read_export_task(export_dir)
             if export_task and export_task != self.task:
                 raise RuntimeError(
                     f"Exported {self.backend} model is task={export_task!r} but "
@@ -303,6 +319,10 @@ class Detector:
                     "Delete the old export folder and re-export from the new .pt:\n"
                     f"  python scripts/export_model.py --format {self.backend}"
                 )
+
+        if self.backend == "hailo":
+            self._load_hailo(spec, model_source, description, weights_path)
+            return
 
         threads = _resolve_thread_count(self.ncnn_threads)
         _apply_thread_env(threads)
@@ -347,6 +367,38 @@ class Detector:
         self._model(warmup, **warmup_kw)
         print("[Detector] Warmup complete")
 
+    def _load_hailo(
+        self,
+        spec: dict,
+        model_source: str,
+        description: str,
+        weights_path: Optional[Path],
+    ) -> None:
+        from src.hailo_runtime import HailoYOLO, class_names_from_export
+
+        if isinstance(self._model, HailoYOLO):
+            self._model.close()
+            self._model = None
+
+        export_dir = Path(model_source).parent
+        names = class_names_from_export(export_dir)
+        model = HailoYOLO(
+            Path(model_source),
+            names=names,
+            confidence=self.confidence,
+            img_size=self.img_size,
+        )
+        self._model = model
+        self.img_size = model.img_size
+        tag = f" id={self.model_id}" if self.model_id else ""
+        print(
+            f"[Detector] Loaded {self.architecture} task={self.task}{tag} "
+            f"backend=hailo ({description})  imgsz={self.img_size}"
+        )
+        warmup = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
+        self._model.predict(warmup)
+        print("[Detector] Warmup complete")
+
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """
         Run inference on a single BGR frame.
@@ -362,6 +414,9 @@ class Detector:
             All detections above the confidence threshold, sorted by
             descending confidence.
         """
+        if self.backend == "hailo":
+            return self._model.predict(frame, max_det=5)
+
         predict_kw = dict(
             conf=self.confidence,
             iou=self.iou,

@@ -13,22 +13,22 @@
 // Wire SDA/SCL to GPIO 8/9 (or 21/22) instead.
 #define I2C_SDA               8
 #define I2C_SCL               9
-#define PCA9685_ADDR          0x40
+#define PCA9685_ADDR          0x40    // all jumpers OPEN; closed A0=0x41 … A5=0x60
 #define ENABLE_PCA9685        1
 #define MPU6050_ADDR          0x68    // GY-521 default (AD0 → GND)
 #define ENABLE_MPU6050        1
 
 // PCA9685 channels: aft steer Y/Z, fore fins L/R, sonar sweep servo
-#define CH_AFT_STEER_Y        0
-#define CH_AFT_STEER_Z        1
-#define CH_FIN_LEFT           2
-#define CH_FIN_RIGHT          3
-#define CH_SONAR_SERVO        4
+#define CH_SONAR_SERVO        1
+#define CH_AFT_STEER_Z        2     // aft X
+#define CH_AFT_STEER_Y        3
+#define CH_FIN_LEFT           4
+#define CH_FIN_RIGHT          5
 
 // Sonar — HC-SR04 / JSN-SR04T style (trigger + echo). Set ENABLE_SONAR=0 to disable.
 #define ENABLE_SONAR          1
-#define PIN_SONAR_TRIG        15
-#define PIN_SONAR_ECHO        16
+#define PIN_SONAR_TRIG        17
+#define PIN_SONAR_ECHO        18
 #define SONAR_MAX_RANGE_M     6.0f
 #define SONAR_STEP_DEG        5
 #define SONAR_SWEEP_MIN       -180
@@ -36,30 +36,32 @@
 #define SONAR_SETTLE_MS       25
 #define SONAR_PULSE_TIMEOUT_US 35000
 
-// Thruster via L298N (IN2 moved — GPIO 5 is leak sensor)
-#define PIN_THR_IN1           4
+// Thruster via L298N
+#define PIN_THR_IN1           13    // moved off GPIO 4 (aft ballast DIR B)
 #define PIN_THR_IN2           12
 #define PIN_THR_PWM           6
 
 // Ballast — Makerverse Motor Driver 2 Channel (DIR/PWM mode, on/off fill/drain)
 // Fore: channel A (DIR A + PWM A). Aft: channel B (DIR B + PWM B).
 // Pot wipers → ESP32 ADC (3.3V, wiper, GND on each linear pot)
-// GPIO 7 = ADC1 (aft), GPIO 11 = ADC2 (fore — WiFi must stay off)
 #define BALLAST_USE_DIR_PWM   1
-#define PIN_FORE_BALLAST_DIR  13    // DIR A
-#define PIN_FORE_BALLAST_PWM  14    // PWM A
-#define PIN_FORE_BALLAST_POT  11
-#define PIN_AFT_BALLAST_DIR   8     // DIR B
-#define PIN_AFT_BALLAST_PWM   9     // PWM B
-#define PIN_AFT_BALLAST_POT   7
+#define PIN_FORE_BALLAST_DIR  16    // DIR A (IO16)
+#define PIN_FORE_BALLAST_PWM  15    // PWM A (IO15)
+#define PIN_FORE_BALLAST_POT  10    // ADC1 — not GPIO 0 (boot strap / download mode)
+#define PIN_AFT_BALLAST_DIR   4     // DIR B (IO4)
+#define PIN_AFT_BALLAST_PWM   5     // PWM B (IO5)
+#define PIN_AFT_BALLAST_POT   3     // IO3
 
 // Sensors
-#define PIN_BATTERY_ADC       1     // ADC1
-#define PIN_DEPTH_ADC         3     // ADC1 (or I2C depth sensor later)
+#define PIN_BATTERY_ADC       2     // ADC1
+#define PIN_DEPTH_ADC         7     // ADC1 (moved off GPIO 3 — aft pot)
 #define DEPTH_I2C_ADDR        -1    // TODO: I2C depth sensor address when wired
 
-// Leak detector — Blue Robotics SOS (active HIGH = leak). Set to -1 when unwired.
-#define PIN_LEAK              5
+// Leak board — 4-zone combined signal on IO1 / D1 (active HIGH).
+#define PIN_LEAK              1     // set -1 when unwired
+#define LEAK_DEBOUNCE_HITS    3
+#define LEAK_DEBOUNCE_SAMPLES 5
+#define LEAK_ZONE_COUNT       4     // zones on the board (one combined GPIO)
 
 // Timing
 #define SERIAL_BAUD           115200
@@ -72,11 +74,16 @@
 #define MOTOR_MIN_START       90
 #define BALLAST_CMD_DEADBAND  0.05f
 
-// Servo PWM ticks @ 50 Hz (PCA9685 12-bit, 25 MHz osc)
-#define SERVO_MIN             205
-#define SERVO_MAX             410
-#define SERVO_CENTER          307
+// Servo PWM ticks @ 50 Hz (PCA9685 12-bit). Adafruit example range 150–600.
+#define SERVO_MIN             150
+#define SERVO_MAX             600
+#define SERVO_CENTER          375
 #define PCA9685_OSC_FREQ      25000000
+#define PCA9685_PRESCALE_50HZ 121     // round(25e6 / (4096*50)) - 1
+#define PCA_MODE1             0x00
+#define PCA_MODE2             0x01
+#define PCA_LED0_ON_L         0x06
+#define PCA_PRESCALE          0xFE
 
 #define BALLAST_FORE          0
 #define BALLAST_AFT           1
@@ -94,9 +101,6 @@
 #if ENABLE_PCA9685 || ENABLE_MPU6050
 #include <Wire.h>
 #endif
-#if ENABLE_PCA9685
-#include <Adafruit_PWMServoDriver.h>
-#endif
 #if defined(ARDUINO_ARCH_ESP32)
 #include <WiFi.h>
 #endif
@@ -109,7 +113,7 @@ HardwareSerial PiLink(1);
 #endif
 
 #if ENABLE_PCA9685
-Adafruit_PWMServoDriver pca9685 = Adafruit_PWMServoDriver(PCA9685_ADDR);
+static uint8_t pca9685Addr = PCA9685_ADDR;
 #endif
 
 struct BallastState {
@@ -210,8 +214,8 @@ static uint16_t servoTick(float v) {
 
 static void setServoChannel(int ch, float v) {
 #if ENABLE_PCA9685
-  if (!pca9685Ok || ch < 0 || ch > 4) return;
-  pca9685.setPWM(ch, 0, servoTick(v));
+  if (!pca9685Ok || ch < 0 || ch > 5) return;
+  pcaSetPWM((uint8_t)ch, 0, servoTick(v));
 #else
   (void)ch;
   (void)v;
@@ -454,15 +458,29 @@ static void stopAllBallast() {
 }
 
 static void setActuators(float aftY, float aftZ, float finL, float finR, float thr) {
-  hw.aftY = clampf(aftY);
-  hw.aftZ = clampf(aftZ);
-  hw.finL = clampf(finL);
-  hw.finR = clampf(finR);
+  float y = clampf(aftY);
+  float z = clampf(aftZ);
+  float fl = clampf(finL);
+  float fr = clampf(finR);
+  bool changed = (y != hw.aftY) || (z != hw.aftZ) || (fl != hw.finL) || (fr != hw.finR);
+  hw.aftY = y;
+  hw.aftZ = z;
+  hw.finL = fl;
+  hw.finR = fr;
   setServoChannel(CH_AFT_STEER_Y, hw.aftY);
   setServoChannel(CH_AFT_STEER_Z, hw.aftZ);
   setServoChannel(CH_FIN_LEFT, hw.finL);
   setServoChannel(CH_FIN_RIGHT, hw.finR);
   setThruster(thr);
+  if (changed) {
+    LINK.print("OK S2 ");
+    LINK.print(hw.aftY, 3); LINK.print(" ");
+    LINK.print(hw.aftZ, 3); LINK.print(" F ");
+    LINK.print(hw.finL, 3); LINK.print(" ");
+    LINK.print(hw.finR, 3); LINK.print(" X ");
+    LINK.print(hw.thruster, 3);
+    LINK.print(" pca="); LINK.println(pca9685Ok ? 1 : 0);
+  }
 }
 
 static float readAdcVolts(int pin) {
@@ -474,9 +492,29 @@ static bool readLeakActive() {
 #if PIN_LEAK < 0
   return false;
 #else
-  return digitalRead(PIN_LEAK) == HIGH;
+  int highs = 0;
+  for (int i = 0; i < LEAK_DEBOUNCE_SAMPLES; i++) {
+    if (digitalRead(PIN_LEAK) == HIGH) highs++;
+    delayMicroseconds(400);
+  }
+  return highs >= LEAK_DEBOUNCE_HITS;
 #endif
 }
+
+#if ENABLE_PCA9685 || ENABLE_MPU6050
+static bool i2cStarted = false;
+
+static void i2cBegin() {
+  if (i2cStarted) {
+    Wire.end();
+    delay(2);
+  }
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(100000);
+  Wire.setTimeOut(50);
+  i2cStarted = true;
+}
+#endif
 
 #if ENABLE_MPU6050
 #define MPU6050_WHO_AM_I      0x75
@@ -489,13 +527,122 @@ static bool readLeakActive() {
 #define MPU6050_GYRO_SCALE    65.5f     // ±500 °/s
 
 static uint8_t mpu6050Addr = MPU6050_ADDR;
+static uint8_t mpuFailCount = 0;
+#endif
 
-static void i2cBegin() {
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);  // 100 kHz — reliable on shared bus / longer wires
+#if ENABLE_PCA9685
+static bool pcaWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  if (!i2cStarted) i2cBegin();
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
 }
 
+static bool pcaReadReg(uint8_t addr, uint8_t reg, uint8_t *val) {
+  if (!i2cStarted) i2cBegin();
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom((int)addr, 1) != 1) return false;
+  *val = Wire.read();
+  return true;
+}
+
+static bool pcaProbe(uint8_t addr) {
+  uint8_t mode = 0;
+  if (!pcaWriteReg(addr, PCA_MODE1, 0x00)) return false;
+  delay(1);
+  if (!pcaReadReg(addr, PCA_MODE1, &mode)) return false;
+  (void)mode;
+  return true;
+}
+
+static void pcaSetPWM(uint8_t ch, uint16_t on, uint16_t off) {
+  if (!pca9685Ok || ch > 15) return;
+  if (!i2cStarted) i2cBegin();
+  Wire.beginTransmission(pca9685Addr);
+  Wire.write((uint8_t)(PCA_LED0_ON_L + 4 * ch));
+  Wire.write(on & 0xFF);
+  Wire.write(on >> 8);
+  Wire.write(off & 0xFF);
+  Wire.write(off >> 8);
+  Wire.endTransmission();
+}
+
+static bool pcaInitAt(uint8_t addr) {
+  if (!pcaWriteReg(addr, PCA_MODE1, 0x10)) return false;  // sleep
+  delay(1);
+  if (!pcaWriteReg(addr, PCA_PRESCALE, PCA9685_PRESCALE_50HZ)) return false;
+  if (!pcaWriteReg(addr, PCA_MODE2, 0x04)) return false;  // totem-pole (Adafruit default)
+  if (!pcaWriteReg(addr, PCA_MODE1, 0xA1)) return false;  // restart + auto-inc + allcall
+  delay(5);
+  pca9685Addr = addr;
+  pca9685Ok = true;
+  return true;
+}
+
+static void i2cScanBus() {
+  LINK.println("I2C scan:");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() != 0) continue;
+    found++;
+    LINK.print("  0x");
+    if (addr < 16) LINK.print("0");
+    LINK.print(addr, HEX);
+    if (addr >= 0x40 && addr <= 0x4F) {
+      uint8_t jumper = addr - 0x40;
+      LINK.print("  PCA9685? jumpers A0-A3=");
+      for (int b = 0; b < 4; b++) LINK.print((jumper >> b) & 1);
+      LINK.print(" (Open=0 Closed=1)");
+    }
+    if (addr == 0x68 || addr == 0x69) LINK.print("  MPU6050");
+    LINK.println();
+  }
+  if (!found) LINK.println("  none — check SDA=8 SCL=9, 3.3V, GND");
+}
+
+static bool pca9685Init() {
+  i2cBegin();
+  i2cScanBus();
+  uint8_t tryAddr[8];
+  int n = 0;
+  tryAddr[n++] = PCA9685_ADDR;
+  for (uint8_t a = 0x40; a <= 0x4F && n < 8; a++) {
+    if (a == PCA9685_ADDR) continue;
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) tryAddr[n++] = a;
+  }
+  for (int i = 0; i < n; i++) {
+    if (!pcaProbe(tryAddr[i])) continue;
+    if (pcaInitAt(tryAddr[i])) {
+      LINK.print("OK PCA9685 @0x");
+      LINK.print(pca9685Addr, HEX);
+      LINK.print(" jumpers=");
+      LINK.print(pca9685Addr - 0x40, BIN);
+      LINK.print(" SDA="); LINK.print(I2C_SDA);
+      LINK.print(" SCL="); LINK.println(I2C_SCL);
+      LINK.println("  Servo V+ needs 5V; OE pin must be LOW or unconnected");
+      pcaSetPWM(CH_SONAR_SERVO, 0, SERVO_CENTER);
+      pcaSetPWM(CH_AFT_STEER_Z, 0, SERVO_CENTER);
+      pcaSetPWM(CH_AFT_STEER_Y, 0, SERVO_CENTER);
+      pcaSetPWM(CH_FIN_LEFT, 0, SERVO_CENTER);
+      pcaSetPWM(CH_FIN_RIGHT, 0, SERVO_CENTER);
+      return true;
+    }
+  }
+  LINK.println("WARN PCA9685 not found on 0x40-0x4F — servos disabled");
+  LINK.println("  All jumpers OPEN = 0x40. Closed A0 = 0x41, A1 = 0x42, …");
+  pca9685Ok = false;
+  return false;
+}
+#endif
+
+#if ENABLE_MPU6050
 static bool mpu6050WriteByte(uint8_t addr, uint8_t reg, uint8_t val) {
+  if (!i2cStarted) i2cBegin();
   Wire.beginTransmission(addr);
   Wire.write(reg);
   Wire.write(val);
@@ -503,10 +650,11 @@ static bool mpu6050WriteByte(uint8_t addr, uint8_t reg, uint8_t val) {
 }
 
 static bool mpu6050ReadByte(uint8_t addr, uint8_t reg, uint8_t *val) {
+  if (!i2cStarted) i2cBegin();
   Wire.beginTransmission(addr);
   Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(addr, (uint8_t)1) != 1) return false;
+  if (Wire.endTransmission() != 0) return false;  // STOP then read — avoids i2cWriteReadNonStop
+  if (Wire.requestFrom((int)addr, 1) != 1) return false;
   *val = Wire.read();
   return true;
 }
@@ -533,10 +681,11 @@ static bool mpu6050Init() {
 
 static bool mpu6050ReadRaw(int16_t *ax, int16_t *ay, int16_t *az,
                            int16_t *gx, int16_t *gy, int16_t *gz) {
+  if (!i2cStarted) i2cBegin();
   Wire.beginTransmission(mpu6050Addr);
   Wire.write(MPU6050_ACCEL_XOUT_H);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(mpu6050Addr, (uint8_t)14) != 14) return false;
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom((int)mpu6050Addr, 14) != 14) return false;
 
   *ax = (int16_t)((Wire.read() << 8) | Wire.read());
   *ay = (int16_t)((Wire.read() << 8) | Wire.read());
@@ -551,11 +700,16 @@ static bool mpu6050ReadRaw(int16_t *ax, int16_t *ay, int16_t *az,
 static void readMpu6050(float *pitchDeg, float *rollDeg, float *yawDeg) {
   int16_t ax, ay, az, gx, gy, gz;
   if (!mpu6050ReadRaw(&ax, &ay, &az, &gx, &gy, &gz)) {
+    if (++mpuFailCount >= 5) {
+      mpu6050Ok = false;
+      i2cBegin();
+    }
     *pitchDeg = 0.0f;
     *rollDeg = 0.0f;
     *yawDeg = 0.0f;
     return;
   }
+  mpuFailCount = 0;
 
   float axG = ax / MPU6050_ACCEL_SCALE;
   float ayG = ay / MPU6050_ACCEL_SCALE;
@@ -571,10 +725,10 @@ static void readMpu6050(float *pitchDeg, float *rollDeg, float *yawDeg) {
 static void readSensors() {
   hw.batteryV = readAdcVolts(PIN_BATTERY_ADC) * 4.0f;
   hw.depthM = readAdcVolts(PIN_DEPTH_ADC);
-  hw.leak[0] = readLeakActive();
-  hw.leak[1] = false;
-  hw.leak[2] = false;
-  hw.leak[3] = false;
+  bool leakActive = readLeakActive();
+  for (int i = 0; i < LEAK_ZONE_COUNT; i++) {
+    hw.leak[i] = leakActive;
+  }
 #if ENABLE_MPU6050
   if (mpu6050Ok) {
     readMpu6050(&hw.pitch, &hw.roll, &hw.yaw);
@@ -588,7 +742,7 @@ static void readSensors() {
   hw.roll = 0.0f;
   hw.yaw = 0.0f;
 #endif
-  hw.fault = hw.leak[0] ? "LEAK" : "NONE";
+  hw.fault = leakActive ? "LEAK" : "NONE";
 
   for (int i = 0; i < BALLAST_COUNT; i++) {
     updateBallastAdc(&ballasts[i]);
@@ -599,8 +753,13 @@ static void printPins() {
   LINK.println("OK PINS");
   LINK.print("  I2C SDA="); LINK.print(I2C_SDA);
   LINK.print(" SCL="); LINK.println(I2C_SCL);
-  LINK.print("  PCA9685 ch0=aftY ch1=aftZ ch2=finL ch3=finR ch4=sonar @0x");
+  LINK.print("  PCA9685 ch1=sonar ch2=aftX ch3=aftY ch4=finL ch5=finR @0x");
+#if ENABLE_PCA9685
+  LINK.print(pca9685Ok ? pca9685Addr : PCA9685_ADDR, HEX);
+  LINK.println(pca9685Ok ? " ok" : " missing");
+#else
   LINK.println(PCA9685_ADDR, HEX);
+#endif
 #if ENABLE_SONAR
   LINK.print("  Sonar TRIG="); LINK.print(PIN_SONAR_TRIG);
   LINK.print(" ECHO="); LINK.println(PIN_SONAR_ECHO);
@@ -627,9 +786,12 @@ static void printPins() {
   }
   LINK.print("  Battery ADC="); LINK.print(PIN_BATTERY_ADC);
   LINK.print(" Depth ADC="); LINK.println(PIN_DEPTH_ADC);
-  LINK.print("  Leak GPIO ");
+  LINK.print("  Leak board GPIO ");
 #if PIN_LEAK >= 0
-  LINK.println(PIN_LEAK);
+  LINK.print(PIN_LEAK);
+  LINK.print(" (");
+  LINK.print(LEAK_ZONE_COUNT);
+  LINK.println(" zones, combined signal)");
 #else
   LINK.println("disabled");
 #endif
@@ -705,7 +867,8 @@ static void handleTestCommand(char *line) {
       testModeUntil = millis() + 3000;
       setServoChannel(ch, val);
       LINK.print("OK TEST servo ch="); LINK.print(ch);
-      LINK.print(" val="); LINK.println(val, 3);
+      LINK.print(" val="); LINK.print(val, 3);
+      LINK.print(" pca="); LINK.println(pca9685Ok ? 1 : 0);
     }
     return;
   }
@@ -830,7 +993,6 @@ static void parseLine(char *line) {
   if (line[0] == '\0') return;
 
   lastSerial = millis();
-  testMode = false;
 
   if (strcmp(line, "PING") == 0) {
     sayLine("OK PONG");
@@ -852,6 +1014,9 @@ static void parseLine(char *line) {
   }
   if (strncmp(line, "TEST ", 5) == 0) {
     handleTestCommand(line);
+    return;
+  }
+  if (testMode) {
     return;
   }
   if (strncmp(line, "CAL B ", 6) == 0) {
@@ -963,16 +1128,7 @@ void setup() {
 #endif
 
 #if ENABLE_PCA9685
-  if (pca9685.begin()) {
-    i2cBegin();  // Adafruit library calls Wire.begin() without pins — restore SDA/SCL
-    pca9685.setOscillatorFrequency(PCA9685_OSC_FREQ);
-    pca9685.setPWMFreq(50);
-    pca9685Ok = true;
-    LINK.print("OK PCA9685 on I2C SDA="); LINK.print(I2C_SDA);
-    LINK.print(" SCL="); LINK.println(I2C_SCL);
-  } else {
-    LINK.println("WARN PCA9685 not found — servos disabled");
-  }
+  pca9685Init();
 #else
   sayLine("PCA9685 disabled (ENABLE_PCA9685=0)");
 #endif
@@ -995,8 +1151,11 @@ void setup() {
   pinMode(PIN_FORE_BALLAST_PWM, OUTPUT);
   pinMode(PIN_AFT_BALLAST_DIR, OUTPUT);
   pinMode(PIN_AFT_BALLAST_PWM, OUTPUT);
+#if ENABLE_PCA9685 || ENABLE_MPU6050
+  i2cBegin();  // ballast pinMode must not steal SDA/SCL
+#endif
 #if PIN_LEAK >= 0
-  pinMode(PIN_LEAK, INPUT_PULLDOWN);  // floating pin reads LOW (no leak)
+  pinMode(PIN_LEAK, INPUT_PULLDOWN);
 #endif
 #if ENABLE_SONAR
   if (PIN_SONAR_TRIG >= 0) pinMode(PIN_SONAR_TRIG, OUTPUT);

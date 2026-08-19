@@ -352,7 +352,7 @@ Open `http://<pi-ip>:8080` (or `--web-port`). Live MJPEG at `/video_feed`.
 | `--device N` | `0` | USB camera index (mono). In stereo this is the left camera if `--left-device` is omitted |
 | `--stereo` / `--no-stereo` | config | Force two-camera stereo, or force mono even when `num_cameras: 2` |
 | `--left-device` / `--right-device` | `cameras.*` | Stereo camera indexes or `/dev/videoN` paths |
-| `--backend` | `model.yaml` | `pytorch`, `ncnn`, or `openvino` |
+| `--backend` | `model.yaml` | `pytorch`, `ncnn`, `openvino`, or `hailo` |
 | `--imgsz N` | `model.yaml` | Model input size (**640** for distant apples; `320` if you need FPS) |
 | `--width` / `--height` | `640` / `480` | Capture size |
 | `--headless` | off | No OpenCV window (also auto-on when sub/web server runs) |
@@ -636,31 +636,55 @@ Approximate Pi5 performance (CPU inference, varies by resolution):
 
 `img_size: 640` is the Pi default (distant apples). Use `320` only if you need more FPS — then re-export NCNN.
 
-### Faster inference backends (NCNN / OpenVINO)
+### Faster inference backends (Hailo HAT / NCNN)
 
-PyTorch `.pt` inference is usable but slow on Pi CPU (~300 ms / frame). Ultralytics can run the **same trained weights** through an exported runtime. On Raspberry Pi (ARM64), **NCNN is the one to use**.
+The Hailo-8L AI HAT+ is the intended accelerator. HailoRT is already on this Pi. Hailo's compiler (DFC / `hailomz`) is **Linux x86_64 only** — compile the `.hef` on a PC, copy the folder back, then set `backend: hailo`.
 
 | Backend | Pi 5 | Notes |
 |---------|------|-------|
+| `hailo` | Hailo-8L HAT | HailoRT via Ultralytics. Needs a compiled `.hef` in `weights/<stem>_hailo_model/` |
+| `ncnn` | **~68 ms @ 640** | CPU fallback until the `.hef` is copied over |
 | `pytorch` | ~304 ms | No export step; keep for training / fallback |
-| `ncnn` | **~68 ms @ 640** (~20 ms @ 320) | Fastest on ARM; 640 preferred for range |
 | `openvino` | variable | Intel-optimised; supported if you want to compare |
 
 `Detector` reads `backend` from `config/model.yaml` (or `--backend` on the CLI) and loads:
 
 | Backend | What is loaded |
 |---------|----------------|
+| `hailo` | `weights/best_hailo_model/*.hef` |
 | `pytorch` | `weights/best.pt` |
 | `ncnn` | `weights/best_ncnn_model/` (sibling of the `.pt`) |
 | `openvino` | `weights/best_openvino_model/` |
 
-**One-time export** after training (on the Pi, or on Colab/x86 if Pi wheels fail):
+**Hailo export (Linux x86_64 PC with Hailo DFC 3.x):**
+
+On the Pi you can write Hailo-compatible ONNX first (optional; Ultralytics on the PC can start from the `.pt`):
+
+```bash
+python scripts/export_model.py --format hailo --weights weights/best.pt
+python scripts/export_model.py --format hailo --weights weights/gatebest.pt
+```
+
+On the PC:
+
+1. Install Hailo Dataflow Compiler **3.x** (Hailo-8 / Hailo-8L) from [Hailo Developer Zone](https://hailo.ai/developer-zone/). Notes: [Ultralytics Hailo export](https://docs.ultralytics.com/integrations/hailo)
+2. `pip install ultralytics` and `pip install /path/to/hailo_dataflow_compiler-*.whl`
+3. Copy this repo (or `weights/*.pt`) onto the PC, then:
+
+```bash
+python scripts/export_model.py --format hailo --weights weights/best.pt
+python scripts/export_model.py --format hailo --weights weights/gatebest.pt
+# or: bash scripts/compile_hailo_hef.sh
+```
+
+4. Copy `weights/best_hailo_model/` and `weights/gatebest_hailo_model/` (must contain a `.hef`) back to the Pi.
+5. Set `backend: hailo` in `config/model.yaml`.
+
+**NCNN (CPU fallback, already exported):**
 
 ```bash
 pip install -r requirements-export.txt
 python scripts/export_model.py --format ncnn
-# optional comparison:
-python scripts/export_model.py --format openvino
 ```
 
 `export_model.py` uses `img_size` from `model.yaml` unless you pass `--imgsz`. The export must match the size you run at inference.
@@ -668,7 +692,7 @@ python scripts/export_model.py --format openvino
 Set in `config/model.yaml`:
 
 ```yaml
-backend: ncnn
+backend: hailo   # after the .hef is imported; use ncnn until then
 weights: weights/best.pt
 ```
 
@@ -677,7 +701,7 @@ Then:
 ```bash
 python inference.py --web --timing
 # or override without editing YAML:
-python inference.py --web --timing --backend ncnn
+python inference.py --web --timing --backend hailo
 ```
 
 If the exported folder is missing you get:
@@ -734,15 +758,15 @@ There is no second serial client sending legacy S/D/T lines. Manual and Xbox mod
 ### Camera not found
 
 ```
-CameraError: Cannot open camera device '0'
+CameraError: Cannot open camera device '/dev/video0'
 ```
 
 ```bash
 ls /dev/video*
-python inference.py --device 1
+python inference.py --left-device /dev/video1 --right-device /dev/video2
 ```
 
-UVC cameras often expose **two** `/dev/video*` nodes each (capture + metadata). A second physical camera is usually index **2**, not 1. See **§24**.
+UVC cameras often expose **two** `/dev/video*` nodes each (capture + metadata). There is often **no** `/dev/video0`. Capture nodes on this Pi are typically `/dev/video1` and `/dev/video2`. Missing indexes are remapped automatically; see **§24**.
 
 ### Stereo camera / range problems
 
@@ -779,7 +803,12 @@ pip install roboflow
 
 ### Slow inference on Pi
 
-- **Use NCNN** (recommended on Pi 5): export once, then set `backend: ncnn` in `config/model.yaml`:
+- **Use the Hailo-8L HAT** (`backend: hailo`) after copying a DFC-compiled `.hef` from the x86 PC. Until then NCNN is the CPU fallback:
+
+  ```bash
+  python scripts/export_model.py --format hailo --weights weights/best.pt   # ONNX on Pi; HEF on x86
+  python inference.py --web --timing --backend hailo
+  ```
   ```bash
   pip install -r requirements-export.txt
   python scripts/export_model.py --format ncnn
@@ -1560,13 +1589,15 @@ Creates **`dataset.zip`** from **`data/images/`** (must contain `data.yaml`). Co
 
 ### 19.6 `scripts/export_model.py`
 
-Export `weights/best.pt` to **NCNN** (recommended on Pi) or **OpenVINO**.
+Export `weights/best.pt` for the Hailo-8L HAT (HEF on an x86 PC with DFC) or NCNN CPU fallback.
 
 ```bash
-pip install -r requirements-export.txt
+# On Linux x86_64 with Hailo DFC 3.x:
+python scripts/export_model.py --format hailo --weights weights/best.pt
+python scripts/export_model.py --format hailo --weights weights/gatebest.pt
+# or: bash scripts/compile_hailo_hef.sh
+# CPU fallback on the Pi:
 python scripts/export_model.py --format ncnn
-python scripts/export_model.py --format openvino
-python scripts/export_model.py --weights weights/best.pt --imgsz 320
 ```
 
 Creates `weights/best_ncnn_model/` or `weights/best_openvino_model/`. Then set `backend:` in `config/model.yaml`. Re-run after every retrain. Full notes: **§11**.
@@ -1596,7 +1627,7 @@ All YAML lives in **`config/`**. Paths are relative to project root unless absol
 |-----|---------|---------|-------------|
 | `architecture` | `yolov8n` | `train.py`, fallback | Ultralytics model name when no weights |
 | `task` | `detect` | `Detector` | `detect` \| `segment` \| `auto` — must match weights |
-| `backend` | `ncnn` | `Detector` | `pytorch` \| `ncnn` \| `openvino` — see **§11** |
+| `backend` | `ncnn` | `Detector` | `pytorch` \| `ncnn` \| `openvino` \| `hailo` — see **§11** |
 | `weights` | `weights/best.pt` | legacy default | Top-level default `.pt`; catalog entries override per model |
 | `active_model` | `detect` | `ModelRuntime` | Catalog ID loaded at startup |
 | `models` | see **§11** | `ModelRuntime`, dashboard | Map of switchable models (`label`, `weights`, `task`, `track_label`) |
@@ -1928,7 +1959,7 @@ range = sqrt(X² + Y² + Z²)
 ```yaml
 cameras:
   num_cameras: 2
-  left_device: 0
+  left_device: 1
   right_device: 2
   baseline_cm: 16.0
   fov_h_deg: 67.0
@@ -1943,8 +1974,8 @@ Set `num_cameras: 1` (or pass `--no-stereo`) to go back to a single camera.
 
 ```bash
 python inference.py --web --timing
-# force device indexes if UVC nodes are not 0 and 2:
-python inference.py --web --left-device 0 --right-device 2
+# force device paths if UVC nodes shuffled:
+python inference.py --web --left-device /dev/video1 --right-device /dev/video2
 ```
 
 The web stream is **side-by-side** (L | R) with each camera’s box and the shared range.

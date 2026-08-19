@@ -102,12 +102,12 @@ Dashboard slider/mode state persists in browser **`sessionStorage`** across norm
 |-----------|------------|
 | Aft steer Y/Z, fins | PCA9685 @ 0x40 on I2C GPIO 29/30 |
 | IMU (pitch/roll) | MPU6050 GY-521 @ 0x68 on same I2C bus |
-| Thruster | L298N — GPIO 4 (IN1), 12 (IN2), 6 (PWM) |
-| Fore ballast | GPIO 13 DIR A, 14 PWM A, 11 pot ADC (Makerverse driver) |
-| Aft ballast | GPIO 8 DIR B, 9 PWM B, 7 pot ADC (Makerverse driver) |
-| Leak | GPIO 5 — Blue Robotics SOS (active HIGH) |
-| Battery | ADC GPIO 1 |
-| Depth | ADC GPIO 3 |
+| Thruster | L298N — GPIO 13 (IN1), 12 (IN2), 6 (PWM) |
+| Fore ballast | GPIO 16 DIR A, 15 PWM A, 10 pot ADC |
+| Aft ballast | GPIO 4 DIR B, 5 PWM B, 3 pot ADC |
+| Leak | GPIO 1 (IO1 / D1) — 4-zone leak board, combined active HIGH |
+| Battery | ADC GPIO 2 |
+| Depth | ADC GPIO 7 |
 
 Full map: **`config/pins.yaml`**.
 

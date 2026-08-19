@@ -39,7 +39,12 @@ from typing import Callable
 
 import yaml
 
-from src.serial_util import is_usb_serial_port, open_serial_port
+from src.serial_util import (
+    is_esp_usb_device,
+    is_gps_usb_device,
+    is_usb_serial_port,
+    open_serial_port,
+)
 from src.sub_state import SubActuators, get_sub_state
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "hardware.yaml"
@@ -55,18 +60,33 @@ _ESP_BOOT_LINE = re.compile(
 
 
 def _resolve_serial_port(configured: str) -> str:
-    """Prefer stable by-id path, then configured, then first USB ACM device."""
+    """Prefer the ESP32 USB by-id path. Never claim a USB GPS dongle."""
     by_id = sorted(glob.glob("/dev/serial/by-id/*"))
-    for pattern in ("*Espressif*", "*ESP32*", "*esp32*", "*USB*JTAG*"):
-        matches = [p for p in by_id if pattern.lower().replace("*", "") in p.lower()]
-        if matches:
-            return matches[0]
-    if configured and Path(configured).exists():
-        return configured
-    for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*"):
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            return matches[0]
+    esp_ids = [p for p in by_id if is_esp_usb_device(p) and not is_gps_usb_device(p)]
+    if esp_ids:
+        return esp_ids[0]
+
+    candidates: list[str] = []
+    if configured:
+        candidates.append(configured)
+    candidates.extend(sorted(glob.glob("/dev/ttyACM*")))
+    candidates.extend(sorted(glob.glob("/dev/ttyUSB*")))
+
+    seen: set[str] = set()
+    for path in candidates:
+        if not path or not Path(path).exists():
+            continue
+        try:
+            real = str(Path(path).resolve())
+        except OSError:
+            real = path
+        if real in seen:
+            continue
+        seen.add(real)
+        if is_gps_usb_device(path):
+            continue
+        if is_esp_usb_device(path) or path == configured:
+            return path
     return configured
 
 
@@ -114,7 +134,7 @@ def parse_diagnostic_line(line: str, state=None) -> bool:
             state.end_pins_capture()
         state.set_last_pong()
         return True
-    if text.startswith(("OK TEST", "OK HELP", "ERR TEST", "OK CAL", "ERR CAL")):
+    if text.startswith(("OK TEST", "OK HELP", "OK S2", "ERR TEST", "OK CAL", "ERR CAL")):
         state.set_last_diagnostic(text)
         if text.startswith("OK CAL B "):
             parts = text.split()
@@ -317,10 +337,24 @@ class EspBridge:
         self._stale: threading.Thread | None = None
         self._state = get_sub_state()
         self._diag_mode = False
+        self._diag_timer: threading.Timer | None = None
         self._skip_lines = 0
+        self._last_tx_s2 = ""
+        self._last_tx_b = ""
 
-    def set_diag_mode(self, enabled: bool) -> None:
+    def set_diag_mode(self, enabled: bool, resume_after_s: float | None = None) -> None:
+        if self._diag_timer is not None:
+            self._diag_timer.cancel()
+            self._diag_timer = None
         self._diag_mode = enabled
+        if enabled and resume_after_s and resume_after_s > 0:
+            self._diag_timer = threading.Timer(resume_after_s, self._resume_diag)
+            self._diag_timer.daemon = True
+            self._diag_timer.start()
+
+    def _resume_diag(self) -> None:
+        self._diag_mode = False
+        self._diag_timer = None
 
     def _open(self) -> bool:
         with self._ser_lock:
@@ -330,6 +364,9 @@ class EspBridge:
             if since_close < _REOPEN_MIN_INTERVAL_S:
                 return False
             self.port = _resolve_serial_port(self._configured_port)
+            if not self.port or is_gps_usb_device(self.port):
+                self._state.set_esp_connected(False, self.port)
+                return False
             try:
                 self._serial = open_serial_port(
                     self.port,
@@ -424,7 +461,9 @@ class EspBridge:
                 continue
             act = self._state.recompute_effective()
             fore_cmd, aft_cmd = self._state.get_ballast_commands()
-            lines = [format_ballast_command(fore_cmd, aft_cmd), format_actuator_command(act)]
+            ballast_line = format_ballast_command(fore_cmd, aft_cmd)
+            s2_line = format_actuator_command(act)
+            lines = [ballast_line, s2_line]
             write_failed = False
             for line in lines:
                 try:
@@ -435,7 +474,16 @@ class EspBridge:
                             break
                         ser.write(line.encode("ascii"))
                         ser.flush()
-                    self._state.append_serial("tx", line.rstrip("\n"))
+                    if line.startswith("S2"):
+                        if line != self._last_tx_s2:
+                            self._state.append_serial("tx", line.rstrip("\n"))
+                            self._last_tx_s2 = line
+                    elif line.startswith("B"):
+                        if line != self._last_tx_b:
+                            self._state.append_serial("tx", line.rstrip("\n"))
+                            self._last_tx_b = line
+                    else:
+                        self._state.append_serial("tx", line.rstrip("\n"))
                 except Exception as exc:
                     self._state.append_serial("sys", f"Write error: {exc}")
                     write_failed = True

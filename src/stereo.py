@@ -43,8 +43,8 @@ class StereoConfig:
     """Physical + matching settings for a two-camera rig."""
 
     enabled: bool = False
-    left_device: int | str = 0
-    right_device: int | str = 2
+    left_device: int | str = 2
+    right_device: int | str = 1
     baseline_m: float = 0.16
     fov_h_deg: float = 67.0
     fov_is_diagonal: bool = True
@@ -80,8 +80,8 @@ def load_stereo_config(path: Path = HARDWARE_PATH) -> StereoConfig:
     focal = cams.get("focal_length_px")
     return StereoConfig(
         enabled=num >= 2,
-        left_device=cams.get("left_device", 0),
-        right_device=cams.get("right_device", 2),
+        left_device=cams.get("left_device", 2),
+        right_device=cams.get("right_device", 1),
         baseline_m=baseline_cm / 100.0,
         fov_h_deg=float(cams.get("fov_h_deg", 67.0)),
         fov_is_diagonal=bool(cams.get("fov_is_diagonal", True)),
@@ -210,27 +210,49 @@ def triangulate(
     )
 
 
+def triangulate_with_swap(
+    left: TrackResult,
+    right: TrackResult,
+    frame_width: int,
+    frame_height: int,
+    cfg: StereoConfig,
+) -> tuple[StereoResult, bool]:
+    """
+    Triangulate left/right tracks; if disparity is inverted, retry swapped.
+
+    Returns ``(result, swapped)`` where ``swapped`` is True when the
+    configured left/right labels appear reversed on the rig.
+    """
+    result = triangulate(left, right, frame_width, frame_height, cfg)
+    if result.ok or "negative_disparity" not in result.reason:
+        return result, False
+    swapped = triangulate(right, left, frame_width, frame_height, cfg)
+    if swapped.ok:
+        return swapped, True
+    return result, False
+
+
 def fuse_tracks(left: TrackResult, right: TrackResult, paired: bool) -> TrackResult:
     """
     Build the track used for steering / tilt.
 
     When both cameras see a matched apple, average the normalised errors
-    so control sits on the stereo midpoint.  Otherwise use whichever
-    camera has a detection (left preferred).
+    so control sits on the stereo midpoint.  Bbox size is averaged too so
+    mono-style proximity is not tied to one camera only.
     """
     if paired and left.apple_detected and right.apple_detected:
         return TrackResult(
             apple_detected=True,
             target_x=(left.target_x + right.target_x) // 2,
             target_y=(left.target_y + right.target_y) // 2,
-            bbox_x1=left.bbox_x1,
-            bbox_y1=left.bbox_y1,
-            bbox_x2=left.bbox_x2,
-            bbox_y2=left.bbox_y2,
-            bbox_width=left.bbox_width,
-            bbox_height=left.bbox_height,
-            bbox_area=left.bbox_area,
-            frame_area=left.frame_area,
+            bbox_x1=(left.bbox_x1 + right.bbox_x1) // 2,
+            bbox_y1=(left.bbox_y1 + right.bbox_y1) // 2,
+            bbox_x2=(left.bbox_x2 + right.bbox_x2) // 2,
+            bbox_y2=(left.bbox_y2 + right.bbox_y2) // 2,
+            bbox_width=(left.bbox_width + right.bbox_width) // 2,
+            bbox_height=(left.bbox_height + right.bbox_height) // 2,
+            bbox_area=(left.bbox_area + right.bbox_area) // 2,
+            frame_area=left.frame_area or right.frame_area,
             chosen_label=left.chosen_label or right.chosen_label,
             error_x=(left.error_x + right.error_x) / 2.0,
             error_y=(left.error_y + right.error_y) / 2.0,

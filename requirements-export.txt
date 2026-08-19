@@ -1,9 +1,13 @@
 # Optional export dependencies for scripts/export_model.py
-# Install on the Pi (or export machine): pip install -r requirements-export.txt
 #
-# NCNN is recommended on Raspberry Pi ARM64. OpenVINO is optional (Intel-tuned).
+# Pi (ARM): NCNN CPU fallback. Hailo ONNX only — HEF compile is x86_64.
+# x86 PC: also install Hailo Dataflow Compiler 3.x from
+#   https://hailo.ai/developer-zone/
+#   pip install /path/to/hailo_dataflow_compiler-*.whl
+# then: python scripts/export_model.py --format hailo
 
 ncnn
 pnnx
 onnx>=1.12.0,<2.0.0
+onnxslim>=0.1.71
 openvino>=2024.0.0

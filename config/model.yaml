@@ -13,11 +13,14 @@ architecture: yolov8n
 # Currently deployed: detect (weights/best.pt). Set segment when you add a *-seg .pt.
 task: detect
 
-# backend: inference runtime. On Pi 5, ncnn is much faster than pytorch.
-#   pytorch  — default Ultralytics .pt (slowest on Pi, no export step)
-#   ncnn     — recommended on ARM/Pi (export with scripts/export_model.py)
+# backend: inference runtime. The Hailo-8L HAT is the intended accelerator.
+#   hailo    — HailoRT. Compile the .hef on a Linux x86_64 PC with Hailo DFC 3.x
+#              (scripts/export_model.py --format hailo or compile_hailo_hef.sh),
+#              copy weights/<stem>_hailo_model/ back here, then switch to this.
+#   ncnn     — CPU fallback (works today without a .hef)
+#   pytorch  — Ultralytics .pt (slowest on Pi)
 #   openvino — Intel-optimised; usable on Pi but usually slower than ncnn
-backend: ncnn
+backend: hailo
 
 # weights: path to a .pt file to resume training or run inference.
 # Leave blank to train from the Ultralytics pretrained backbone.
@@ -26,30 +29,25 @@ backend: ncnn
 # the sibling directory, e.g. weights/best_ncnn_model/ or best_openvino_model/.
 # After swapping a new .pt you MUST re-export — the old folder is not updated:
 #   python scripts/export_model.py --format ncnn
-weights: "weights/best.pt"
+weights: "weights/best_hailo_model/best.hef"
 
 # Which catalog entry loads at startup (see models: below).
-active_model: detect
+active_model: gate
 
 # Switchable models for Auto (YOLO) mode on the /sub/ dashboard.
-# Only entries with a .pt (+ matching *_ncnn_model/ when backend is ncnn) are clickable.
-# Currently on the Pi: detect → weights/best.pt. Add seg entries when you drop new weights.
+# Only list weights you have on disk. Add a new block when you import a .pt;
+# missing files grey out the button but do not block startup.
 models:
   detect:
     label: "Detect"
     weights: weights/best.pt
     task: detect
     track_label: apple
-  seg:
-    label: "Seg (future)"
-    weights: weights/best_seg.pt
+  gate:
+    label: "Gate"
+    weights: weights/gatebest.pt
     task: segment
-    track_label: apple
-  seg_fast:
-    label: "Seg 320 (future)"
-    weights: weights/best_seg_320.pt
-    task: segment
-    track_label: apple
+    track_label: gate
 
 # Detection thresholds
 confidence: 0.50

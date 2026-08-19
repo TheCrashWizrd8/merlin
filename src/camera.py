@@ -16,18 +16,19 @@ Or without context manager:
     ret, frame = cam.read()
     cam.release()
 
-The Pi5 typically exposes the USB camera as /dev/video0 → device index 0.
-If you have multiple cameras plugged in, pass the correct index or
-/dev/videoN path to the constructor.
+UVC cameras usually expose two nodes each (capture + metadata). Indexes
+shuffle across boots — there may be no /dev/video0. Prefer /dev/videoN
+paths; missing indexes are remapped to the first unused USB capture node.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
 import time
-from typing import Generator, List, Optional, Tuple
+from typing import Generator, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -149,6 +150,50 @@ def list_usb_cameras() -> List[tuple[str, List[str]]]:
     return cameras
 
 
+def usb_capture_nodes() -> List[str]:
+    """First ``/dev/videoN`` of each USB camera, sorted by index (capture, not metadata)."""
+    nodes: List[str] = []
+    for _name, paths in list_usb_cameras():
+        for path in paths:
+            if path.startswith("/dev/video"):
+                nodes.append(path)
+                break
+
+    def _idx(path: str) -> int:
+        match = re.search(r"(\d+)$", path)
+        return int(match.group(1)) if match else 0
+
+    return sorted(dict.fromkeys(nodes), key=_idx)
+
+
+def assign_camera_device(
+    device: int | str,
+    exclude: Sequence[str] = (),
+) -> tuple[str, Optional[str]]:
+    """
+    Map a configured index/path to an existing capture node.
+
+    Returns ``(path, warning_or_None)``. If the requested node exists it is
+    used; otherwise the first USB capture node not in ``exclude``.
+    """
+    capture = usb_capture_nodes()
+    requested = _v4l_device_path(device)
+    excluded = set(exclude)
+
+    if requested and requested in capture and requested not in excluded:
+        return requested, None
+
+    for node in capture:
+        if node not in excluded and os.path.exists(node):
+            if requested and requested != node:
+                why = "missing" if not os.path.exists(requested) else "not a capture node"
+                return node, f"device {device} ({requested}) is {why}; using {node}"
+            return node, None
+
+    fallback = requested or str(device)
+    return fallback, None
+
+
 def format_usb_camera_report() -> str:
     """Human-readable USB camera list for logs / errors."""
     cams = list_usb_cameras()
@@ -216,17 +261,27 @@ class Camera:
 
     def open(self) -> None:
         """Open the camera.  Raises CameraError if it cannot be opened."""
+        path = _v4l_device_path(self.device) or str(self.device)
+        self.device = path
         force_v4l2_mjpg(self.device, self.width, self.height, self.fps)
         force_v4l2_low_latency(self.device)
 
+        # Open by path. Integer 0 means /dev/video0, which often does not exist
+        # even when cameras are on /dev/video1 and /dev/video2.
         self._cap = cv2.VideoCapture(self.device, self.backend)
 
         if not self._cap.isOpened():
             self._cap = cv2.VideoCapture(self.device)
 
         if not self._cap.isOpened():
+            nodes = usb_capture_nodes()
+            hint = (
+                f" Capture nodes: {', '.join(nodes)}."
+                if nodes
+                else " No USB capture nodes found."
+            )
             raise CameraError(
-                f"Cannot open camera device '{self.device}'. "
+                f"Cannot open camera device '{self.device}'.{hint} "
                 "Check that a USB camera is connected and try a different device index."
             )
 
@@ -431,9 +486,11 @@ class FrameGrabber:
     def peek(self) -> Tuple[bool, Optional[np.ndarray]]:
         """Newest decoded frame (copied). Never blocks."""
         with self._lock:
-            if not self._ok or self._frame is None:
-                return False, None
-            return True, self._frame.copy()
+            ok = self._ok
+            frame = self._frame
+        if not ok or frame is None:
+            return False, None
+        return True, frame.copy()
 
     def request(self) -> int:
         """Ask for a new frame without blocking."""

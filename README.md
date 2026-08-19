@@ -23,7 +23,7 @@ Edit the YAML files in `config/`:
 
 | File | Purpose |
 |------|---------|
-| `config/model.yaml` | YOLO architecture, `backend` (`ncnn` / `pytorch` / `openvino`), weights path, confidence, **model catalog** (Auto-mode picker on `/sub/`) |
+| `config/model.yaml` | YOLO architecture, `backend` (`hailo` / `ncnn` / `pytorch` / `openvino`), weights path, confidence, **model catalog** (Auto-mode picker on `/sub/`) |
 | `config/dataset.yaml` | Dataset source (`local` or optional `roboflow`) |
 | `config/hardware.yaml` | Control tuning, stereo cameras, ESP serial (sub), Xbox deadzone |
 | `config/xbox_mapping.yaml` | Xbox button/stick → actuator bindings |
