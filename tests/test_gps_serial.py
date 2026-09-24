@@ -26,6 +26,9 @@ class SerialIdentityTests(unittest.TestCase):
     def test_esp_by_id_is_skipped(self):
         self.assertTrue(_is_reserved_esp_port(_ESP, esp_port=_ESP))
 
+    def test_yaml_acm_port_is_not_reserved_without_esp_usb_id(self):
+        self.assertFalse(_is_reserved_esp_port("/dev/ttyACM99", esp_port="/dev/ttyACM99"))
+
 
 class NmeaParseTests(unittest.TestCase):
     def test_void_gga_records_sats_without_fix(self):
@@ -56,6 +59,29 @@ class NmeaParseTests(unittest.TestCase):
         state = SubState()
         self.assertFalse(parse_nmea_line("$GPRMC,113139.00,V,,,,,,,190826,,,N*71", state))
         self.assertFalse(state.gps_connected)
+
+
+class GpsTrackFilterTests(unittest.TestCase):
+    def test_stationary_jitter_does_not_extend_track(self):
+        state = SubState()
+        state._gps_settle_n = 3
+        state._gps_min_move_m = 5.0
+        lat, lon = -27.5, 153.0
+        jitter = 2.0 / 110540.0
+        for i in range(20):
+            state.update_gps(lat + (jitter if i % 2 else 0), lon, fix_quality=1, satellites=8)
+        self.assertIsNotNone(state.gps_track_origin)
+        self.assertEqual(len(state.gps_track), 1)
+
+    def test_real_move_appends_track(self):
+        state = SubState()
+        state._gps_settle_n = 3
+        state._gps_min_move_m = 5.0
+        lat, lon = -27.5, 153.0
+        for _ in range(3):
+            state.update_gps(lat, lon, fix_quality=1)
+        state.update_gps(lat + 20.0 / 110540.0, lon, fix_quality=1)
+        self.assertGreaterEqual(len(state.gps_track), 2)
 
 
 if __name__ == "__main__":

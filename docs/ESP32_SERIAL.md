@@ -10,9 +10,9 @@ The Raspberry Pi communicates with an **ESP32-S3** on the RC submarine over seri
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Raspberry Pi 5                                │
 │                                                                       │
-│  inference.py ──► hardware.py (SubBridgeOutput) ──► sub_state        │
+│  ~/sub → run.py ──► hardware.py (SubBridgeOutput) ──► sub_state      │
 │                                                                       │
-│  sub_server.py / inference --sub ──► esp_bridge.py                   │
+│  esp_bridge.py (started by app.py)                                   │
 │                                       /dev/serial0 or /dev/ttyACM0   │
 │                                       S2 / B / CAL / PING + TEL rx    │
 └───────────────────────────────────────┬───────────────────────────────┘
@@ -41,7 +41,7 @@ Pin reference: **`config/pins.yaml`**.
 
 ## Sub vehicle protocol
 
-Used by `sub_server.py` and `inference.py --sub` → `src/esp_bridge.py`.
+Used by `~/sub` (via `src/app.py`) → `src/esp_bridge.py`.
 
 ### Wiring (GPIO UART)
 
@@ -187,7 +187,7 @@ Reduce max motor speed in firmware (`MOTOR_MAX_SPEED` / `MOTOR_PWM_MAX`).
 | No USB serial device | `ls /dev/ttyACM* /dev/ttyUSB*` — ESP32 must be plugged in via USB |
 | No GPIO UART | `ls -l /dev/serial0` — enable Pi UART; run `probe_esp_uart.py` |
 | Sub dashboard shows disconnected | Correct `sub_serial.port`? ESP flashed with `sub_rc` and `USE_PI_UART=1`? |
-| Wrong port in config | Override: `python sub_server.py --serial-port /dev/serial0` |
+| Wrong port in config | Override: `~/sub --serial-port /dev/serial0` |
 | Garbled telemetry | Baud must be 115200 on both sides |
 
 ---

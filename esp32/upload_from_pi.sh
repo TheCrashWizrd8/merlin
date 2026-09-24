@@ -38,7 +38,13 @@ if [ "${1:-}" = "scan" ] || [ "${1:-}" = "list" ] || [ "${1:-}" = "--list-ports"
   exit 0
 fi
 
-# --- Parse optional --sketch flag ---
+# --- Parse optional flags ---
+FREE_PORT="${FREE_PORT:-0}"
+while [ "${1:-}" = "--free-port" ] || [ "${1:-}" = "--free" ]; do
+  FREE_PORT=1
+  shift
+done
+
 if [ "${1:-}" = "--sketch" ]; then
   SKETCH_NAME="${2:-}"
   shift 2
@@ -67,7 +73,18 @@ if [ ! -d "${SKETCH_PATH}" ]; then
   exit 1
 fi
 
-echo "Building sketch: ${SKETCH_PATH} (clean build)"
+# ESP32-S3 USB-Serial/JTAG drops at 921600. DebugLevel=none stops i2c-ng log flood
+# (must be on the compile FQBN — it is a build flag, not upload-only).
+UPLOAD_SPEED="${UPLOAD_SPEED:-115200}"
+if [[ "${BOARD}" == esp32:esp32:esp32s3* ]]; then
+  if [[ "${BOARD}" != *"UploadSpeed="* ]]; then
+    BOARD="${BOARD}:UploadSpeed=${UPLOAD_SPEED},DebugLevel=none"
+  elif [[ "${BOARD}" != *"DebugLevel="* ]]; then
+    BOARD="${BOARD},DebugLevel=none"
+  fi
+fi
+
+echo "Building sketch: ${SKETCH_PATH} (clean build, fqbn ${BOARD})"
 BUILD_FLAGS=()
 # ESP32-S3: ensure Serial is routed to USB CDC on boot.
 if [[ "${BOARD}" == esp32:esp32:esp32s3* ]]; then
@@ -99,7 +116,53 @@ else
   fi
 fi
 
-echo "Uploading to ${PORT}..."
-arduino-cli upload -p "${PORT}" --fqbn "${BOARD}" "${SKETCH_PATH}"
+if command -v fuser &>/dev/null && [ -n "${PORT}" ]; then
+  port_holders() {
+    fuser "${PORT}" 2>/dev/null || true
+  }
+  holders=$(port_holders)
+  if [ -n "${holders}" ]; then
+    if [ "${FREE_PORT}" = "1" ]; then
+      echo "Stopping processes on ${PORT} (${holders})..."
+      for pat in run.py sub_server.py sub_server sub; do
+        pkill -f "${pat}" 2>/dev/null || true
+      done
+      sleep 1
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        holders=$(port_holders)
+        [ -z "${holders}" ] && break
+        sleep 0.5
+      done
+      holders=$(port_holders)
+    fi
+    if [ -n "${holders}" ]; then
+      echo "Error: ${PORT} is still busy (${holders})."
+      echo "  pkill -f 'run.py|sub'"
+      echo "  pkill -f sub_server.py"
+      echo "Or retry with:  bash esp32/upload_from_pi.sh --free-port ${BOARD} ${PORT} ${SKETCH_NAME}"
+      exit 1
+    fi
+    echo "Port ${PORT} is free."
+  fi
+fi
+
+UPLOAD_RETRIES="${UPLOAD_RETRIES:-3}"
+echo "Uploading to ${PORT} at ${UPLOAD_SPEED} baud (USB-Serial/JTAG)..."
+upload_ok=0
+for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
+  if [ "${attempt}" -gt 1 ]; then
+    echo "Retry upload attempt ${attempt}/${UPLOAD_RETRIES} (hold BOOT if this keeps failing)..."
+    sleep 2
+  fi
+  if arduino-cli upload -p "${PORT}" --fqbn "${BOARD}" "${SKETCH_PATH}"; then
+    upload_ok=1
+    break
+  fi
+done
+if [ "${upload_ok}" -ne 1 ]; then
+  echo "Upload failed after ${UPLOAD_RETRIES} attempts."
+  echo "Tips: --free-port, UPLOAD_SPEED=57600, unplug/replug USB, hold BOOT during upload."
+  exit 1
+fi
 
 echo "Done. ESP32 should be running; unplug and replug USB if the serial port was in use."

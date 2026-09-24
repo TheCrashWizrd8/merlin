@@ -28,10 +28,19 @@ import re
 import subprocess
 import threading
 import time
-from typing import Generator, List, Optional, Sequence, Tuple
+from typing import Callable, Generator, List, Optional, Sequence, Tuple
 
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 import cv2
 import numpy as np
+
+try:
+    cv2.setLogLevel(cv2.LOG_LEVEL_ERROR)
+except Exception:
+    try:
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+    except Exception:
+        pass
 
 
 def _v4l_device_path(device: int | str) -> Optional[str]:
@@ -42,10 +51,164 @@ def _v4l_device_path(device: int | str) -> Optional[str]:
     return None
 
 
+_V4L_BY_PATH = "/dev/v4l/by-path"
+_V4L_BY_ID = "/dev/v4l/by-id"
+
+
+def _is_usb_by_path_name(name: str) -> bool:
+    return "usb-" in name and "video-index" in name
+
+
+def _capture_symlink_preferred(link: str) -> bool:
+    """Prefer index0 (capture) over index1 (metadata)."""
+    return link.endswith("video-index0")
+
+
+def list_stable_usb_paths() -> List[dict]:
+    """
+    USB cameras by stable ``/dev/v4l/by-path/...`` symlinks (plug-order safe).
+
+    Returns dicts with keys: by_path, video, name.
+    """
+    root = _V4L_BY_PATH
+    if not os.path.isdir(root):
+        return []
+    seen_video: set[str] = set()
+    out: List[dict] = []
+    for entry in sorted(os.listdir(root)):
+        if not _is_usb_by_path_name(entry):
+            continue
+        if not _capture_symlink_preferred(entry):
+            continue
+        by_path = os.path.join(root, entry)
+        try:
+            video = os.path.realpath(by_path)
+        except OSError:
+            continue
+        if video in seen_video:
+            continue
+        seen_video.add(video)
+        out.append({"by_path": by_path, "video": video, "name": entry})
+    return out
+
+
+def resolve_camera_device(device: int | str) -> tuple[str, Optional[str]]:
+    """
+    Map hardware.yaml value to an openable device path.
+
+    Prefer ``/dev/v4l/by-path/...`` (USB physical port) or ``/dev/v4l/by-id/...``.
+    Falls back to ``/dev/videoN`` or numeric index.
+    """
+    if device is None:
+        return "", None
+    text = str(device).strip()
+    if not text:
+        return "", None
+
+    if text.startswith("/dev/v4l/by-path/") or text.startswith("/dev/v4l/by-id/"):
+        if os.path.exists(text):
+            return text, None
+        return text, f"stable camera path missing: {text}"
+
+    if "platform-" in text or text.startswith("usb-"):
+        matches = [
+            p["by_path"]
+            for p in list_stable_usb_paths()
+            if text in p["name"] or text in p["by_path"]
+        ]
+        if matches:
+            return matches[0], None
+        return text, f"no /dev/v4l/by-path match for '{text}'"
+
+    requested = _v4l_device_path(device)
+    if requested and os.path.exists(requested):
+        return requested, None
+    if requested:
+        return requested, None
+    return text, None
+
+
+def _parse_v4l2_mjpg_sizes(text: str) -> List[Tuple[int, int]]:
+    """Parse ``v4l2-ctl --list-formats-ext`` MJPEG size lines."""
+    sizes: List[Tuple[int, int]] = []
+    in_mjpg = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        fmt = re.match(r"\[\d+\]:\s*'(\w+)'", stripped)
+        if fmt:
+            in_mjpg = fmt.group(1) == "MJPG"
+            continue
+        if in_mjpg:
+            match = re.search(r"Size:\s*Discrete\s+(\d+)x(\d+)", stripped)
+            if match:
+                sizes.append((int(match.group(1)), int(match.group(2))))
+    return sizes
+
+
+def probe_max_mjpeg_size(
+    device: int | str,
+    *,
+    fallback: Tuple[int, int] = (1280, 720),
+) -> Tuple[int, int]:
+    """Largest MJPEG mode reported by v4l2-ctl for this device."""
+    path, _ = resolve_camera_device(device)
+    if not path:
+        return fallback
+    try:
+        proc = subprocess.run(
+            ["v4l2-ctl", "-d", path, "--list-formats-ext"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return fallback
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return fallback
+    sizes = _parse_v4l2_mjpg_sizes(proc.stdout)
+    if not sizes:
+        return fallback
+    return max(sizes, key=lambda wh: wh[0] * wh[1])
+
+
+def resolve_fov_capture_size(
+    device: int | str,
+    width: int,
+    height: int,
+) -> Tuple[int, int]:
+    """
+    Pick FOV capture resolution.
+
+    ``width`` or ``height`` <= 0 selects the largest MJPEG mode from v4l2.
+    """
+    if width > 0 and height > 0:
+        return width, height
+    max_w, max_h = probe_max_mjpeg_size(device)
+    return (width if width > 0 else max_w, height if height > 0 else max_h)
+
+
+def _device_excluded(path: str, exclude: Sequence[str]) -> bool:
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        real = path
+    for item in exclude:
+        if not item:
+            continue
+        if path == item:
+            return True
+        try:
+            if os.path.realpath(item) == real:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def force_v4l2_mjpg(device: int | str, width: int, height: int, fps: int = 30) -> None:
     """Ask the kernel for MJPEG at `width`x`height` before OpenCV opens the device."""
-    path = _v4l_device_path(device)
-    if path is None:
+    path, _ = resolve_camera_device(device)
+    if not path:
         return
     try:
         subprocess.run(
@@ -75,8 +238,8 @@ def force_v4l2_low_latency(device: int | str) -> None:
     stretch and FPS collapse in the dark (looks like ~1 s lag).  Manual
     16 ms exposure was too dark indoors.
     """
-    path = _v4l_device_path(device)
-    if path is None:
+    path, _ = resolve_camera_device(device)
+    if not path:
         return
     try:
         subprocess.run(
@@ -171,33 +334,41 @@ def assign_camera_device(
     exclude: Sequence[str] = (),
 ) -> tuple[str, Optional[str]]:
     """
-    Map a configured index/path to an existing capture node.
+    Map a configured stable path or index to an existing capture node.
 
-    Returns ``(path, warning_or_None)``. If the requested node exists it is
-    used; otherwise the first USB capture node not in ``exclude``.
+    Returns ``(path, warning_or_None)``. Prefers ``/dev/v4l/by-path/...``
+    from config; falls back to the first unused USB capture node.
     """
     capture = usb_capture_nodes()
-    requested = _v4l_device_path(device)
-    excluded = set(exclude)
+    resolved, resolve_note = resolve_camera_device(device)
 
-    if requested and requested in capture and requested not in excluded:
-        return requested, None
+    if resolved and os.path.exists(resolved) and not _device_excluded(resolved, exclude):
+        try:
+            real = os.path.realpath(resolved)
+        except OSError:
+            real = resolved
+        if real in capture or resolved.startswith("/dev/v4l/"):
+            note = resolve_note
+            return resolved, note
 
     for node in capture:
-        if node not in excluded and os.path.exists(node):
-            if requested and requested != node:
-                why = "missing" if not os.path.exists(requested) else "not a capture node"
-                return node, f"device {device} ({requested}) is {why}; using {node}"
+        if not _device_excluded(node, exclude) and os.path.exists(node):
+            if resolved and resolved != node:
+                why = "missing" if not os.path.exists(resolved) else "not available"
+                return node, f"device {device} ({resolved}) is {why}; using {node}"
             return node, None
 
-    fallback = requested or str(device)
-    return fallback, None
+    fallback = resolved or _v4l_device_path(device) or str(device)
+    if fallback and _device_excluded(str(fallback), exclude):
+        return str(device), resolve_note
+    return fallback, resolve_note
 
 
 def format_usb_camera_report() -> str:
     """Human-readable USB camera list for logs / errors."""
     cams = list_usb_cameras()
-    if not cams:
+    stable = list_stable_usb_paths()
+    if not cams and not stable:
         return (
             "No USB cameras found by v4l2-ctl "
             "(install v4l-utils, or the second camera is not enumerating)."
@@ -207,6 +378,13 @@ def format_usb_camera_report() -> str:
         lines.append(f"  - {name}")
         for node in nodes:
             lines.append(f"      {node}")
+    if stable:
+        lines.append("")
+        lines.append(
+            f"Stable by-path capture nodes ({len(stable)}) — use these in hardware.yaml:"
+        )
+        for row in stable:
+            lines.append(f"  {row['video']}  ←  {row['by_path']}")
     if len(cams) < 2:
         lines.append(
             "  Only one USB camera enumerated — the other is unplugged, "
@@ -261,8 +439,12 @@ class Camera:
 
     def open(self) -> None:
         """Open the camera.  Raises CameraError if it cannot be opened."""
-        path = _v4l_device_path(self.device) or str(self.device)
-        self.device = path
+        if self._cap is not None:
+            self.release()
+        path, note = resolve_camera_device(self.device)
+        if note:
+            print(f"[camera] {note}")
+        self.device = path or str(self.device)
         force_v4l2_mjpg(self.device, self.width, self.height, self.fps)
         force_v4l2_low_latency(self.device)
 
@@ -349,6 +531,11 @@ class Camera:
             self._cap.release()
             self._cap = None
 
+    def reopen(self) -> None:
+        """Release and open again (USB unplug / V4L node recycle)."""
+        self.release()
+        self.open()
+
     def is_open(self) -> bool:
         return self._cap is not None and self._cap.isOpened()
 
@@ -373,14 +560,14 @@ class Camera:
 
     def grab(self) -> bool:
         """Dequeue a camera buffer without JPEG-decoding it (cheap drain)."""
-        if self._cap is None:
-            raise CameraError("Camera is not open. Call open() first.")
+        if self._cap is None or not self._cap.isOpened():
+            return False
         return bool(self._cap.grab())
 
     def retrieve(self) -> Tuple[bool, Optional[np.ndarray]]:
         """Decode the last grabbed buffer into a BGR frame."""
-        if self._cap is None:
-            raise CameraError("Camera is not open. Call open() first.")
+        if self._cap is None or not self._cap.isOpened():
+            return False, None
         ok, frame = self._cap.retrieve()
         return self._maybe_resize(ok, frame)
 
@@ -432,17 +619,77 @@ class Camera:
         self.release()
 
 
+def camera_offline_frame(
+    width: int = 640,
+    height: int = 480,
+    title: str = "Camera offline",
+) -> np.ndarray:
+    """Placeholder BGR frame so the dashboard still updates when a cam is down."""
+    img = np.full((max(1, height), max(1, width), 3), 36, dtype=np.uint8)
+    y = max(40, height // 2 - 16)
+    for i, line in enumerate(title.split("\n")):
+        cv2.putText(
+            img,
+            line,
+            (20, y + i * 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (80, 80, 220),
+            2,
+            cv2.LINE_AA,
+        )
+    return img
+
+
+def publish_camera_status(
+    side: str,
+    *,
+    connected: bool,
+    device: str = "",
+    status: str = "",
+    error: Optional[str] = None,
+) -> None:
+    if not side:
+        return
+    try:
+        from src.sub_state import get_sub_state
+
+        get_sub_state().update_camera(
+            side,
+            connected=connected,
+            device=device,
+            status=status,
+            error=error,
+        )
+    except Exception:
+        pass
+
+
+_STALE_S = 1.0
+_RECONNECT_BACKOFF_S = (0.4, 1.0, 2.0, 5.0)
+
+
 class FrameGrabber:
     """
     Always keep the newest decoded frame.
 
-    ``grab()`` + ``retrieve()`` run continuously so the UVC FIFO cannot
-    fill with stale MJPEG.  Inference and the web preview both ``peek()``
-    that latest copy — they do not wait for YOLO.
+    If grab/retrieve stops (unplug, USB stall), the last frame is dropped,
+    a dashboard alert is published, and the V4L device is reopened with
+    backoff until it comes back.
     """
 
-    def __init__(self, camera: Camera) -> None:
+    def __init__(
+        self,
+        camera: Camera,
+        *,
+        name: str = "cam",
+        exclude: Sequence[str] | Callable[[], Sequence[str]] = (),
+        stale_s: float = _STALE_S,
+    ) -> None:
         self._camera = camera
+        self._name = name
+        self._exclude = exclude
+        self._stale_s = max(0.2, float(stale_s))
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._frame: Optional[np.ndarray] = None
@@ -452,6 +699,9 @@ class FrameGrabber:
         self._request = 0
         self._done = 0
         self._thread: Optional[threading.Thread] = None
+        self._alive = False
+        self._error: Optional[str] = None
+        self._reopen_log_at = 0.0
 
     def start(self) -> None:
         if self._running:
@@ -459,38 +709,150 @@ class FrameGrabber:
         self._running = True
         self._thread = threading.Thread(
             target=self._loop,
-            name=f"grab-{self._camera.device}",
+            name=f"grab-{self._name}-{self._camera.device}",
             daemon=True,
         )
         self._thread.start()
 
-    def _loop(self) -> None:
-        while self._running:
+    def _exclude_now(self) -> Sequence[str]:
+        if callable(self._exclude):
             try:
-                if not self._camera.grab():
-                    time.sleep(0.002)
+                return tuple(self._exclude() or ())
+            except Exception:
+                return ()
+        return self._exclude
+
+    def _mark_down(self, reason: str) -> None:
+        with self._cond:
+            self._ok = False
+            self._frame = None
+            self._cond.notify_all()
+        was_alive = self._alive
+        self._alive = False
+        self._error = reason
+        publish_camera_status(
+            self._name,
+            connected=False,
+            device=str(self._camera.device),
+            status="reconnecting",
+            error=reason,
+        )
+        if was_alive:
+            print(
+                f"[camera] {self._name} lost ({self._camera.device}): {reason} "
+                "— reconnecting"
+            )
+
+    def _mark_live(self) -> None:
+        was_alive = self._alive
+        self._alive = True
+        self._error = None
+        publish_camera_status(
+            self._name,
+            connected=True,
+            device=str(self._camera.device),
+            status="live",
+            error=None,
+        )
+        if not was_alive:
+            print(f"[camera] {self._name} live on {self._camera.device}")
+
+    def _remap_if_needed(self) -> None:
+        path = _v4l_device_path(self._camera.device)
+        if path and os.path.exists(path):
+            return
+        new, note = assign_camera_device(self._camera.device, exclude=self._exclude_now())
+        if new and new != str(self._camera.device):
+            print(f"[camera] {self._name} remapped {self._camera.device} → {new}"
+                  + (f" ({note})" if note else ""))
+            self._camera.device = new
+
+    def _reconnect(self, backoff_s: float) -> None:
+        try:
+            self._camera.release()
+        except Exception:
+            pass
+        deadline = time.monotonic() + backoff_s
+        while self._running and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not self._running:
+            return
+        self._remap_if_needed()
+        try:
+            self._camera.open()
+        except Exception as exc:
+            self._error = str(exc)
+            publish_camera_status(
+                self._name,
+                connected=False,
+                device=str(self._camera.device),
+                status="reconnecting",
+                error=str(exc),
+            )
+            now = time.monotonic()
+            if now - self._reopen_log_at >= 10.0:
+                self._reopen_log_at = now
+                print(f"[camera] {self._name} reopen failed ({self._camera.device}): {exc}")
+
+    def _loop(self) -> None:
+        started = time.monotonic()
+        last_ok = 0.0
+        backoff_i = 0
+        while self._running:
+            if not self._camera.is_open():
+                if last_ok or (time.monotonic() - started) >= self._stale_s:
+                    self._mark_down(self._error or "device closed")
+                self._reconnect(_RECONNECT_BACKOFF_S[backoff_i])
+                backoff_i = min(backoff_i + 1, len(_RECONNECT_BACKOFF_S) - 1)
+                continue
+            try:
+                grabbed = self._camera.grab()
+                if not grabbed:
+                    now = time.monotonic()
+                    age_ok = last_ok > 0
+                    reference = last_ok if age_ok else started
+                    if now - reference >= self._stale_s:
+                        self._mark_down("no frames")
+                        self._reconnect(_RECONNECT_BACKOFF_S[backoff_i])
+                        backoff_i = min(backoff_i + 1, len(_RECONNECT_BACKOFF_S) - 1)
+                    else:
+                        time.sleep(0.01)
                     continue
                 ok, frame = self._camera.retrieve()
-            except Exception:
-                time.sleep(0.002)
+            except Exception as exc:
+                self._mark_down(str(exc) or "grab error")
+                self._reconnect(_RECONNECT_BACKOFF_S[backoff_i])
+                backoff_i = min(backoff_i + 1, len(_RECONNECT_BACKOFF_S) - 1)
                 continue
             copied = frame.copy() if ok and frame is not None else None
+            if copied is None:
+                time.sleep(0.01)
+                continue
+            last_ok = time.monotonic()
+            backoff_i = 0
             with self._cond:
-                self._ok = copied is not None
+                self._ok = True
                 self._frame = copied
-                self._t_mono = time.monotonic()
+                self._t_mono = last_ok
                 if self._request > self._done:
                     self._done = self._request
                 self._cond.notify_all()
+            if not self._alive:
+                self._mark_live()
 
-    def peek(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """Newest decoded frame (copied). Never blocks."""
+    def peek(self, copy: bool = True) -> Tuple[bool, Optional[np.ndarray]]:
+        """Newest decoded frame. Never blocks.
+
+        Returns False once the camera is stale — the last good frame is
+        not reused. copy=False is safe for YOLO: the grabber replaces the
+        array on the next decode instead of writing in place.
+        """
         with self._lock:
             ok = self._ok
             frame = self._frame
         if not ok or frame is None:
             return False, None
-        return True, frame.copy()
+        return True, frame.copy() if copy else frame
 
     def request(self) -> int:
         """Ask for a new frame without blocking."""
@@ -517,7 +879,7 @@ class FrameGrabber:
         return self.collect(self.request(), timeout=timeout)
 
     def latest(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """Non-blocking: last decoded frame (may be stale). Prefer peek()."""
+        """Non-blocking: last decoded frame. Prefer peek()."""
         return self.peek()
 
     @property
@@ -525,10 +887,14 @@ class FrameGrabber:
         with self._lock:
             return self._t_mono
 
+    @property
+    def alive(self) -> bool:
+        return self._alive
+
     def stop(self) -> None:
         self._running = False
         with self._cond:
             self._cond.notify_all()
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=2.0)
             self._thread = None

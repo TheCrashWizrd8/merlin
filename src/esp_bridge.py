@@ -53,6 +53,7 @@ _STALE_TELEMETRY_S = 3.0
 _BOOT_GRACE_S = 4.0          # ESP32-S3 USB CDC needs time after open/reset
 _REOPEN_MIN_INTERVAL_S = 3.0
 _USB_WRITE_TIMEOUT_S = 1.0
+_KEEPALIVE_S = 1.0           # re-send last S2/B so ESP serial timeout stays armed
 _ESP_BOOT_LINE = re.compile(
     r"^(ESP-ROM:|rst:|Saved PC:|SPIWP:|mode:|load:|entry |Build:|boot:)",
     re.IGNORECASE,
@@ -134,7 +135,7 @@ def parse_diagnostic_line(line: str, state=None) -> bool:
             state.end_pins_capture()
         state.set_last_pong()
         return True
-    if text.startswith(("OK TEST", "OK HELP", "OK S2", "ERR TEST", "OK CAL", "ERR CAL")):
+    if text.startswith(("OK TEST", "OK HELP", "OK S2", "OK B", "ERR TEST", "OK CAL", "ERR CAL")):
         state.set_last_diagnostic(text)
         if text.startswith("OK CAL B "):
             parts = text.split()
@@ -149,6 +150,8 @@ def parse_diagnostic_line(line: str, state=None) -> bool:
                         state.update_ballast_cal(tank, bottom_adc=adc)
                 except ValueError:
                     pass
+            elif len(parts) >= 4 and parts[3] in ("clear", "reset"):
+                state.clear_ballast_cal(parts[2])
             elif len(parts) >= 7 and parts[3] == "show":
                 tank = parts[2]
                 try:
@@ -215,12 +218,18 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             state.update_leaks(sensors)
             return True
         if kind == "ballastcal" and len(parts) >= 6:
-            state.update_ballast_cal(
-                parts[2],
-                bottom_adc=int(parts[3]),
-                top_adc=int(parts[4]),
-                valid=bool(int(parts[5])),
-            )
+            bottom = int(parts[3])
+            top = int(parts[4])
+            valid = bool(int(parts[5]))
+            if bottom < 0 and top < 0 and not valid:
+                state.clear_ballast_cal(parts[2])
+            else:
+                state.update_ballast_cal(
+                    parts[2],
+                    bottom_adc=bottom,
+                    top_adc=top,
+                    valid=valid,
+                )
             return True
         if kind == "ballast" and len(parts) >= 7 and parts[2] in ("fore", "aft"):
             raw_level = float(parts[3])
@@ -246,6 +255,14 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             return True
         if kind == "thruster" and len(parts) >= 4:
             state.update_thruster(float(parts[2]), int(parts[3]))
+            return True
+        if kind == "pca9685" and len(parts) >= 6:
+            state.update_pca9685(
+                bool(int(parts[2])),
+                int(parts[3], 16),
+                int(parts[4]),
+                int(parts[5]),
+            )
             return True
         if kind == "status":
             state.update_esp_status(" ".join(parts[2:]))
@@ -341,6 +358,7 @@ class EspBridge:
         self._skip_lines = 0
         self._last_tx_s2 = ""
         self._last_tx_b = ""
+        self._last_tx_any = 0.0
 
     def set_diag_mode(self, enabled: bool, resume_after_s: float | None = None) -> None:
         if self._diag_timer is not None:
@@ -463,7 +481,18 @@ class EspBridge:
             fore_cmd, aft_cmd = self._state.get_ballast_commands()
             ballast_line = format_ballast_command(fore_cmd, aft_cmd)
             s2_line = format_actuator_command(act)
-            lines = [ballast_line, s2_line]
+            now = time.time()
+            s2_changed = s2_line != self._last_tx_s2
+            b_changed = ballast_line != self._last_tx_b
+            keepalive = (now - self._last_tx_any) >= _KEEPALIVE_S
+            if not s2_changed and not b_changed and not keepalive:
+                time.sleep(self.send_interval)
+                continue
+            lines = []
+            if b_changed or keepalive:
+                lines.append(ballast_line)
+            if s2_changed or keepalive:
+                lines.append(s2_line)
             write_failed = False
             for line in lines:
                 try:
@@ -474,14 +503,15 @@ class EspBridge:
                             break
                         ser.write(line.encode("ascii"))
                         ser.flush()
+                    self._last_tx_any = now
                     if line.startswith("S2"):
                         if line != self._last_tx_s2:
                             self._state.append_serial("tx", line.rstrip("\n"))
-                            self._last_tx_s2 = line
+                        self._last_tx_s2 = line
                     elif line.startswith("B"):
                         if line != self._last_tx_b:
                             self._state.append_serial("tx", line.rstrip("\n"))
-                            self._last_tx_b = line
+                        self._last_tx_b = line
                     else:
                         self._state.append_serial("tx", line.rstrip("\n"))
                 except Exception as exc:

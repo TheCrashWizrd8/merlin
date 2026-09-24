@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from dataclasses import replace
 from datetime import datetime
 from typing import Optional
 
@@ -40,6 +41,28 @@ COL_BAR_NEG    = (60, 80, 220)
 FONT           = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE     = 0.45
 FONT_THICKNESS = 1
+# Overlay sizes were tuned for 640×480. Scale them with frame height.
+_BASE_H = 480.0
+
+
+def _overlay_metrics(frame_h: int) -> dict:
+    """Font / line sizes that stay readable at 1600×1200 as well as 640×480."""
+    s = max(1.0, float(frame_h) / _BASE_H)
+    thick = max(1, int(round(FONT_THICKNESS * s)))
+    return {
+        "s": s,
+        "font": FONT_SCALE * s,
+        "thick": thick,
+        "line_h": max(16, int(round(18 * s))),
+        "pad": max(6, int(round(8 * s))),
+        "bbox": max(2, int(round(2 * s))),
+        "cross": max(1, int(round(1 * s))),
+        "dot": max(4, int(round(4 * s))),
+        "arrow": max(2, int(round(2 * s))),
+        "bar_w": max(120, int(round(120 * s))),
+        "bar_h": max(10, int(round(10 * s))),
+        "gap_extra": max(50, int(round(50 * s))),
+    }
 
 
 class Display:
@@ -68,6 +91,9 @@ class Display:
         self.headless = headless
         self._timestamps: deque = deque(maxlen=fps_history)
         self._window_created = False
+        # Display-only bbox EMA (does not affect control).
+        self._box_ema: dict[str, tuple[float, ...]] = {}
+        self._box_alpha = 0.28
 
     # ------------------------------------------------------------------
     # Public API
@@ -82,28 +108,121 @@ class Display:
         overlay_fps: float | None = None,
         hud: bool = True,
         gauges: bool = True,
+        view_id: str = "main",
+        smooth_box: bool = True,
     ) -> np.ndarray:
-        """Draw overlays onto `frame` and return the annotated image."""
+        """Draw overlays onto `frame` and return the annotated image.
+
+        ``smooth_box`` only affects drawing. Tracker / controller still
+        see the raw box.
+        """
         if count_fps:
             self._timestamps.append(time.monotonic())
         annotated = frame.copy() if copy else frame
 
         h, w = annotated.shape[:2]
         cx, cy = w // 2, h // 2
+        m = _overlay_metrics(h)
+        drawn = (
+            self._smoothed_for_display(view_id, output)
+            if smooth_box
+            else output
+        )
 
-        self._draw_crosshair(annotated, cx, cy)
+        self._draw_crosshair(annotated, cx, cy, m)
 
-        if output.apple_detected:
-            self._draw_bbox(annotated, output)
-            self._draw_error_vector(annotated, cx, cy, output.target_x, output.target_y)
+        if drawn.apple_detected:
+            self._draw_bbox(annotated, drawn, m)
+            self._draw_error_vector(
+                annotated, cx, cy, drawn.target_x, drawn.target_y, m
+            )
 
-        if hud:
-            fps_shown = self.fps if overlay_fps is None else overlay_fps
-            self._draw_hud(annotated, output, w, h, fps_shown=fps_shown)
-        if gauges:
-            self._draw_gauges(annotated, output, w, h)
+        if hud or gauges:
+            self.overlay_hud(
+                annotated,
+                output,
+                overlay_fps=overlay_fps,
+                gauges=gauges,
+                hud=hud,
+                supersample=1,
+            )
 
         return annotated
+
+    def overlay_hud(
+        self,
+        img: np.ndarray,
+        output: ControlOutput,
+        *,
+        overlay_fps: float | None = None,
+        gauges: bool = True,
+        hud: bool = True,
+        supersample: int = 1,
+    ) -> np.ndarray:
+        """Burn HUD/gauges onto the stream-sized frame.
+
+        Call this *after* the video is resized for JPEG so text is 1:1
+        with stream pixels (sharp without a 3× buffer that tanks FPS).
+        """
+        if not hud and not gauges:
+            return img
+        h, w = img.shape[:2]
+        ss = max(1, int(supersample))
+        if overlay_fps is None:
+            self._timestamps.append(time.monotonic())
+        fps_shown = self.fps if overlay_fps is None else overlay_fps
+        if ss == 1:
+            m = _overlay_metrics(h)
+            if hud:
+                self._draw_hud(img, output, w, h, m, fps_shown=fps_shown)
+            if gauges:
+                self._draw_gauges(img, output, w, h, m)
+            return img
+
+        ch, cw = h * ss, w * ss
+        layer = np.zeros((ch, cw, 3), dtype=np.uint8)
+        m = _overlay_metrics(ch)
+        if hud:
+            self._draw_hud(layer, output, cw, ch, m, fps_shown=fps_shown)
+        if gauges:
+            self._draw_gauges(layer, output, cw, ch, m)
+        small = cv2.resize(layer, (w, h), interpolation=cv2.INTER_AREA)
+        alpha = small.max(axis=2).astype(np.float32) / 255.0
+        alpha = np.clip(alpha * 1.35, 0.0, 1.0)[..., None]
+        blended = small.astype(np.float32) * alpha + img.astype(np.float32) * (1.0 - alpha)
+        np.copyto(img, blended.astype(np.uint8))
+        return img
+
+    def _smoothed_for_display(
+        self, view_id: str, output: ControlOutput
+    ) -> ControlOutput:
+        if not output.apple_detected:
+            self._box_ema.pop(view_id, None)
+            return output
+        cur = (
+            float(output.bbox_x1),
+            float(output.bbox_y1),
+            float(output.bbox_x2),
+            float(output.bbox_y2),
+            float(output.target_x),
+            float(output.target_y),
+        )
+        prev = self._box_ema.get(view_id)
+        if prev is None:
+            self._box_ema[view_id] = cur
+            return output
+        a = self._box_alpha
+        sm = tuple(a * c + (1.0 - a) * p for c, p in zip(cur, prev))
+        self._box_ema[view_id] = sm
+        return replace(
+            output,
+            bbox_x1=int(round(sm[0])),
+            bbox_y1=int(round(sm[1])),
+            bbox_x2=int(round(sm[2])),
+            bbox_y2=int(round(sm[3])),
+            target_x=int(round(sm[4])),
+            target_y=int(round(sm[5])),
+        )
 
     def show(self, annotated: np.ndarray) -> bool:
         """
@@ -151,37 +270,41 @@ class Display:
     # Drawing helpers
     # ------------------------------------------------------------------
 
-    def _draw_crosshair(self, img: np.ndarray, cx: int, cy: int) -> None:
+    def _draw_crosshair(self, img: np.ndarray, cx: int, cy: int, m: dict) -> None:
         h, w = img.shape[:2]
-        cv2.line(img, (0, cy), (w, cy), COL_CROSSHAIR, 1, cv2.LINE_AA)
-        cv2.line(img, (cx, 0), (cx, h), COL_CROSSHAIR, 1, cv2.LINE_AA)
-        cv2.circle(img, (cx, cy), 6, COL_CROSSHAIR, 1, cv2.LINE_AA)
+        cv2.line(img, (0, cy), (w, cy), COL_CROSSHAIR, m["cross"], cv2.LINE_AA)
+        cv2.line(img, (cx, 0), (cx, h), COL_CROSSHAIR, m["cross"], cv2.LINE_AA)
+        cv2.circle(img, (cx, cy), max(6, int(round(6 * m["s"]))), COL_CROSSHAIR, m["cross"], cv2.LINE_AA)
 
-    def _draw_bbox(self, img: np.ndarray, output: ControlOutput) -> None:
+    def _draw_bbox(self, img: np.ndarray, output: ControlOutput, m: dict) -> None:
         # Use actual bounding box endpoints when available
         if output.bbox_x2 > output.bbox_x1 and output.bbox_y2 > output.bbox_y1:
             x1, y1 = output.bbox_x1, output.bbox_y1
             x2, y2 = output.bbox_x2, output.bbox_y2
         else:
-            x1 = output.target_x - 10
-            y1 = output.target_y - 10
-            x2 = output.target_x + 10
-            y2 = output.target_y + 10
+            pad = max(10, int(round(10 * m["s"])))
+            x1 = output.target_x - pad
+            y1 = output.target_y - pad
+            x2 = output.target_x + pad
+            y2 = output.target_y + pad
 
-        cv2.rectangle(img, (x1, y1), (x2, y2), COL_BBOX, 2)
-        cv2.circle(img, (output.target_x, output.target_y), 4, COL_BBOX, -1)
-        label = f"apple {output.confidence:.2f}"
-        (tw, th), _ = cv2.getTextSize(label, FONT, FONT_SCALE, FONT_THICKNESS)
-        cv2.rectangle(img, (x1, y1 - th - 6), (x1 + tw + 4, y1), COL_BBOX, -1)
-        cv2.putText(img, label, (x1 + 2, y1 - 4), FONT, FONT_SCALE,
-                    (0, 0, 0), FONT_THICKNESS, cv2.LINE_AA)
+        cv2.rectangle(img, (x1, y1), (x2, y2), COL_BBOX, m["bbox"])
+        cv2.circle(img, (output.target_x, output.target_y), m["dot"], COL_BBOX, -1)
+        label = f"{output.chosen_label or 'apple'} {output.confidence:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, FONT, m["font"], m["thick"])
+        cap_h = th + max(6, int(round(6 * m["s"])))
+        cv2.rectangle(img, (x1, y1 - cap_h), (x1 + tw + 4, y1), COL_BBOX, -1)
+        cv2.putText(
+            img, label, (x1 + 2, y1 - max(4, int(round(4 * m["s"])))),
+            FONT, m["font"], (0, 0, 0), m["thick"], cv2.LINE_AA,
+        )
 
     def _draw_error_vector(
-        self, img: np.ndarray, cx: int, cy: int, tx: int, ty: int
+        self, img: np.ndarray, cx: int, cy: int, tx: int, ty: int, m: dict
     ) -> None:
         cv2.arrowedLine(
             img, (cx, cy), (tx, ty),
-            COL_VECTOR, 2, cv2.LINE_AA, tipLength=0.15,
+            COL_VECTOR, m["arrow"], cv2.LINE_AA, tipLength=0.15,
         )
 
     def _draw_hud(
@@ -190,6 +313,7 @@ class Display:
         output: ControlOutput,
         w: int,
         h: int,
+        m: dict,
         fps_shown: float | None = None,
     ) -> None:
         # Prefer controller-filtered ratio (smoothed; matches D)
@@ -201,6 +325,8 @@ class Display:
         prox_tag = ""
         if getattr(output, "stereo_ok", False) and getattr(output, "range_m", None) is not None:
             prox_tag = " rng"
+            if getattr(output, "stereo_note", "") == "hold":
+                prox_tag = " rng hold"
         elif "size" in (getattr(output, "approach_note", "") or ""):
             prox_tag = " sz"
         lines = [
@@ -229,17 +355,17 @@ class Display:
             f"Drive: {output.drive_motor:+.3f}",
             f"Tilt:  {output.camera_tilt_servo:+.3f}",
         ])
-        x, y = 8, 18
+        x, y = m["pad"], m["line_h"]
         for line in lines:
             # Shadow
-            cv2.putText(img, line, (x + 1, y + 1), FONT, FONT_SCALE,
-                        (0, 0, 0), FONT_THICKNESS + 1, cv2.LINE_AA)
-            cv2.putText(img, line, (x, y), FONT, FONT_SCALE,
-                        COL_TEXT, FONT_THICKNESS, cv2.LINE_AA)
-            y += 18
+            cv2.putText(img, line, (x + 1, y + 1), FONT, m["font"],
+                        (0, 0, 0), m["thick"] + 1, cv2.LINE_AA)
+            cv2.putText(img, line, (x, y), FONT, m["font"],
+                        COL_TEXT, m["thick"], cv2.LINE_AA)
+            y += m["line_h"]
 
     def _draw_gauges(
-        self, img: np.ndarray, output: ControlOutput, w: int, h: int
+        self, img: np.ndarray, output: ControlOutput, w: int, h: int, m: dict
     ) -> None:
         """
         Draw three horizontal bar gauges at the bottom of the frame.
@@ -250,10 +376,10 @@ class Display:
             ("Drive", output.drive_motor),
             ("Tilt",  output.camera_tilt_servo),
         ]
-        bar_w = 120
-        bar_h = 10
-        margin = 8
-        gap = bar_w + 50
+        bar_w = m["bar_w"]
+        bar_h = m["bar_h"]
+        margin = m["pad"]
+        gap = bar_w + m["gap_extra"]
         start_x = margin
         base_y = h - margin - bar_h
 
@@ -273,8 +399,8 @@ class Display:
                               (centre, base_y + bar_h), COL_BAR_NEG, -1)
             # Centre tick
             cv2.line(img, (centre, base_y - 2), (centre, base_y + bar_h + 2),
-                     COL_TEXT_DIM, 1)
+                     COL_TEXT_DIM, m["cross"])
             # Label
             cv2.putText(img, f"{label}: {value:+.2f}",
-                        (ox, base_y - 4), FONT, FONT_SCALE,
-                        COL_TEXT, FONT_THICKNESS, cv2.LINE_AA)
+                        (ox, base_y - max(4, int(round(4 * m["s"])))), FONT, m["font"],
+                        COL_TEXT, m["thick"], cv2.LINE_AA)

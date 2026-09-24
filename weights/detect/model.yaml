@@ -1,0 +1,7 @@
+# Sidecar for this folder. Folder name is the catalog id (`detect`).
+# config/model.yaml overlays the same id when both exist.
+label: "Detect (Hailo)"
+task: detect
+track_label: apple
+default_backend: hailo
+main: true

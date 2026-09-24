@@ -8,8 +8,13 @@ venv/
 
 # YOLO / ML
 runs/
-weights/
 *.pt
+*.hef
+*.onnx
+*_ncnn_model/
+*_hailo_model/
+*hailomodel/
+*_openvino_model/
 
 # System
 .DS_Store

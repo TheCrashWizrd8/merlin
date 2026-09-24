@@ -1,0 +1,4 @@
+label: "Ball"
+task: segment
+track_label: ball
+default_backend: hailo

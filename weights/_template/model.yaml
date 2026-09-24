@@ -1,0 +1,7 @@
+# Copy this folder to weights/<model_id>/ then drop a .pt (and/or hailo/*.hef).
+# <model_id> becomes the dashboard button id. Do not start it with `_`.
+label: "My model"
+task: auto            # detect | segment | auto (auto reads the .pt / HEF metadata)
+track_label: apple    # class name the tracker follows (must match training)
+default_backend: hailo
+# weights: best.pt    # optional; otherwise model.pt, then best.pt, then first *.pt

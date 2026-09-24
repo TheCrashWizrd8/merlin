@@ -134,18 +134,20 @@ def main() -> None:
     results = model.train(**train_kwargs)
 
     # ------------------------------------------------------------------
-    # Copy best weights to weights/best.pt
+    # Copy best weights to weights/detect/best.pt
     # ------------------------------------------------------------------
     WEIGHTS_DIR.mkdir(exist_ok=True)
 
     best_src = Path(results.save_dir) / "weights" / "best.pt"
     if best_src.is_file():
-        dest = WEIGHTS_DIR / "best.pt"
+        dest_dir = WEIGHTS_DIR / "detect"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "best.pt"
         shutil.copy2(best_src, dest)
         print(f"\n[Train] Best weights saved to: {dest}")
         print(
             "\nNext step — update config/model.yaml:\n"
-            f"  weights: weights/best.pt\n"
+            f"  weights: weights/detect/best.pt\n"
             "Then run inference.py on the Pi."
         )
     else:
@@ -156,7 +158,7 @@ def main() -> None:
     # Validation summary
     # ------------------------------------------------------------------
     print("\n[Train] Running validation on best weights …")
-    val_model = YOLO(str(WEIGHTS_DIR / "best.pt"))
+    val_model = YOLO(str(WEIGHTS_DIR / "detect" / "best.pt"))
     metrics = val_model.val(data=data_yaml, imgsz=img_size, verbose=False)
 
     print("\n" + "=" * 60)

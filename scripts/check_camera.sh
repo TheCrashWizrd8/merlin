@@ -28,5 +28,17 @@ echo "=== 5. Kernel messages (last 30 lines, USB/video related) ==="
 dmesg | tail -30
 
 echo ""
-echo "=== 6. Processes using video devices ==="
+echo "=== 6. Stable USB paths (use in hardware.yaml) ==="
+if [ -d /dev/v4l/by-path ]; then
+  ls -1 /dev/v4l/by-path/*usb*video-index0 2>/dev/null || echo "No USB by-path nodes."
+else
+  echo "/dev/v4l/by-path not found."
+fi
+if [ -f scripts/camera_paths.py ]; then
+  echo ""
+  python3 scripts/camera_paths.py 2>/dev/null || true
+fi
+
+echo ""
+echo "=== 7. Processes using video devices ==="
 fuser -v /dev/video* 2>/dev/null || echo "None or no devices."

@@ -1,0 +1,5 @@
+# Sidecar for this folder. Folder name is the catalog id (`gate`).
+label: "Gate"
+task: segment
+track_label: gate
+default_backend: hailo

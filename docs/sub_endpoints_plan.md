@@ -1,6 +1,6 @@
 # Sub Dashboard API Reference
 
-> **Status:** Implemented (August 2026)  
+> **Status:** Implemented (24 September 2026)  
 > The sub vehicle endpoints described here are live in `src/sub_web.py`.
 
 ---
@@ -11,8 +11,8 @@ The sub stack provides a namespaced web UI and REST API under `/sub/`.
 
 | Entry point | Command |
 |-------------|---------|
-| Sub only (no YOLO) | `python sub_server.py` |
-| YOLO + sub auto-mirror | `python inference.py --web --sub` |
+| Sub only (no YOLO) | `~/sub` |
+| YOLO + sub auto-mirror | `~/sub --yolo` (or start YOLO from dashboard) |
 | Simulated telemetry | `python scripts/test_telemetry.py` |
 
 Dashboard: **`http://<pi-ip>:8080/sub/`**
@@ -25,7 +25,7 @@ Dashboard: **`http://<pi-ip>:8080/sub/`**
 |------|--------|---------|
 | `manual` | Web UI / API (**default**) | Dashboard sliders, `POST /sub/api/control` |
 | `xbox` | Xbox/gamepad | **Xbox** tab when a controller is connected |
-| `auto` | YOLO mirror | Active when `inference.py --sub` is running |
+| `auto` | YOLO mirror | Active when inference service is running |
 
 **Safety defaults**
 
@@ -276,7 +276,7 @@ Browser (/sub/)
                          │
               xbox_controller.py (optional)
                          │
-              inference.py (interface: sub) ──► sub_motion.plan_sub_motion()
+              inference service (interface: sub) ──► sub_motion.plan_sub_motion()
                                               ──► auto mode + ballast
                                               ──► esp_bridge (single serial)
                                               ──► set_latest_frame() → /video_feed
@@ -289,7 +289,7 @@ Browser (/sub/)
 
 | File | Role |
 |------|------|
-| `sub_server.py` | Standalone sub dashboard entry point |
+| `~/sub` / `run.py` | Unified launcher (dashboard + optional YOLO) |
 | `src/sub_web.py` | Flask route registration |
 | `src/sub_state.py` | Shared telemetry/control state |
 | `src/sub_control.py` | YOLO → sub actuator mapping |

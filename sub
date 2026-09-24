@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Start the sub stack from anywhere:
+#   ~/sub
+#   ~/sub --yolo --backend hailo
+set -euo pipefail
+
+PROJECT="${SUB_PROJECT:-$HOME/yolo-project}"
+cd "$PROJECT"
+
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Missing venv at $PROJECT/.venv — create it first:" >&2
+  echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+exec .venv/bin/python run.py "$@"

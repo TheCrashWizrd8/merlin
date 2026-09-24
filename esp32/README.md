@@ -50,7 +50,7 @@ Wire **SDA and SCL in parallel** to every module on the bus:
 
 | PCA9685 channel | Actuator |
 |-----------------|----------|
-| 1 | Sonar rotate |
+| 1 | Sonar rotate (HS-646WP) |
 | 2 | Aft steer X (aftSteerZ) |
 | 3 | Aft steer Y |
 | 4 | Fore fin left |
@@ -98,7 +98,7 @@ Pi header pin 10 (GPIO15 RX) ◄── ESP GPIO 43 (TX)
 Pi GND ──────────────────────── ESP GND
 
 PCA9685 + GY-521 SDA/SCL ──► ESP GPIO 8/9 (shared I2C bus)
-Servo signals ─────────────► PCA9685 channels 0–3
+Servo signals ─────────────► PCA9685 channels 1–5 (sonar on 1)
 L298N IN1/IN2/PWM ► ESP GPIO 13/12/6
 Ballast DIR/PWM ──► ESP GPIO 16/15 (fore A), 4/5 (aft B) + pot wiper on 10/3
 Leak sensor ──────► ESP GPIO 1 (IO1 / D1, 4-zone combined)
@@ -138,7 +138,10 @@ Or use the helper script:
 ```bash
 bash esp32/upload_from_pi.sh          # auto-detect USB port
 bash esp32/upload_from_pi.sh scan     # list ports only
+bash esp32/upload_from_pi.sh --free-port esp32:esp32:esp32s3 /dev/ttyACM0 sub_rc
 ```
+
+If upload fails with **chip stopped responding**, another process is usually holding the port (`~/sub` / `run.py`). Use `--free-port` or `pkill -f 'run.py|sub'` first. For stubborn USB-JTAG flashes try `UPLOAD_SPEED=57600`.
 
 > **Note:** Upload uses the ESP32's **USB port** (`/dev/ttyACM0`). After flashing, runtime communication for `sub_rc` uses **GPIO UART** to the Pi (or USB if configured).
 
@@ -167,9 +170,9 @@ sub_serial:
 Run sub dashboard:
 
 ```bash
-python sub_server.py
-# or
-python inference.py --web --sub
+~/sub
+# or with YOLO at startup:
+~/sub --yolo --backend hailo --timing
 ```
 
 Open **http://\<pi-ip\>:8080/sub/**

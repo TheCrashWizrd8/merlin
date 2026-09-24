@@ -5,7 +5,7 @@ test_telemetry.py
 SIMULATION ONLY — fake sensor data for UI development without ESP hardware.
 
 For real hardware use:
-  python sub_server.py
+  ~/sub
 
 Usage:
   python scripts/test_telemetry.py

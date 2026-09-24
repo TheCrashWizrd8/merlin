@@ -21,6 +21,8 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "model.yaml"
 
 BACKENDS = ("pytorch", "ncnn", "openvino", "hailo")
 
+os.environ.setdefault("YOLO_VERBOSE", "False")
+
 
 def _resolve_thread_count(configured: int) -> int:
     cpu = os.cpu_count() or 4
@@ -91,7 +93,7 @@ def _resolve_weights_path(weights_value: str) -> Path:
 
 
 def _exported_model_dir(weights_path: Path, backend: str) -> Path:
-    """Map weights/best.pt -> weights/best_ncnn_model/ (Ultralytics convention)."""
+    """Map weights/detect/best.pt -> weights/detect/best_ncnn_model/ (Ultralytics)."""
     return weights_path.with_name(f"{weights_path.stem}_{backend}_model")
 
 
@@ -142,19 +144,39 @@ def _infer_task_from_checkpoint(weights_path: Path) -> Optional[str]:
 
 
 def _read_export_task(export_dir: Path) -> Optional[str]:
-    """Ultralytics writes metadata.yaml next to NCNN/OpenVINO exports."""
-    meta = export_dir / "metadata.yaml"
-    if not meta.is_file():
-        return None
-    try:
-        with open(meta, "r") as f:
-            data = yaml.safe_load(f) or {}
-        task = data.get("task")
-        if isinstance(task, str) and task:
-            return task.lower()
-    except Exception:
-        return None
-    return None
+    """Ultralytics writes metadata.yaml next to HEF / NCNN / OpenVINO exports."""
+    from src.hailo_runtime import task_from_export
+
+    return task_from_export(export_dir)
+
+
+def resolve_inference_task(
+    yaml_task: str,
+    pt_task: Optional[str],
+    export_task: Optional[str],
+) -> tuple[str, Optional[str]]:
+    """Pick detect vs segment from catalog, .pt, and export metadata.
+
+    Returns ``(task, error)``. ``error`` is set when a .pt and a compiled
+    export disagree — that usually means a stale NCNN/HEF folder.
+    A HEF-only drop (no .pt) always follows the export metadata.
+    """
+    yaml_task = str(yaml_task or "auto").strip().lower()
+    pt_task = str(pt_task).strip().lower() if pt_task else None
+    export_task = str(export_task).strip().lower() if export_task else None
+
+    if yaml_task in ("", "auto"):
+        return (pt_task or export_task or "detect"), None
+    if export_task and export_task != yaml_task:
+        if pt_task is None:
+            return export_task, None
+        return yaml_task, (
+            f"Exported model is task={export_task!r} but "
+            f"config/checkpoint want task={yaml_task!r}.\n"
+            "Delete the old export folder and re-export from the new .pt:\n"
+            "  python scripts/export_model.py --format hailo"
+        )
+    return yaml_task, None
 
 
 def mask_centroid_and_area(xy: np.ndarray) -> tuple[int, int, int]:
@@ -189,6 +211,11 @@ def resolve_model_source(
     if backend == "pytorch":
         if weights_value:
             weights_path = _resolve_weights_path(weights_value)
+            if weights_path.suffix.lower() == ".hef":
+                raise ValueError(
+                    f"backend=pytorch cannot load a Hailo .hef ({weights_path}). "
+                    "Use backend hailo, or point weights at a .pt."
+                )
             if not weights_path.is_file():
                 raise FileNotFoundError(
                     f"Weights file not found: {weights_path}\n"
@@ -204,6 +231,22 @@ def resolve_model_source(
         )
 
     weights_path = _resolve_weights_path(weights_value)
+
+    if backend == "hailo":
+        from src.hailo_runtime import (
+            hailo_export_dir,
+            hailo_hef_path,
+            hailo_unavailable_reason,
+        )
+
+        if weights_path.suffix.lower() == ".hef" and weights_path.is_file():
+            return str(weights_path), f"hailo HEF: {weights_path}"
+        export_dir = hailo_export_dir(weights_path)
+        hef = hailo_hef_path(export_dir) if export_dir.is_dir() or export_dir.exists() else None
+        if hef is None:
+            raise FileNotFoundError(hailo_unavailable_reason(export_dir))
+        return str(hef), f"hailo HEF: {hef}"
+
     if not weights_path.is_file():
         raise FileNotFoundError(
             f"Source weights not found: {weights_path}\n"
@@ -218,13 +261,6 @@ def resolve_model_source(
             f"Run: python scripts/export_model.py --format {backend}\n"
             "If export fails on the Pi, export on Colab/x86 and copy the folder to weights/."
         )
-    if backend == "hailo":
-        from src.hailo_runtime import hailo_unavailable_reason, hailo_hef_path
-
-        hef = hailo_hef_path(exported)
-        if hef is None:
-            raise FileNotFoundError(hailo_unavailable_reason(exported))
-        return str(hef), f"hailo HEF: {hef}"
     if _pt_is_newer_than_export(weights_path, exported):
         raise RuntimeError(
             f"weights {weights_path} is newer than the {backend} export at {exported}.\n"
@@ -271,9 +307,28 @@ class Detector:
         self.model_id = str(spec.get("id") or "")
         self._load_model(spec)
 
+    def close(self) -> None:
+        """Release HailoRT / NCNN / PyTorch resources so another backend can load."""
+        model = self._model
+        self._model = None
+        if model is None:
+            return
+        closer = getattr(model, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as exc:
+                print(f"[Detector] close failed: {exc}")
+
     def reload(self, model_spec: dict) -> None:
-        """Hot-swap weights/task from a catalog entry."""
+        """Hot-swap weights/task/backend from a catalog entry."""
         self.model_id = str(model_spec.get("id") or self.model_id)
+        requested = str(model_spec.get("backend") or "").strip().lower()
+        if requested and requested != self.backend:
+            self.close()
+            self.backend = requested
+        else:
+            self.close()
         self._load_model(model_spec)
 
     def _load_model(self, spec: dict) -> None:
@@ -282,24 +337,27 @@ class Detector:
         self.architecture = str(spec.get("architecture") or cfg.get("architecture") or "yolov8n")
         self.track_label = str(spec.get("track_label") or "apple")
 
-        yaml_task = str(spec.get("task") or cfg.get("task") or "auto").strip().lower()
+        if spec:
+            yaml_task = str(spec.get("task") or "auto").strip().lower()
+        else:
+            yaml_task = str(cfg.get("task") or "auto").strip().lower()
         weights_path = (
             _resolve_weights_path(weights_value) if weights_value else None
         )
         pt_task = (
             _infer_task_from_checkpoint(weights_path)
-            if weights_path is not None and weights_path.is_file()
+            if (
+                weights_path is not None
+                and weights_path.is_file()
+                and weights_path.suffix.lower() == ".pt"
+            )
             else None
         )
-        if yaml_task in ("", "auto"):
-            self.task = pt_task or "detect"
-        else:
-            self.task = yaml_task
-            if pt_task and pt_task != yaml_task:
-                print(
-                    f"[Detector] config task={yaml_task!r} but checkpoint is "
-                    f"{pt_task!r}; using config. Fix catalog if load fails."
-                )
+        if yaml_task not in ("", "auto") and pt_task and pt_task != yaml_task:
+            print(
+                f"[Detector] config task={yaml_task!r} but checkpoint is "
+                f"{pt_task!r}; using config. Fix catalog if load fails."
+            )
 
         model_source, description = resolve_model_source(
             architecture=self.architecture,
@@ -307,18 +365,23 @@ class Detector:
             backend=self.backend,
         )
 
+        export_task = None
         if self.backend != "pytorch":
             export_dir = Path(model_source)
             if export_dir.is_file():
                 export_dir = export_dir.parent
             export_task = _read_export_task(export_dir)
-            if export_task and export_task != self.task:
-                raise RuntimeError(
-                    f"Exported {self.backend} model is task={export_task!r} but "
-                    f"config/checkpoint want task={self.task!r}.\n"
-                    "Delete the old export folder and re-export from the new .pt:\n"
-                    f"  python scripts/export_model.py --format {self.backend}"
-                )
+            if not spec.get("track_label"):
+                from src.hailo_runtime import class_names_from_export
+
+                names = class_names_from_export(export_dir)
+                if names:
+                    self.track_label = next(iter(names.values()))
+
+        task, task_err = resolve_inference_task(yaml_task, pt_task, export_task)
+        if task_err:
+            raise RuntimeError(task_err)
+        self.task = task
 
         if self.backend == "hailo":
             self._load_hailo(spec, model_source, description, weights_path)
@@ -332,6 +395,8 @@ class Detector:
             load_kw["task"] = self.task
         try:
             from ultralytics import YOLO  # type: ignore
+            import logging
+            logging.getLogger("ultralytics").setLevel(logging.ERROR)
             model = YOLO(model_source, **load_kw)
         except TypeError:
             from ultralytics import YOLO  # type: ignore
@@ -382,22 +447,26 @@ class Detector:
 
         export_dir = Path(model_source).parent
         names = class_names_from_export(export_dir)
-        model = HailoYOLO(
-            Path(model_source),
-            names=names,
-            confidence=self.confidence,
-            img_size=self.img_size,
-        )
-        self._model = model
-        self.img_size = model.img_size
-        tag = f" id={self.model_id}" if self.model_id else ""
-        print(
-            f"[Detector] Loaded {self.architecture} task={self.task}{tag} "
-            f"backend=hailo ({description})  imgsz={self.img_size}"
-        )
-        warmup = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
-        self._model.predict(warmup)
-        print("[Detector] Warmup complete")
+        try:
+            model = HailoYOLO(
+                Path(model_source),
+                names=names,
+                confidence=self.confidence,
+                img_size=self.img_size,
+            )
+            self._model = model
+            self.img_size = model.img_size
+            tag = f" id={self.model_id}" if self.model_id else ""
+            print(
+                f"[Detector] Loaded {self.architecture} task={self.task}{tag} "
+                f"backend=hailo ({description})  imgsz={self.img_size}"
+            )
+            warmup = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
+            self._model.predict(warmup)
+            print("[Detector] Warmup complete")
+        except Exception:
+            self.close()
+            raise
 
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """
@@ -462,3 +531,11 @@ class Detector:
 
         detections.sort(key=lambda d: d.confidence, reverse=True)
         return detections
+
+    def detect_pair(self, left: np.ndarray, right: np.ndarray) -> tuple[list, list]:
+        """Stereo: overlap right-camera letterbox with the left HEF infer."""
+        if self._model is None:
+            return [], []
+        if self.backend == "hailo":
+            return self._model.predict_pair(left, right, max_det=5)
+        return self.detect(left), self.detect(right)

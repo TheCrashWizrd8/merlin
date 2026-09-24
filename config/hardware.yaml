@@ -7,15 +7,22 @@
 # ---------------------------------------------------------------------------
 cameras:
   num_cameras: 2
-  left_device: 0          # capture node of first USB cam; metadata nodes are skipped
-  right_device: 3         # capture node of second USB cam (not /dev/video1)
+  # Stable USB port paths (plug-order safe). Run: python scripts/camera_paths.py
+  left_device: /dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0
+  # FOV / pilot USB port. 0×0 = auto max MJPEG for whatever camera is plugged in.
+  fov_device: /dev/v4l/by-path/platform-xhci-hcd.0-usb-0:2:1.0-video-index0
+  right_device: /dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1:1.0-video-index0
+  fov_width: 0            # 0 = auto (largest MJPEG mode from v4l2)
+  fov_height: 0
   baseline_cm: 16.0       # centre-to-centre spacing of the two lenses
   fov_h_deg: 67.0         # camera spec FOV (degrees)
   fov_is_diagonal: true   # USB specs are almost always diagonal, not horizontal
-  # range_scale: 1.0      # optional: tape_measure_m / HUD_m if still consistently off
+  range_scale: 1.045      # after 1.045: 2.25→2.18, 0.50→0.49, 0.70→0.72 (apple)
+                          # Close / other shapes still run long (0.20→0.24, other 0.50→0.56)
   # focal_length_px:      # optional override; otherwise computed from fov + width
-  match_max_dy_px: 40     # reject pair if bbox centres differ more than this in Y
+  match_max_dy_px: 40     # Y-match at 480p (auto-scaled at 1200p)
   min_disparity_px: 2.0   # ignore near-zero disparity (object too far / unmatched)
+  detect_stride: 1        # both cameras every frame (Hailo is fast enough)
 
 # ---------------------------------------------------------------------------
 # interface: the physical layer used to drive actuators.
@@ -28,7 +35,7 @@ interface: sub
 
 # Sub vehicle serial (Pi USB ↔ ESP32 sub_rc.ino)
 sub_serial:
-  port: "/dev/ttyACM0"  # ESP32-S3 USB; use ttyUSB0 if that appears instead
+  port: "/dev/ttyACM0"  # ESP32-S3 USB when plugged in. A u-blox GPS often appears as ACM0 too — GPS scan will use it if it is not Espressif.
   baud_rate: 115200
 
 # USB GPS — auto-detected on plug-in (no manual port required)
@@ -37,6 +44,8 @@ gps:
   scan_interval_s: 3.0
   baud_rates: [9600, 115200, 38400, 4800, 57600]
   track_max_points: 1000
+  min_move_m: 5.0            # ignore GPS wander below this (u-blox 7 is typically 2.5–5 m)
+  origin_settle_fixes: 12    # average this many fixes before locking the start point
   # port: "/dev/serial/by-id/..."  # optional: prefer a specific device when several are connected
 
 # Sonar sweep (ESP PCA9685 ch4 + trigger/echo GPIO — see config/pins.yaml)
@@ -58,6 +67,9 @@ xbox:
   poll_hz: 30           # read rate while connected
   scan_interval_s: 2.0  # how often to retry when no pad is found
   mapping_file: config/xbox_mapping.yaml
+  override_auto: true   # while YOLO runs (auto mode), deliberate pad input takes control
+  override_hold_s: 0.4  # keep override latched briefly after sticks return to centre
+  override_actuator_threshold: 0.12  # ignore mapped output below this (stick drift)
   # device_index: 0     # omit to auto-pick (prefers Xbox-named devices)
 
 # ---------------------------------------------------------------------------
@@ -73,25 +85,21 @@ min_steer_command: 0.25  # keep steering moving until centred (no tiny pulses)
 min_tilt_command: 0.18   # keep tilt correcting until centred
 min_drive_command: 0.55  # keep sub moving; raise if thruster still barely moves
 min_detection_confidence: 0.45  # ignore weaker detections (jitter/noise)
-hold_missed_frames: 5           # persist last valid target briefly on dropouts
+hold_missed_frames: 12          # persist last valid target briefly on dropouts
 smoothing_alpha: 0.30           # EMA smoothing (lower = smoother, slower)
 damping_steer: 0.22             # derivative damping for steering overshoot
 damping_tilt: 0.18              # derivative damping for tilt overshoot
 max_drive_when_turning: 0.55    # min drive while turning; raise for more power
 
 # ---------------------------------------------------------------------------
-# Size-based distance (bbox area → drive D)
-# Farther = smaller bbox → more forward drive; closer = larger bbox → less drive (creep in).
-# size_drive_far / size_drive_close: full -1..+1 for D (defaults 1.0 → 0.0 use the whole motor range).
-# size_min_ratio / size_max_ratio: MUST bracket the HUD "Size" values you actually see, or t stays
-#   mid-range and D only wiggles (e.g. 0.6–0.8). Example: if Size stays ~0.02–0.05, set min 0.018
-#   and max 0.052 so t can run 0→1 as you drive from far to close.
+# Size-based distance — MONO only. Stereo triangulation is the default
+# distance source (bbox area lies about oblique / asymmetric apples).
 # ---------------------------------------------------------------------------
-use_size_for_drive: true
+use_size_for_drive: false
 size_drive_far: 1.0             # D when apple is small in frame (far)
 size_drive_close: 0.0           # D when apple is large (close); bump to ~0.08 if motor needs min torque
-size_min_ratio: 0.015           # bbox/frame at/under this → size_drive_far (tune to your “far” HUD Size)
-size_max_ratio: 0.055           # bbox/frame at/over this → size_drive_close (tune to your “close” HUD Size)
+size_min_ratio: 0.008           # bbox/frame at/under this → size_drive_far (tune to your “far” HUD Size)
+size_max_ratio: 0.12            # bbox/frame at/over this → size_drive_close (tune to your “close” HUD Size)
 size_smoothing_alpha: 0.22
 size_curve: sqrt                # linear | sqrt
 
@@ -101,9 +109,11 @@ size_curve: sqrt                # linear | sqrt
 # ---------------------------------------------------------------------------
 approach:
   use_telemetry: true
-  use_stereo_range: true   # when stereo pairs, Prox/D use range_m (metres), not bbox size
+  use_stereo_range: true   # Prox/D from stereo triangulation (bbox centres), not area
   range_far_m: 1.8        # at/ beyond → prox 0 (far, full drive)
   range_near_m: 0.35       # at/ within → prox 1 (close, creep)
+  range_hold_frames: 12    # keep last good range through brief pair dropouts
+  range_smoothing_alpha: 0.35
   stop_on_leak: true
   min_battery_v: 10.5
   low_battery_drive_scale: 0.45
@@ -127,3 +137,6 @@ sub_motion:
   ballast_height_gain: 0.55
   ballast_error_deadzone: 0.12
   ballast_max_command: 1.0
+  hold_missed_frames: 12           # keep steer/thruster/ballast through brief detection gaps
+  output_smoothing_alpha: 0.40     # EMA on actuator outputs; 0 = off
+  linked_flap: true                # YOLO/auto: fins oppose aft steer (same as Xbox linked flap)

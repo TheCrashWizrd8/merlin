@@ -11,7 +11,7 @@ Terminal 1:
   python scripts/simulate_esp_serial.py
 
 Terminal 2:
-  python sub_server.py --serial-port /tmp/sub_fake_pi --no-xbox
+  ~/sub --serial-port /tmp/sub_fake_pi --no-xbox
 
 Open http://localhost:8080/sub/
 """
@@ -169,12 +169,17 @@ def handle_command(line: str, state: dict) -> None:
             pass
     elif line.startswith("CAL B "):
         parts = line.split()
-        if len(parts) >= 4 and parts[2] in ("fore", "aft") and parts[3] in ("top", "bottom", "show"):
+        if len(parts) >= 4 and parts[2] in ("fore", "aft") and parts[3] in ("top", "bottom", "show", "clear", "reset"):
             tank = parts[2]
             which = parts[3]
             adc = int(state[f"{tank}_level"] * 4095)
             cal = state[f"{tank}_cal"]
-            if which == "top":
+            if which in ("clear", "reset"):
+                cal["top"] = -1
+                cal["bottom"] = -1
+                cal["valid"] = False
+                print(f"[sim-esp] >> OK CAL B {tank} clear")
+            elif which == "top":
                 cal["top"] = adc
                 print(f"[sim-esp] >> OK CAL B {tank} top {adc}")
             elif which == "bottom":
@@ -282,7 +287,7 @@ def main() -> int:
         print("[sim-esp] socat not found; using PTY fallback")
 
     print("[sim-esp] In another terminal run:")
-    print(f"  python sub_server.py --serial-port {pi_port} --no-xbox")
+    print(f"  ~/sub --serial-port {pi_port} --no-xbox")
     print("[sim-esp] >> = telemetry to Pi  |  << = control from Pi")
     print("[sim-esp] Move sliders on dashboard to see B / S2 commands.")
     print("[sim-esp] Ctrl+C to stop.")

@@ -17,7 +17,7 @@ this module handles actuators + ballast for the sub stack.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,11 @@ class SubMotionConfig:
     ballast_error_deadzone: float = 0.12
     ballast_max_command: float = 1.0
 
+    # Dropout hold + output smoothing (prevents frame-by-frame stop on missed detections)
+    hold_missed_frames: int = 12
+    output_smoothing_alpha: float = 0.40  # EMA on steer/thruster/ballast; 0 = off
+    linked_flap: bool = True  # fins oppose aft steer (Xbox linked-flap behaviour)
+
 
 @dataclass
 class SubMotionResult:
@@ -72,6 +77,7 @@ def load_sub_motion_config(path: Path = CONFIG_PATH) -> SubMotionConfig:
         cfg = {}
     m = cfg.get("sub_motion") or {}
     approach = cfg.get("approach") or {}
+    ctrl = cfg.get("hold_missed_frames")
     return SubMotionConfig(
         level_roll_gain=float(m.get("level_roll_gain", 0.035)),
         level_pitch_gain=float(m.get("level_pitch_gain", 0.025)),
@@ -90,6 +96,9 @@ def load_sub_motion_config(path: Path = CONFIG_PATH) -> SubMotionConfig:
         ballast_height_gain=float(m.get("ballast_height_gain", 0.55)),
         ballast_error_deadzone=float(m.get("ballast_error_deadzone", 0.12)),
         ballast_max_command=float(m.get("ballast_max_command", 1.0)),
+        hold_missed_frames=int(m.get("hold_missed_frames", ctrl if ctrl is not None else 12)),
+        output_smoothing_alpha=float(m.get("output_smoothing_alpha", 0.40)),
+        linked_flap=bool(m.get("linked_flap", True)),
     )
 
 
@@ -122,6 +131,40 @@ def _fin_level_commands(roll_deg: float, pitch_deg: float, cfg: SubMotionConfig)
     return fin_left, fin_right
 
 
+def _linked_flap_active(cfg: SubMotionConfig) -> bool:
+    if not cfg.linked_flap:
+        return False
+    try:
+        from src.sub_state import get_sub_state
+
+        return get_sub_state().is_linked_flap_enabled()
+    except Exception:
+        return True
+
+
+def _fins_with_linked_flap(
+    fin_left: float,
+    fin_right: float,
+    aft_y: float,
+    aft_z: float,
+    cfg: SubMotionConfig,
+) -> tuple[float, float]:
+    if not _linked_flap_active(cfg):
+        return fin_left, fin_right
+    from src.xbox_mapping import apply_linked_flap_to_fins, linked_flap_replace_stick
+
+    replace = linked_flap_replace_stick()
+    base_l = 0.0 if replace else fin_left
+    base_r = 0.0 if replace else fin_right
+    return apply_linked_flap_to_fins(
+        base_l,
+        base_r,
+        aft_y,
+        aft_z,
+        enabled=True,
+    )
+
+
 def _ballast_for_height(error_y: float, cfg: SubMotionConfig, apple_detected: bool) -> tuple[float, float]:
     """
     error_y > 0 → apple below centre → sub should sink → fill (+).
@@ -137,23 +180,13 @@ def _ballast_for_height(error_y: float, cfg: SubMotionConfig, apple_detected: bo
     return cmd, cmd
 
 
-def plan_sub_motion(
+def _compute_sub_motion(
     output: Any,
-    telemetry: TelemetryContext | None = None,
-    cfg: SubMotionConfig | None = None,
+    telemetry: TelemetryContext,
+    cfg: SubMotionConfig,
 ) -> SubMotionResult:
-    """
-    Map YOLO ControlOutput + gyro into sub actuators and ballast commands.
-
-    Expects output with steering_servo, camera_tilt_servo, drive_motor,
-    error_x, error_y, apple_detected.
-    """
-    if cfg is None:
-        cfg = load_sub_motion_config()
-
-    tel = telemetry or TelemetryContext.empty()
-    roll = tel.roll if tel.roll is not None else 0.0
-    pitch = tel.pitch if tel.pitch is not None else 0.0
+    roll = telemetry.roll if telemetry.roll is not None else 0.0
+    pitch = telemetry.pitch if telemetry.pitch is not None else 0.0
 
     error_x = float(getattr(output, "error_x", 0.0))
     error_y = float(getattr(output, "error_y", 0.0))
@@ -199,6 +232,10 @@ def plan_sub_motion(
     if b_fore != 0.0:
         notes.append("ballast_height")
 
+    fin_l, fin_r = _fins_with_linked_flap(fin_l, fin_r, aft_y, aft_z, cfg)
+    if _linked_flap_active(cfg):
+        notes.append("linked_flap")
+
     return SubMotionResult(
         actuators=SubActuators(
             aft_steer_y=aft_y,
@@ -212,3 +249,136 @@ def plan_sub_motion(
         phase=phase,
         note=",".join(notes),
     )
+
+
+def _is_camera_motion_active(result: SubMotionResult, threshold: float = 0.04) -> bool:
+    a = result.actuators
+    if abs(a.thruster_x) > threshold:
+        return True
+    if abs(a.aft_steer_y) > threshold or abs(a.aft_steer_z) > threshold:
+        return True
+    if abs(result.ballast_fore) > threshold or abs(result.ballast_aft) > threshold:
+        return True
+    return False
+
+
+def _merge_motion_hold(
+    live: SubMotionResult,
+    held: SubMotionResult,
+    cfg: SubMotionConfig,
+) -> SubMotionResult:
+    """Hold camera-driven outputs; fins follow linked aft steer or live gyro."""
+    note = held.note + ",hold" if held.note else "hold"
+    if _linked_flap_active(cfg):
+        fin_l, fin_r = _fins_with_linked_flap(
+            0.0,
+            0.0,
+            held.actuators.aft_steer_y,
+            held.actuators.aft_steer_z,
+            cfg,
+        )
+    else:
+        fin_l = live.actuators.fin_left
+        fin_r = live.actuators.fin_right
+    return SubMotionResult(
+        actuators=SubActuators(
+            aft_steer_y=held.actuators.aft_steer_y,
+            aft_steer_z=held.actuators.aft_steer_z,
+            thruster_x=held.actuators.thruster_x,
+            fin_left=fin_l,
+            fin_right=fin_r,
+        ),
+        ballast_fore=held.ballast_fore,
+        ballast_aft=held.ballast_aft,
+        phase=held.phase,
+        note=note,
+    )
+
+
+def _smooth_actuators(prev: SubActuators | None, new: SubActuators, alpha: float) -> SubActuators:
+    if prev is None or alpha <= 0.0:
+        return new
+    if alpha >= 1.0:
+        return new
+    p = asdict(prev)
+    n = asdict(new)
+    blended = {k: alpha * n[k] + (1.0 - alpha) * p[k] for k in p}
+    return SubActuators(**blended)
+
+
+class SubMotionPlanner:
+    """Stateful planner: holds last motion through dropouts and EMA-smooths outputs."""
+
+    def __init__(self) -> None:
+        self._last_motion: SubMotionResult | None = None
+        self._smoothed: SubActuators | None = None
+        self._missed_frames = 0
+
+    def reset(self) -> None:
+        self._last_motion = None
+        self._smoothed = None
+        self._missed_frames = 0
+
+    def plan(
+        self,
+        output: Any,
+        telemetry: TelemetryContext | None = None,
+        cfg: SubMotionConfig | None = None,
+    ) -> SubMotionResult:
+        if cfg is None:
+            cfg = load_sub_motion_config()
+
+        tel = telemetry or TelemetryContext.empty()
+        live = _compute_sub_motion(output, tel, cfg)
+        apple = bool(getattr(output, "apple_detected", False))
+
+        if apple and _is_camera_motion_active(live):
+            self._last_motion = live
+            self._missed_frames = 0
+            result = live
+        elif apple:
+            # Target visible and centred — intentional stop, don't latch old thrust.
+            self._last_motion = None
+            self._missed_frames = 0
+            result = live
+        elif self._last_motion is not None and self._missed_frames < cfg.hold_missed_frames:
+            self._missed_frames += 1
+            result = _merge_motion_hold(live, self._last_motion, cfg)
+        else:
+            self._missed_frames += 1
+            if self._missed_frames > cfg.hold_missed_frames:
+                self._last_motion = None
+            result = live
+
+        if cfg.output_smoothing_alpha > 0.0:
+            smoothed = _smooth_actuators(
+                self._smoothed, result.actuators, cfg.output_smoothing_alpha
+            )
+            self._smoothed = smoothed
+            result = replace(result, actuators=smoothed)
+
+        return result
+
+
+_default_planner = SubMotionPlanner()
+
+
+def reset_sub_motion_hold() -> None:
+    """Clear hold/smoothing state (for tests)."""
+    _default_planner.reset()
+
+
+def plan_sub_motion(
+    output: Any,
+    telemetry: TelemetryContext | None = None,
+    cfg: SubMotionConfig | None = None,
+    planner: SubMotionPlanner | None = None,
+) -> SubMotionResult:
+    """
+    Map YOLO ControlOutput + gyro into sub actuators and ballast commands.
+
+    Expects output with steering_servo, camera_tilt_servo, drive_motor,
+    error_x, error_y, apple_detected.
+    """
+    p = planner or _default_planner
+    return p.plan(output, telemetry=telemetry, cfg=cfg)

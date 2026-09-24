@@ -19,6 +19,11 @@ def _track(x: int, y: int, detected: bool = True) -> TrackResult:
     )
 
 
+def test_detect_stride_defaults_to_one():
+    cfg = StereoConfig()
+    assert cfg.detect_stride == 1
+
+
 def test_focal_length_from_67deg():
     f = focal_length_px(640, 67.0, diagonal=False)
     # f = 320 / tan(33.5°) ≈ 483.4
@@ -62,6 +67,19 @@ def test_y_mismatch_rejected():
     result = triangulate(_track(360, 100), _track(280, 200), 640, 480, cfg)
     assert not result.ok
     assert "y_mismatch" in result.reason
+
+
+def test_y_match_scales_with_frame_height():
+    from src.stereo import match_max_dy_px
+
+    cfg = StereoConfig(match_max_dy_px=40)
+    assert match_max_dy_px(cfg, 480) == 40
+    assert match_max_dy_px(cfg, 1200) == 100
+    # 80px Y gap fails at 640x480 but is accepted at 1600x1200
+    far_apart = triangulate(_track(360, 200), _track(280, 280), 640, 480, cfg)
+    close_enough = triangulate(_track(900, 500), _track(700, 580), 1600, 1200, cfg)
+    assert not far_apart.ok
+    assert close_enough.ok
 
 
 def test_negative_disparity_suggests_swap():
@@ -140,6 +158,24 @@ def test_diagonal_fov_recovers_50cm():
     assert abs(result.range_m - 0.50) < 0.03
 
 
+def test_range_scale_calibrates_tape_measure():
+    """1.3 m tape vs 1.1 m HUD (with old 0.891 scale) → 1.045 recovers the tape."""
+    old_scale = 0.891
+    new_scale = 1.045
+    cfg = StereoConfig(
+        baseline_m=0.16, fov_h_deg=67.0, fov_is_diagonal=True, range_scale=new_scale
+    )
+    f = focal_length_px(640, 67.0, 480, diagonal=True)
+    z_raw = 1.10 / old_scale
+    d = f * cfg.baseline_m / z_raw
+    cx, cy = 320, 240
+    left = _track(int(round(cx + d / 2.0)), cy)
+    right = _track(int(round(cx - d / 2.0)), cy)
+    result = triangulate(left, right, 640, 480, cfg)
+    assert result.ok
+    assert abs(result.range_m - 1.30) < 0.04
+
+
 def test_horizontal_67_underreads_true_50cm():
     """67° as horizontal FOV is what made a 50 cm apple read ~38 cm."""
     f_true = focal_length_px(640, 67.0, 480, diagonal=True)
@@ -159,11 +195,13 @@ if __name__ == "__main__":
     test_range_on_axis_one_metre()
     test_closer_object_has_larger_disparity()
     test_y_mismatch_rejected()
+    test_y_match_scales_with_frame_height()
     test_negative_disparity_suggests_swap()
     test_pair_tracks_requires_both()
     test_fuse_tracks_averages_when_paired()
     test_triangulate_with_swap()
     test_known_geometry_matches_pinhole()
     test_diagonal_fov_recovers_50cm()
+    test_range_scale_calibrates_tape_measure()
     test_horizontal_67_underreads_true_50cm()
     print("ok")

@@ -18,6 +18,8 @@ from src.sub_state import get_sub_state
 
 _DASHBOARD_PATH = Path(__file__).parent / "sub_dashboard.html"
 _PINS_YAML = Path(__file__).parent.parent / "config" / "pins.yaml"
+_PINS_TTL_S = 30.0
+_pins_cache: tuple[float, dict] | None = None
 
 # Pin confirmation checklist (matches esp32/sub_rc/sub_rc.ino diagnostics)
 _PIN_CHECKLIST: list[tuple[str, str]] = [
@@ -37,17 +39,23 @@ _PIN_CHECKLIST: list[tuple[str, str]] = [
 
 
 def _expected_pins_snapshot() -> dict:
+    global _pins_cache
+    now = time.monotonic()
+    if _pins_cache is not None and now - _pins_cache[0] < _PINS_TTL_S:
+        return _pins_cache[1]
     try:
         with open(_PINS_YAML) as f:
             cfg = yaml.safe_load(f) or {}
     except OSError:
         cfg = {}
-    return {
+    snap = {
         "sub": cfg.get("sub") or {},
         "esp32": cfg.get("esp32") or {},
         "pca9685": cfg.get("pca9685") or {},
         "l298n": cfg.get("l298n") or {},
     }
+    _pins_cache = (now, snap)
+    return snap
 
 
 def _recent_rx_contains(state, needle: str, since_ts: float) -> bool:
@@ -71,7 +79,7 @@ def _stream_payload(state) -> dict:
         "control": state.control_snapshot(),
         "models": models_dashboard_snapshot(),
         "status": state.status_snapshot(),
-        "serial": {"lines": state.get_serial_log(200)},
+        "serial": {"lines": state.get_serial_log(40)},
         "pins": {
             "expected": _expected_pins_snapshot(),
             "esp_pins_lines": diag["esp_pins_lines"],
@@ -114,7 +122,15 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     @app.route("/sub")
     def sub_dashboard():
         html = _DASHBOARD_PATH.read_text(encoding="utf-8")
-        return Response(html, mimetype="text/html")
+        return Response(
+            html,
+            mimetype="text/html",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     # ------------------------------------------------------------------
     # Status & aggregated telemetry
@@ -131,7 +147,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     @app.route("/sub/api/stream")
     def sub_api_stream():
         """Server-Sent Events feed — pushes dashboard updates on state change."""
-        min_interval_s = 0.033  # ~30 Hz cap
+        min_interval_s = 0.1  # 10 Hz is enough for gauges; YOLO FPS is separate
         heartbeat_s = 15.0
 
         def generate():
@@ -162,7 +178,8 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
             generate(),
             mimetype="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
@@ -260,10 +277,20 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         data = request.get_json(silent=True) or {}
         if "mode" in data:
             mode = str(data["mode"])
+            if mode in ("xbox", "manual"):
+                from src.inference_service import get_inference_service
+
+                inf = get_inference_service()
+                if inf.snapshot().get("running"):
+                    inf.stop(preserve_control_mode=True)
             state.set_control_mode(mode)
-            if mode in ("auto", "manual"):
-                from src.control_source import set_mode as set_yolo_mode
-                set_yolo_mode(mode)
+            from src.control_source import set_mode as set_yolo_mode
+
+            if mode == "auto":
+                set_yolo_mode("auto")
+            else:
+                set_yolo_mode("manual")
+            state.recompute_effective()
         if any(k in data for k in ("aftSteerY", "aft_steer_y", "thrusterX")):
             act = clamp_actuators(parse_actuator_payload(data))
             state.set_manual_actuators(act)
@@ -274,40 +301,42 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
 
     @app.route("/sub/api/models", methods=["GET"])
     def sub_api_models_get():
-        from src.model_runtime import models_dashboard_snapshot
-        return jsonify(models_dashboard_snapshot())
+        from src.inference_service import get_inference_service
+        return jsonify(get_inference_service().snapshot())
 
     @app.route("/sub/api/models/select", methods=["POST"])
     def sub_api_models_select():
-        from src.model_runtime import get_model_runtime
+        from src.inference_service import get_inference_service
 
         data = request.get_json(silent=True) or {}
         model_id = str(data.get("id", "")).strip()
+        backend = str(data.get("backend", "")).strip().lower()
         if not model_id:
             return jsonify({"ok": False, "error": "missing id"}), 400
+        result = get_inference_service().start(model_id, backend)
+        code = 200 if result.get("ok") else 400
+        return jsonify(result), code
 
-        runtime = get_model_runtime()
-        if runtime is not None:
-            result = runtime.select(model_id)
-            code = 200 if result.get("ok") else 400
-            return jsonify(result), code
+    @app.route("/sub/api/models/stop", methods=["POST"])
+    def sub_api_models_stop():
+        from src.inference_service import get_inference_service
 
-        state.set_yolo_model_id(model_id)
-        from src.model_runtime import catalog_snapshot, load_model_catalog, CONFIG_PATH
-        catalog = load_model_catalog(CONFIG_PATH)
-        if model_id not in catalog:
-            return jsonify({"ok": False, "error": f"Unknown model {model_id!r}"}), 400
-        entry = catalog[model_id]
-        state.set_yolo_model_status({
-            "state": "pending",
-            "error": None,
-            "task": entry.get("task"),
-            "label": entry.get("label", model_id),
-        })
-        snap = catalog_snapshot(active_id=model_id, status=state.get_yolo_model_status())
-        snap["ok"] = True
-        snap["pending"] = True
-        return jsonify(snap)
+        data = request.get_json(silent=True) or {}
+        preserve = bool(data.get("preserve_control_mode"))
+        return jsonify(get_inference_service().stop(preserve_control_mode=preserve))
+
+    @app.route("/sub/api/vision/detections")
+    def sub_api_vision_detections():
+        from src.vision_state import vision_snapshot
+
+        return jsonify(vision_snapshot())
+
+    @app.route("/sub/api/vision/overlay")
+    def sub_api_vision_overlay():
+        """Alias for detection payload used by FOV bbox overlay (extrinsics TBD)."""
+        from src.vision_state import vision_snapshot
+
+        return jsonify(vision_snapshot())
 
     @app.route("/sub/api/control/ballast", methods=["POST"])
     def sub_api_ballast_post():
@@ -339,8 +368,14 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         end = str(data.get("end", "")).lower()
         if tank not in ("fore", "aft"):
             return jsonify({"ok": False, "error": "tank must be fore or aft"}), 400
+        if end in ("clear", "reset"):
+            bridge = get_esp_bridge()
+            ok = bridge.send_raw(f"CAL B {tank} clear")
+            if ok:
+                state.clear_ballast_cal(tank)
+            return jsonify({"ok": ok, "tank": tank, "end": "clear", "command": f"CAL B {tank} clear"})
         if end not in ("top", "bottom"):
-            return jsonify({"ok": False, "error": "end must be top or bottom"}), 400
+            return jsonify({"ok": False, "error": "end must be top, bottom, or clear"}), 400
         bridge = get_esp_bridge()
         ok = bridge.send_raw(f"CAL B {tank} {end}")
         return jsonify({"ok": ok, "tank": tank, "end": end, "command": f"CAL B {tank} {end}"})

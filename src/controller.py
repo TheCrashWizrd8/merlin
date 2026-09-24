@@ -240,6 +240,8 @@ class Controller:
         use_stereo_range: bool = True,
         range_far_m: float = 1.8,
         range_near_m: float = 0.35,
+        range_hold_frames: int = 12,
+        range_smoothing_alpha: float = 0.35,
     ) -> None:
         self.gain_steer = gain_steer
         self.gain_tilt = gain_tilt
@@ -275,6 +277,8 @@ class Controller:
         self.range_near_m = max(0.05, float(range_near_m))
         if self.range_far_m <= self.range_near_m:
             self.range_far_m = self.range_near_m + 0.5
+        self.range_hold_frames = max(0, int(range_hold_frames))
+        self.range_smoothing_alpha = max(0.0, min(1.0, float(range_smoothing_alpha)))
 
         # Internal state for smoothing, derivative damping and persistence.
         self._filtered_ex = 0.0
@@ -285,6 +289,12 @@ class Controller:
         self._last_valid_track: Optional[TrackResult] = None
         self._missed_frames = 0
         self._filtered_size_ratio: float = 0.0
+        self._filt_range_m: float | None = None
+        self._held_range_m: float | None = None
+        self._range_hold_left: int = 0
+        self._held_sdt: tuple[float, float, float] | None = None
+        self._held_proximity: float = 0.0
+        self._held_approach_note: str = ""
 
     @classmethod
     def from_hardware_config(
@@ -328,6 +338,8 @@ class Controller:
             "use_stereo_range": bool(approach.get("use_stereo_range", True)),
             "range_far_m": float(approach.get("range_far_m", 1.8)),
             "range_near_m": float(approach.get("range_near_m", 0.35)),
+            "range_hold_frames": int(approach.get("range_hold_frames", 12)),
+            "range_smoothing_alpha": float(approach.get("range_smoothing_alpha", 0.35)),
         })
         profile = (profile or "config").strip().lower()
         if profile != "config":
@@ -408,7 +420,7 @@ class Controller:
         stereo_ok: bool = False,
     ) -> tuple[float, float, str]:
         """
-        Forward drive from camera (stereo range or bbox size + centre alignment).
+        Forward drive from stereo range (default) or bbox size (mono only).
         Telemetry only affects safety (leak stop, low-battery scale).
 
         Returns (drive, proximity_t, approach_note).
@@ -418,10 +430,15 @@ class Controller:
         if self.use_stereo_range and stereo_ok and range_m is not None and range_m > 0.0:
             proximity_t = self._range_m_to_proximity_t(range_m)
             note_parts.append("range")
-        elif self.use_size_for_drive and frame_area > 0 and bbox_area > 0:
+        elif (
+            (not self.use_stereo_range)
+            and self.use_size_for_drive
+            and frame_area > 0
+            and bbox_area > 0
+        ):
             proximity_t = self._size_ratio_to_drive_t(size_filt)
             note_parts.append("size")
-        else:
+        if not note_parts:
             proximity_t = 0.0
             drive = self.min_drive_command
             drive *= self._alignment_drive_scale(ex, ey)
@@ -500,6 +517,12 @@ class Controller:
                 self._prev_filtered_ey = 0.0
                 self._last_valid_track = None
                 self._filtered_size_ratio = 0.0
+                self._filt_range_m = None
+                self._held_range_m = None
+                self._range_hold_left = 0
+                self._held_sdt = None
+                self._held_proximity = 0.0
+                self._held_approach_note = ""
                 return ControlOutput(
                     steering_servo=0.0,
                     drive_motor=0.0,
@@ -521,52 +544,97 @@ class Controller:
         raw_ex = active.error_x
         raw_ey = active.error_y
 
-        # Smoothing layer: EMA on error signals before control.
-        a = self.smoothing_alpha
-        self._filtered_ex = a * raw_ex + (1.0 - a) * self._filtered_ex
-        self._filtered_ey = a * raw_ey + (1.0 - a) * self._filtered_ey
-
-        ex = self._apply_deadzone(self._filtered_ex)
-        ey = self._apply_deadzone(self._filtered_ey)
-
-        # Sustain-until-centred: apply constant S/D/T while error exists; only stop when in deadzone.
-        # Servos and motor keep moving at a fixed rate until centred — no proportional ramp-down.
-        if abs(ex) < self.deadzone:
-            steering = 0.0
-        else:
-            steering = (1.0 if ex > 0 else -1.0) * self.min_steer_command
-
-        if abs(ey) < self.deadzone:
-            tilt = 0.0
-        else:
-            tilt = (-1.0 if ey > 0 else 1.0) * self.min_tilt_command
-
-        # Size ratio: update EMA only on fresh detections (not hold frames)
-        size_raw = 0.0
-        size_filt = self._filtered_size_ratio
-        if active.frame_area > 0 and active.bbox_area > 0:
-            size_raw = active.bbox_area / active.frame_area
-            if has_confident_detection:
-                sa = self.size_smoothing_alpha
-                if regained_track:
-                    self._filtered_size_ratio = size_raw
-                else:
-                    self._filtered_size_ratio = (
-                        sa * size_raw + (1.0 - sa) * self._filtered_size_ratio
-                    )
-                size_filt = self._filtered_size_ratio
-
-        # Drive: stereo range (when paired) or bbox size + centre alignment
-        drive, proximity_t, approach_note = self._compute_drive(
-            ex,
-            ey,
-            size_filt,
-            active.frame_area,
-            active.bbox_area,
-            telemetry,
-            range_m=range_m,
-            stereo_ok=stereo_ok,
+        using_hold = (
+            not has_confident_detection
+            and self._held_sdt is not None
+            and self._missed_frames <= self.hold_missed_frames
         )
+
+        if using_hold:
+            steering, tilt, drive = self._held_sdt
+            proximity_t = self._held_proximity
+            approach_note = self._held_approach_note or "cmd_hold"
+            ex = self._apply_deadzone(self._filtered_ex)
+            ey = self._apply_deadzone(self._filtered_ey)
+            size_raw = 0.0
+            size_filt = self._filtered_size_ratio
+            range_m_hold = self._held_range_m if self._range_hold_left > 0 else None
+            stereo_ok_hold = self._range_hold_left > 0 and range_m_hold is not None
+            stereo_note_hold = "hold" if stereo_ok_hold else stereo_note
+        else:
+            # Smoothing layer: EMA on error signals before control.
+            a = self.smoothing_alpha
+            self._filtered_ex = a * raw_ex + (1.0 - a) * self._filtered_ex
+            self._filtered_ey = a * raw_ey + (1.0 - a) * self._filtered_ey
+
+            ex = self._apply_deadzone(self._filtered_ex)
+            ey = self._apply_deadzone(self._filtered_ey)
+
+            # Sustain-until-centred: apply constant S/D/T while error exists; only stop when in deadzone.
+            if abs(ex) < self.deadzone:
+                steering = 0.0
+            else:
+                steering = (1.0 if ex > 0 else -1.0) * self.min_steer_command
+
+            if abs(ey) < self.deadzone:
+                tilt = 0.0
+            else:
+                tilt = (-1.0 if ey > 0 else -1.0) * self.min_tilt_command
+
+            size_raw = 0.0
+            size_filt = self._filtered_size_ratio
+            if active.frame_area > 0 and active.bbox_area > 0:
+                size_raw = active.bbox_area / active.frame_area
+                if has_confident_detection:
+                    sa = self.size_smoothing_alpha
+                    if regained_track:
+                        self._filtered_size_ratio = size_raw
+                    else:
+                        self._filtered_size_ratio = (
+                            sa * size_raw + (1.0 - sa) * self._filtered_size_ratio
+                        )
+                    size_filt = self._filtered_size_ratio
+
+            if self.use_stereo_range:
+                if stereo_ok and range_m is not None and range_m > 0.0:
+                    a = self.range_smoothing_alpha
+                    if self._filt_range_m is None or a >= 1.0:
+                        self._filt_range_m = range_m
+                    else:
+                        self._filt_range_m = a * range_m + (1.0 - a) * self._filt_range_m
+                    range_m = self._filt_range_m
+                    self._held_range_m = range_m
+                    self._range_hold_left = self.range_hold_frames
+                elif self._range_hold_left > 0 and self._held_range_m is not None:
+                    self._range_hold_left -= 1
+                    range_m = self._held_range_m
+                    stereo_ok = True
+                    stereo_note = "hold"
+                else:
+                    self._filt_range_m = None
+                    range_m = None
+                    stereo_ok = False
+
+            drive, proximity_t, approach_note = self._compute_drive(
+                ex,
+                ey,
+                size_filt,
+                active.frame_area,
+                active.bbox_area,
+                telemetry,
+                range_m=range_m,
+                stereo_ok=stereo_ok,
+            )
+            if stereo_note == "hold" and "range" in approach_note:
+                approach_note = "range,hold"
+
+            self._held_sdt = (steering, tilt, drive)
+            self._held_proximity = proximity_t
+            self._held_approach_note = approach_note
+            range_m_hold = range_m
+            stereo_ok_hold = stereo_ok
+            stereo_note_hold = stereo_note
+
         depth_display = (
             telemetry.depth_m
             if telemetry and telemetry.depth_valid
@@ -597,8 +665,8 @@ class Controller:
             proximity_t=proximity_t,
             depth_m_used=depth_display,
             approach_note=approach_note,
-            range_m=range_m if stereo_ok else None,
-            stereo_ok=stereo_ok,
-            stereo_note=stereo_note if not stereo_ok else "",
+            range_m=range_m_hold if stereo_ok_hold else None,
+            stereo_ok=stereo_ok_hold,
+            stereo_note=stereo_note_hold,
             timestamp=time.time(),
         )

@@ -10,44 +10,44 @@
 architecture: yolov8n
 
 # task: detect | segment | auto
-# Currently deployed: detect (weights/best.pt). Set segment when you add a *-seg .pt.
+# Currently deployed: detect (weights/detect/best.pt). Set segment for *-seg .pt.
 task: detect
 
 # backend: inference runtime. The Hailo-8L HAT is the intended accelerator.
 #   hailo    — HailoRT. Compile the .hef on a Linux x86_64 PC with Hailo DFC 3.x
 #              (scripts/export_model.py --format hailo or compile_hailo_hef.sh),
-#              copy weights/<stem>_hailo_model/ back here, then switch to this.
+#              copy weights/<id>/<stem>_hailo_model/ (or hailo/) back here, then switch.
 #   ncnn     — CPU fallback (works today without a .hef)
 #   pytorch  — Ultralytics .pt (slowest on Pi)
 #   openvino — Intel-optimised; usable on Pi but usually slower than ncnn
 backend: hailo
 
-# weights: path to a .pt file to resume training or run inference.
-# Leave blank to train from the Ultralytics pretrained backbone.
-# On the Pi point this to weights/best.pt after training.
-# For ncnn/openvino, export once (see scripts/export_model.py); inference loads
-# the sibling directory, e.g. weights/best_ncnn_model/ or best_openvino_model/.
-# After swapping a new .pt you MUST re-export — the old folder is not updated:
-#   python scripts/export_model.py --format ncnn
-weights: "weights/best_hailo_model/best.hef"
+# weights: .pt for train/resume, or a compiled Hailo .hef for inference.
+# Hailo uses the newest package beside the .pt (hailo/, *hailomodel/, *_hailo_model/).
+weights: "weights/detect/besthailomodel/best.hef"
 
-# Which catalog entry loads at startup (see models: below).
-active_model: gate
+# Which catalog entry is active on startup. All runnable models are still
+# preloaded (Detect on Hailo, Gate on NCNN — Hailo-8L holds one HEF).
+active_model: detect
 
 # Switchable models for Auto (YOLO) mode on the /sub/ dashboard.
-# Only list weights you have on disk. Add a new block when you import a .pt;
-# missing files grey out the button but do not block startup.
+# One folder per model: weights/<id>/  (see weights/README.md).
+# Drop weights/<id>/best.pt plus a sidecar model.yaml — it appears after refresh.
+# Hailo is the intended runtime; ncnn/pytorch are CPU fallbacks.
 models:
   detect:
-    label: "Detect"
-    weights: weights/best.pt
+    label: "Detect (Hailo)"
+    weights: weights/detect/best.pt
     task: detect
     track_label: apple
+    default_backend: hailo
+    main: true
   gate:
     label: "Gate"
-    weights: weights/gatebest.pt
+    weights: weights/gate/gatebest.pt
     task: segment
     track_label: gate
+    default_backend: hailo
 
 # Detection thresholds
 confidence: 0.50

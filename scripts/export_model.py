@@ -2,7 +2,7 @@
 """
 export_model.py
 ---------------
-Export weights/*.pt for Pi inference.
+Export weights/<id>/*.pt for Pi inference.
 
 Formats
 -------
@@ -15,8 +15,8 @@ Formats
 Usage
 -----
     # On the x86 Linux PC (Hailo DFC 3.x installed):
-    python scripts/export_model.py --format hailo --weights weights/best.pt
-    python scripts/export_model.py --format hailo --weights weights/gatebest.pt
+    python scripts/export_model.py --format hailo --weights weights/detect/best.pt
+    python scripts/export_model.py --format hailo --weights weights/gate/gatebest.pt
 
     # CPU fallback on the Pi:
     python scripts/export_model.py --format ncnn
@@ -211,7 +211,7 @@ def _export_hailo(weights: Path, imgsz: int) -> Path:
     print(f"[export] Done: {exported}")
     print("Copy this folder onto the Pi if you compiled elsewhere, then:")
     print("  backend: hailo   # config/model.yaml")
-    print("  python inference.py --web --timing")
+    print("  ~/sub --yolo --timing")
     return dest_dir if dest_dir.is_dir() else exported
 
 
@@ -267,7 +267,7 @@ def main() -> None:
     print(f"[export] Done: {exported}")
     print(
         f"\nNext: set backend: {args.format} in config/model.yaml, then run:\n"
-        "  python inference.py --web --timing"
+        "  ~/sub --yolo --timing"
     )
 
 

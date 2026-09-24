@@ -47,6 +47,7 @@ class StubOutput(HardwareOutput):
         self._last: dict[str, float] | None = None
 
     def apply(self, output: ControlOutput) -> None:
+        _apply_yolo_to_sub_state(output)
         current = {
             "steer": output.steering_servo,
             "drive": output.drive_motor,
@@ -54,6 +55,51 @@ class StubOutput(HardwareOutput):
         }
         if current != self._last:
             self._last = current.copy()
+
+
+def _apply_yolo_to_sub_state(output: ControlOutput) -> None:
+    """Map YOLO ControlOutput → sub_state actuators (shared by sub + stub outputs)."""
+    from src.control_source import get_mode as yolo_mode, get_manual
+    from src.sub_control import yolo_to_sub_motion
+    from src.sub_state import get_sub_state
+    from src.telemetry_context import TelemetryContext
+
+    state = get_sub_state()
+    mode = state.get_control_mode()
+    telemetry = TelemetryContext.from_sub_state()
+    inf_running = False
+    try:
+        from src.inference_service import get_inference_service
+
+        inf_running = bool(get_inference_service().snapshot().get("running"))
+    except Exception:
+        inf_running = False
+
+    if mode == "auto" or inf_running:
+        motion = yolo_to_sub_motion(output, telemetry=telemetry)
+        state.set_auto_actuators(motion.actuators)
+        if mode == "auto" and not state.is_xbox_override_active():
+            state.set_ballast_commands(motion.ballast_fore, motion.ballast_aft)
+    elif mode == "manual" and yolo_mode() == "manual":
+        manual = get_manual()
+        motion = yolo_to_sub_motion(
+            ControlOutput(
+                steering_servo=manual.s,
+                drive_motor=manual.d,
+                camera_tilt_servo=manual.t,
+                apple_detected=False,
+                target_x=0,
+                target_y=0,
+                error_x=0.0,
+                error_y=0.0,
+                confidence=0.0,
+                timestamp=output.timestamp,
+            ),
+            telemetry=telemetry,
+        )
+        state.set_manual_actuators(motion.actuators)
+    # xbox mode: xbox_controller thread updates xbox_actuators; manual sliders unchanged
+    state.recompute_effective()
 
 
 class SubBridgeOutput(HardwareOutput):
@@ -68,39 +114,7 @@ class SubBridgeOutput(HardwareOutput):
         self._config = config
 
     def apply(self, output: ControlOutput) -> None:
-        from src.control_source import get_mode as yolo_mode, get_manual
-        from src.sub_control import yolo_to_sub_motion
-        from src.sub_state import get_sub_state
-        from src.telemetry_context import TelemetryContext
-
-        state = get_sub_state()
-        mode = state.get_control_mode()
-        telemetry = TelemetryContext.from_sub_state()
-
-        if mode == "auto":
-            motion = yolo_to_sub_motion(output, telemetry=telemetry)
-            state.set_auto_actuators(motion.actuators)
-            state.set_ballast_commands(motion.ballast_fore, motion.ballast_aft)
-        elif mode == "manual" and yolo_mode() == "manual":
-            manual = get_manual()
-            motion = yolo_to_sub_motion(
-                ControlOutput(
-                    steering_servo=manual.s,
-                    drive_motor=manual.d,
-                    camera_tilt_servo=manual.t,
-                    apple_detected=False,
-                    target_x=0,
-                    target_y=0,
-                    error_x=0.0,
-                    error_y=0.0,
-                    confidence=0.0,
-                    timestamp=output.timestamp,
-                ),
-                telemetry=telemetry,
-            )
-            state.set_manual_actuators(motion.actuators)
-        # xbox mode: xbox_controller thread updates xbox_actuators; manual sliders unchanged
-        state.recompute_effective()
+        _apply_yolo_to_sub_state(output)
 
     def close(self) -> None:
         pass

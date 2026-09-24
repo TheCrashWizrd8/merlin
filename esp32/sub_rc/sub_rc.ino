@@ -9,8 +9,7 @@
 #define PI_UART_TX            43    // ESP TX -> Pi RX (header pin 10)
 
 // I2C bus — shared by PCA9685 (servos) and MPU6050 (GY-521 IMU)
-// GPIO 29/30 are internal flash on most ESP32-S3 modules (boot loop if used for I2C).
-// Wire SDA/SCL to GPIO 8/9 (or 21/22) instead.
+// Wired: SDA=GPIO8, SCL=GPIO9. Do not use GPIO 29/30 (flash).
 #define I2C_SDA               8
 #define I2C_SCL               9
 #define PCA9685_ADDR          0x40    // all jumpers OPEN; closed A0=0x41 … A5=0x60
@@ -18,7 +17,7 @@
 #define MPU6050_ADDR          0x68    // GY-521 default (AD0 → GND)
 #define ENABLE_MPU6050        1
 
-// PCA9685 channels: aft steer Y/Z, fore fins L/R, sonar sweep servo
+// PCA9685 channels — HS-646WP: sonar on 1, actuators on 2–5
 #define CH_SONAR_SERVO        1
 #define CH_AFT_STEER_Z        2     // aft X
 #define CH_AFT_STEER_Y        3
@@ -33,8 +32,8 @@
 #define SONAR_STEP_DEG        5
 #define SONAR_SWEEP_MIN       -180
 #define SONAR_SWEEP_MAX       180
-#define SONAR_SETTLE_MS       25
-#define SONAR_PULSE_TIMEOUT_US 35000
+#define SONAR_SETTLE_MS       80
+#define SONAR_PULSE_TIMEOUT_US 12000
 
 // Thruster via L298N
 #define PIN_THR_IN1           13    // moved off GPIO 4 (aft ballast DIR B)
@@ -42,8 +41,7 @@
 #define PIN_THR_PWM           6
 
 // Ballast — Makerverse Motor Driver 2 Channel (DIR/PWM mode, on/off fill/drain)
-// Fore: channel A (DIR A + PWM A). Aft: channel B (DIR B + PWM B).
-// Pot wipers → ESP32 ADC (3.3V, wiper, GND on each linear pot)
+// Fore: DIR=16 PWM=15. Aft: DIR=4 PWM=5.
 #define BALLAST_USE_DIR_PWM   1
 #define PIN_FORE_BALLAST_DIR  16    // DIR A (IO16)
 #define PIN_FORE_BALLAST_PWM  15    // PWM A (IO15)
@@ -74,16 +72,11 @@
 #define MOTOR_MIN_START       90
 #define BALLAST_CMD_DEADBAND  0.05f
 
-// Servo PWM ticks @ 50 Hz (PCA9685 12-bit). Adafruit example range 150–600.
+// Adafruit PCA9685 pulse limits (same as the working bench sketch)
 #define SERVO_MIN             150
 #define SERVO_MAX             600
 #define SERVO_CENTER          375
-#define PCA9685_OSC_FREQ      25000000
-#define PCA9685_PRESCALE_50HZ 121     // round(25e6 / (4096*50)) - 1
-#define PCA_MODE1             0x00
-#define PCA_MODE2             0x01
-#define PCA_LED0_ON_L         0x06
-#define PCA_PRESCALE          0xFE
+#define PCA9685_LED0_ON_L     0x06
 
 #define BALLAST_FORE          0
 #define BALLAST_AFT           1
@@ -117,8 +110,8 @@ static uint8_t pca9685Addr = PCA9685_ADDR;
 #endif
 
 struct BallastState {
-  int pinIna;
-  int pinInb;
+  int pinIna;   // Makerverse DIR
+  int pinInb;   // Makerverse PWM (enable)
   int pinPot;
   float command;
   float pos;
@@ -158,6 +151,8 @@ BallastState ballasts[BALLAST_COUNT] = {
 unsigned long lastSerial = 0;
 unsigned long lastTelem = 0;
 float lastThruster = 0.0f;
+float pendingAftY = 0.0f, pendingAftZ = 0.0f, pendingFinL = 0.0f, pendingFinR = 0.0f, pendingThr = 0.0f;
+bool actuatorsPending = false;
 bool testMode = false;
 unsigned long testModeUntil = 0;
 bool pca9685Ok = false;
@@ -212,10 +207,36 @@ static uint16_t servoTick(float v) {
   return (uint16_t)(SERVO_CENTER + (v * half));
 }
 
+#if ENABLE_PCA9685
+static uint16_t lastServoOff[16] = {};
+static bool lastServoOk[16] = {};
+
+// Same 5-byte write Adafruit setPWM uses, without BusIO (ESP32 NG I2C
+// wedges if MPU6050 requestFrom is mixed with Adafruit_I2CDevice::write).
+static bool pcaWritePWM(uint8_t ch, uint16_t on, uint16_t off) {
+  if (ch > 15) return false;
+  if (on == 0 && lastServoOk[ch] && lastServoOff[ch] == off) return true;
+  Wire.beginTransmission(PCA9685_ADDR);
+  Wire.write((uint8_t)(PCA9685_LED0_ON_L + 4 * ch));
+  Wire.write(on & 0xFF);
+  Wire.write(on >> 8);
+  Wire.write(off & 0xFF);
+  Wire.write(off >> 8);
+  if (Wire.endTransmission() != 0) {
+    lastServoOk[ch] = false;
+    return false;
+  }
+  lastServoOff[ch] = off;
+  lastServoOk[ch] = true;
+  delay(2);
+  return true;
+}
+#endif
+
 static void setServoChannel(int ch, float v) {
 #if ENABLE_PCA9685
   if (!pca9685Ok || ch < 0 || ch > 5) return;
-  pcaSetPWM((uint8_t)ch, 0, servoTick(v));
+  pcaWritePWM((uint8_t)ch, 0, servoTick(v));
 #else
   (void)ch;
   (void)v;
@@ -352,6 +373,7 @@ static float ballastPosFromAdc(BallastState *tank, int adc) {
   if (fabsf(span) < 50.0f) {
     return adc / 4095.0f;
   }
+  // Signed span: top/bottom order follows physical wiring (ADC may rise or fall when filling).
   return clampf((adc - tank->adcBottom) / span);
 }
 
@@ -374,6 +396,35 @@ static void saveBallastCal(BallastState *tank) {
   ballastPrefs.end();
 }
 
+static void finalizeBallastCal(BallastState *tank) {
+  if (tank->adcTop >= 0 && tank->adcBottom >= 0) {
+    int span = abs(tank->adcTop - tank->adcBottom);
+    if (span >= 50) {
+      tank->calValid = true;
+    } else {
+      tank->calValid = false;
+      LINK.print("WARN CAL B ");
+      LINK.print(tank->name);
+      LINK.print(" span=");
+      LINK.print(span);
+      LINK.println(" (need >= 50 ADC counts between top and bottom)");
+    }
+  }
+  saveBallastCal(tank);
+  updateBallastAdc(tank);
+}
+
+static void clearBallastCal(BallastState *tank) {
+  tank->adcTop = -1;
+  tank->adcBottom = -1;
+  tank->calValid = false;
+  saveBallastCal(tank);
+  updateBallastAdc(tank);
+  LINK.print("OK CAL B ");
+  LINK.print(tank->name);
+  LINK.println(" clear");
+}
+
 static int ballastIndexFromName(const char *name) {
   if (strcmp(name, "fore") == 0 || strcmp(name, "f") == 0) return BALLAST_FORE;
   if (strcmp(name, "aft") == 0 || strcmp(name, "a") == 0) return BALLAST_AFT;
@@ -386,10 +437,7 @@ static void calibrateBallastTop(BallastState *tank) {
     return;
   }
   tank->adcTop = readBallastAdc(tank->pinPot);
-  if (tank->adcBottom >= 0 && abs(tank->adcTop - tank->adcBottom) >= 50) {
-    tank->calValid = true;
-  }
-  saveBallastCal(tank);
+  finalizeBallastCal(tank);
   LINK.print("OK CAL B ");
   LINK.print(tank->name);
   LINK.print(" top ");
@@ -402,14 +450,23 @@ static void calibrateBallastBottom(BallastState *tank) {
     return;
   }
   tank->adcBottom = readBallastAdc(tank->pinPot);
-  if (tank->adcTop >= 0 && abs(tank->adcTop - tank->adcBottom) >= 50) {
-    tank->calValid = true;
-  }
-  saveBallastCal(tank);
+  finalizeBallastCal(tank);
   LINK.print("OK CAL B ");
   LINK.print(tank->name);
   LINK.print(" bottom ");
   LINK.println(tank->adcBottom);
+}
+
+static void ballastPwmEnable(int pin, bool on) {
+  if (pin < 0) return;
+  ledcWrite(pin, on ? MOTOR_MAX_SPEED : 0);
+}
+
+static void ackBallast() {
+  LINK.print("OK B ");
+  LINK.print(ballasts[BALLAST_FORE].command, 3);
+  LINK.print(" ");
+  LINK.println(ballasts[BALLAST_AFT].command, 3);
 }
 
 static void setBallastTank(BallastState *tank, float cmd) {
@@ -421,13 +478,13 @@ static void setBallastTank(BallastState *tank, float cmd) {
   // Makerverse DIR/PWM: PWM enables motor; DIR sets direction.
   if (fill) {
     digitalWrite(tank->pinIna, HIGH);
-    digitalWrite(tank->pinInb, HIGH);
+    ballastPwmEnable(tank->pinInb, true);
   } else if (drain) {
     digitalWrite(tank->pinIna, LOW);
-    digitalWrite(tank->pinInb, HIGH);
+    ballastPwmEnable(tank->pinInb, true);
   } else {
     digitalWrite(tank->pinIna, LOW);
-    digitalWrite(tank->pinInb, LOW);
+    ballastPwmEnable(tank->pinInb, false);
   }
 #else
   if (fill) {
@@ -467,12 +524,28 @@ static void setActuators(float aftY, float aftZ, float finL, float finR, float t
   hw.aftZ = z;
   hw.finL = fl;
   hw.finR = fr;
-  setServoChannel(CH_AFT_STEER_Y, hw.aftY);
-  setServoChannel(CH_AFT_STEER_Z, hw.aftZ);
-  setServoChannel(CH_FIN_LEFT, hw.finL);
-  setServoChannel(CH_FIN_RIGHT, hw.finR);
+#if ENABLE_PCA9685
+  bool needRetry = pca9685Ok &&
+      (!lastServoOk[CH_AFT_STEER_Y] || !lastServoOk[CH_AFT_STEER_Z] ||
+       !lastServoOk[CH_FIN_LEFT] || !lastServoOk[CH_FIN_RIGHT]);
+#else
+  bool needRetry = false;
+#endif
+  if (changed || needRetry) {
+    setServoChannel(CH_AFT_STEER_Y, hw.aftY);
+    setServoChannel(CH_AFT_STEER_Z, hw.aftZ);
+    setServoChannel(CH_FIN_LEFT, hw.finL);
+    setServoChannel(CH_FIN_RIGHT, hw.finR);
+  }
   setThruster(thr);
-  if (changed) {
+  if (!pca9685Ok) {
+    static unsigned long lastPcaErrMs = 0;
+    unsigned long now = millis();
+    if (now - lastPcaErrMs > 3000) {
+      lastPcaErrMs = now;
+      LINK.println("ERR S2 pca=0 (PCA9685 not on I2C — check SDA=8 SCL=9, 3.3V, servo 5V)");
+    }
+  } else if (changed) {
     LINK.print("OK S2 ");
     LINK.print(hw.aftY, 3); LINK.print(" ");
     LINK.print(hw.aftZ, 3); LINK.print(" F ");
@@ -481,6 +554,21 @@ static void setActuators(float aftY, float aftZ, float finL, float finR, float t
     LINK.print(hw.thruster, 3);
     LINK.print(" pca="); LINK.println(pca9685Ok ? 1 : 0);
   }
+}
+
+static void queueActuators(float aftY, float aftZ, float finL, float finR, float thr) {
+  pendingAftY = aftY;
+  pendingAftZ = aftZ;
+  pendingFinL = finL;
+  pendingFinR = finR;
+  pendingThr = thr;
+  actuatorsPending = true;
+}
+
+static void applyPendingActuators() {
+  if (!actuatorsPending) return;
+  actuatorsPending = false;
+  setActuators(pendingAftY, pendingAftZ, pendingFinL, pendingFinR, pendingThr);
 }
 
 static float readAdcVolts(int pin) {
@@ -505,13 +593,10 @@ static bool readLeakActive() {
 static bool i2cStarted = false;
 
 static void i2cBegin() {
-  if (i2cStarted) {
-    Wire.end();
-    delay(2);
-  }
+  if (i2cStarted) return;
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
-  Wire.setTimeOut(50);
+  delay(20);
   i2cStarted = true;
 }
 #endif
@@ -531,55 +616,19 @@ static uint8_t mpuFailCount = 0;
 #endif
 
 #if ENABLE_PCA9685
-static bool pcaWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
-  if (!i2cStarted) i2cBegin();
-  Wire.beginTransmission(addr);
+#define PCA9685_MODE1         0x00
+#define PCA9685_PRESCALE      0xFE
+#define PCA9685_SLEEP         0x10
+#define PCA9685_AUTOINCR      0x20
+#define PCA9685_RESTART       0x80
+// Adafruit setPWMFreq(50) uses ~0.9 correction → prescale 135
+#define PCA9685_PRESCALE_50HZ 135
+
+static bool pcaWrite8(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(PCA9685_ADDR);
   Wire.write(reg);
   Wire.write(val);
   return Wire.endTransmission() == 0;
-}
-
-static bool pcaReadReg(uint8_t addr, uint8_t reg, uint8_t *val) {
-  if (!i2cStarted) i2cBegin();
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  if (Wire.endTransmission() != 0) return false;
-  if (Wire.requestFrom((int)addr, 1) != 1) return false;
-  *val = Wire.read();
-  return true;
-}
-
-static bool pcaProbe(uint8_t addr) {
-  uint8_t mode = 0;
-  if (!pcaWriteReg(addr, PCA_MODE1, 0x00)) return false;
-  delay(1);
-  if (!pcaReadReg(addr, PCA_MODE1, &mode)) return false;
-  (void)mode;
-  return true;
-}
-
-static void pcaSetPWM(uint8_t ch, uint16_t on, uint16_t off) {
-  if (!pca9685Ok || ch > 15) return;
-  if (!i2cStarted) i2cBegin();
-  Wire.beginTransmission(pca9685Addr);
-  Wire.write((uint8_t)(PCA_LED0_ON_L + 4 * ch));
-  Wire.write(on & 0xFF);
-  Wire.write(on >> 8);
-  Wire.write(off & 0xFF);
-  Wire.write(off >> 8);
-  Wire.endTransmission();
-}
-
-static bool pcaInitAt(uint8_t addr) {
-  if (!pcaWriteReg(addr, PCA_MODE1, 0x10)) return false;  // sleep
-  delay(1);
-  if (!pcaWriteReg(addr, PCA_PRESCALE, PCA9685_PRESCALE_50HZ)) return false;
-  if (!pcaWriteReg(addr, PCA_MODE2, 0x04)) return false;  // totem-pole (Adafruit default)
-  if (!pcaWriteReg(addr, PCA_MODE1, 0xA1)) return false;  // restart + auto-inc + allcall
-  delay(5);
-  pca9685Addr = addr;
-  pca9685Ok = true;
-  return true;
 }
 
 static void i2cScanBus() {
@@ -592,12 +641,7 @@ static void i2cScanBus() {
     LINK.print("  0x");
     if (addr < 16) LINK.print("0");
     LINK.print(addr, HEX);
-    if (addr >= 0x40 && addr <= 0x4F) {
-      uint8_t jumper = addr - 0x40;
-      LINK.print("  PCA9685? jumpers A0-A3=");
-      for (int b = 0; b < 4; b++) LINK.print((jumper >> b) & 1);
-      LINK.print(" (Open=0 Closed=1)");
-    }
+    if (addr >= 0x40 && addr <= 0x7F) LINK.print("  PCA9685?");
     if (addr == 0x68 || addr == 0x69) LINK.print("  MPU6050");
     LINK.println();
   }
@@ -606,37 +650,31 @@ static void i2cScanBus() {
 
 static bool pca9685Init() {
   i2cBegin();
-  i2cScanBus();
-  uint8_t tryAddr[8];
-  int n = 0;
-  tryAddr[n++] = PCA9685_ADDR;
-  for (uint8_t a = 0x40; a <= 0x4F && n < 8; a++) {
-    if (a == PCA9685_ADDR) continue;
-    Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) tryAddr[n++] = a;
+  Wire.beginTransmission(PCA9685_ADDR);
+  if (Wire.endTransmission() != 0) {
+    pca9685Ok = false;
+    LINK.println("WARN PCA9685 not found @0x40");
+    i2cScanBus();
+    return false;
   }
-  for (int i = 0; i < n; i++) {
-    if (!pcaProbe(tryAddr[i])) continue;
-    if (pcaInitAt(tryAddr[i])) {
-      LINK.print("OK PCA9685 @0x");
-      LINK.print(pca9685Addr, HEX);
-      LINK.print(" jumpers=");
-      LINK.print(pca9685Addr - 0x40, BIN);
-      LINK.print(" SDA="); LINK.print(I2C_SDA);
-      LINK.print(" SCL="); LINK.println(I2C_SCL);
-      LINK.println("  Servo V+ needs 5V; OE pin must be LOW or unconnected");
-      pcaSetPWM(CH_SONAR_SERVO, 0, SERVO_CENTER);
-      pcaSetPWM(CH_AFT_STEER_Z, 0, SERVO_CENTER);
-      pcaSetPWM(CH_AFT_STEER_Y, 0, SERVO_CENTER);
-      pcaSetPWM(CH_FIN_LEFT, 0, SERVO_CENTER);
-      pcaSetPWM(CH_FIN_RIGHT, 0, SERVO_CENTER);
-      return true;
-    }
+
+  // Sleep → set 50 Hz → wake with auto-increment. Never call Wire.begin() again.
+  pcaWrite8(PCA9685_MODE1, PCA9685_SLEEP | PCA9685_AUTOINCR);
+  pcaWrite8(PCA9685_PRESCALE, PCA9685_PRESCALE_50HZ);
+  pcaWrite8(PCA9685_MODE1, PCA9685_AUTOINCR | PCA9685_RESTART);
+  delay(5);
+
+  pca9685Ok = true;
+  pca9685Addr = PCA9685_ADDR;
+  LINK.println("Servo controller started");
+  LINK.print("OK PCA9685 @0x");
+  LINK.print(pca9685Addr, HEX);
+  LINK.print(" SDA="); LINK.print(I2C_SDA);
+  LINK.print(" SCL="); LINK.println(I2C_SCL);
+  for (int ch = 1; ch <= 5; ch++) {
+    pcaWritePWM((uint8_t)ch, 0, SERVO_CENTER);
   }
-  LINK.println("WARN PCA9685 not found on 0x40-0x4F — servos disabled");
-  LINK.println("  All jumpers OPEN = 0x40. Closed A0 = 0x41, A1 = 0x42, …");
-  pca9685Ok = false;
-  return false;
+  return true;
 }
 #endif
 
@@ -694,6 +732,7 @@ static bool mpu6050ReadRaw(int16_t *ax, int16_t *ay, int16_t *az,
   *gx = (int16_t)((Wire.read() << 8) | Wire.read());
   *gy = (int16_t)((Wire.read() << 8) | Wire.read());
   *gz = (int16_t)((Wire.read() << 8) | Wire.read());
+  while (Wire.available()) Wire.read();
   return true;
 }
 
@@ -847,6 +886,13 @@ static void sendTelemetry() {
   LINK.print("TEL thruster ");
   LINK.print(hw.thruster, 3); LINK.print(" ");
   LINK.println(hw.thrusterPwm);
+#if ENABLE_PCA9685
+  LINK.print("TEL pca9685 ");
+  LINK.print(pca9685Ok ? 1 : 0); LINK.print(" ");
+  LINK.print(pca9685Ok ? (int)pca9685Addr : (int)PCA9685_ADDR, HEX); LINK.print(" ");
+  LINK.print(I2C_SDA); LINK.print(" ");
+  LINK.println(I2C_SCL);
+#endif
   LINK.print("TEL status ");
   LINK.println(hw.status);
   LINK.print("TEL fault ");
@@ -868,6 +914,7 @@ static void handleTestCommand(char *line) {
       setServoChannel(ch, val);
       LINK.print("OK TEST servo ch="); LINK.print(ch);
       LINK.print(" val="); LINK.print(val, 3);
+      LINK.print(" ticks="); LINK.print(servoTick(val));
       LINK.print(" pca="); LINK.println(pca9685Ok ? 1 : 0);
     }
     return;
@@ -954,7 +1001,7 @@ static void handleCalCommand(char *line) {
   if (sscanf(line + 6, "%15s %15s", tankName, which) == 2) {
     int idx = ballastIndexFromName(tankName);
     if (idx < 0) {
-      LINK.println("ERR CAL B use fore|aft top|bottom|show");
+      LINK.println("ERR CAL B use fore|aft top|bottom|show|clear");
       return;
     }
     BallastState *t = &ballasts[idx];
@@ -975,6 +1022,10 @@ static void handleCalCommand(char *line) {
       LINK.println(t->calValid ? 1 : 0);
       return;
     }
+    if (strcmp(which, "clear") == 0 || strcmp(which, "reset") == 0) {
+      clearBallastCal(t);
+      return;
+    }
   } else if (sscanf(line + 6, "%15s", which) == 1) {
     if (strcmp(which, "top") == 0) {
       calibrateBallastTop(&ballasts[BALLAST_FORE]);
@@ -985,7 +1036,7 @@ static void handleCalCommand(char *line) {
       return;
     }
   }
-  LINK.println("ERR CAL B use <fore|aft> top|bottom|show");
+  LINK.println("ERR CAL B use <fore|aft> top|bottom|show|clear");
 }
 
 static void parseLine(char *line) {
@@ -1006,7 +1057,7 @@ static void parseLine(char *line) {
     LINK.println("OK HELP");
     LINK.println("  PING  PINS  HELP");
     LINK.println("  B <fore> <aft>  or  B fore <val>  B aft <val>");
-    LINK.println("  CAL B <fore|aft> top|bottom|show");
+    LINK.println("  CAL B <fore|aft> top|bottom|show|clear");
     LINK.println("  S2 <aftY> <aftZ> F <finL> <finR> X <thruster>");
     LINK.println("  TEST B <fore|aft> fill|drain|stop  (or both)");
     LINK.println("  TEST S <ch> <val>  TEST T <val>  TEST L  TEST A  TEST I");
@@ -1016,13 +1067,6 @@ static void parseLine(char *line) {
     handleTestCommand(line);
     return;
   }
-  if (testMode) {
-    return;
-  }
-  if (strncmp(line, "CAL B ", 6) == 0) {
-    handleCalCommand(line);
-    return;
-  }
 
   float foreCmd = 0.0f;
   float aftCmd = 0.0f;
@@ -1030,28 +1074,41 @@ static void parseLine(char *line) {
   float oneCmd = 0.0f;
   if (sscanf(line, "B %f %f", &foreCmd, &aftCmd) == 2) {
     setBallastBoth(foreCmd, aftCmd);
+    ackBallast();
     return;
   }
   if (sscanf(line, "B %15s %f", tankName, &oneCmd) == 2) {
     int idx = ballastIndexFromName(tankName);
     if (idx == BALLAST_FORE) setBallastBoth(oneCmd, ballasts[BALLAST_AFT].command);
     else if (idx == BALLAST_AFT) setBallastBoth(ballasts[BALLAST_FORE].command, oneCmd);
+    ackBallast();
     return;
   }
   if (sscanf(line, "B %f", &oneCmd) == 1) {
     setBallastBoth(oneCmd, oneCmd);
+    ackBallast();
     return;
   }
 
   float aftY, aftZ, finL, finR, thr;
   if (sscanf(line, "S2 %f %f F %f %f X %f", &aftY, &aftZ, &finL, &finR, &thr) == 5) {
-    setActuators(aftY, aftZ, finL, finR, thr);
+    testMode = false;  // dashboard / Pi control overrides bench test hold
+    queueActuators(aftY, aftZ, finL, finR, thr);
     return;
   }
 
   float steer, drive, tilt;
   if (sscanf(line, "S %f D %f T %f", &steer, &drive, &tilt) == 3) {
-    setActuators(steer, tilt, 0.0f, 0.0f, drive);
+    testMode = false;
+    queueActuators(steer, tilt, 0.0f, 0.0f, drive);
+    return;
+  }
+
+  if (testMode) {
+    return;
+  }
+  if (strncmp(line, "CAL B ", 6) == 0) {
+    handleCalCommand(line);
     return;
   }
 }
@@ -1166,9 +1223,16 @@ void setup() {
   digitalWrite(PIN_THR_IN1, LOW);
   digitalWrite(PIN_THR_IN2, LOW);
   digitalWrite(PIN_FORE_BALLAST_DIR, LOW);
-  digitalWrite(PIN_FORE_BALLAST_PWM, LOW);
   digitalWrite(PIN_AFT_BALLAST_DIR, LOW);
-  digitalWrite(PIN_AFT_BALLAST_PWM, LOW);
+
+#if PIN_FORE_BALLAST_PWM >= 0
+  ledcAttach(PIN_FORE_BALLAST_PWM, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ballastPwmEnable(PIN_FORE_BALLAST_PWM, false);
+#endif
+#if PIN_AFT_BALLAST_PWM >= 0
+  ledcAttach(PIN_AFT_BALLAST_PWM, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ballastPwmEnable(PIN_AFT_BALLAST_PWM, false);
+#endif
 
 #if PIN_THR_PWM >= 0
   ledcAttach(PIN_THR_PWM, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
@@ -1177,6 +1241,9 @@ void setup() {
   bootCheckpoint("CHK4 thruster pwm attached");
 
   loadBallastCal();
+  for (int i = 0; i < BALLAST_COUNT; i++) {
+    updateBallastAdc(&ballasts[i]);
+  }
   bootCheckpoint("CHK5 nvs loaded");
 
   setActuators(0, 0, 0, 0, 0);
@@ -1199,6 +1266,7 @@ void setup() {
 
 void loop() {
   processLinkStream();
+  applyPendingActuators();
 
 #if ENABLE_SONAR
   updateSonarSweep();

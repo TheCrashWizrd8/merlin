@@ -30,7 +30,7 @@ esp32:
     serial_timeout_ms: 8000
 
   i2c:
-    sda_gpio: 8     # NOT 29/30 — those are flash pins on ESP32-S3 (boot loop)
+    sda_gpio: 8     # NOT 29/30 — flash pins on ESP32-S3 (boot loop)
     scl_gpio: 9
     # Shared bus — wire SDA/SCL in parallel to each module
     devices:
@@ -49,9 +49,9 @@ pca9685:
   i2c_address: 0x40    # all A0–A5 OPEN; closed A0=0x41 (Open=0 Closed=1)
   pwm_frequency_hz: 50
   servo_tick_calibration:
-    min_tick: 205
-    centre_tick: 307
-    max_tick: 410
+    min_tick: 150
+    centre_tick: 375
+    max_tick: 600
     tick_us: 4.8828
     centre_us_approx: 1500
     min_us_approx: 1000
@@ -148,7 +148,7 @@ sub:
     trig_gpio: 17    # moved off GPIO 15 (fore ballast PWM A)
     echo_gpio: 18    # moved off GPIO 16 (fore ballast DIR A)
     max_range_m: 6.0
-    servo_channel: 1   # PCA9685
+    servo_channel: 1   # PCA9685 header 1 (HS-646WP)
 
   axes:
     aftSteerY: float in [-1,1]
@@ -167,7 +167,7 @@ sub:
     test_thruster: "TEST T <val -1..1>"
     test_ballast_fore: "TEST B fore fill|drain|stop"
     test_ballast_aft: "TEST B aft fill|drain|stop"
-    cal_ballast: "CAL B <fore|aft> top|bottom|show"
+    cal_ballast: "CAL B <fore|aft> top|bottom|show|clear"
     test_leaks: "TEST L"
     test_adc: "TEST A"
     help: "HELP"

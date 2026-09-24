@@ -7,6 +7,7 @@ serial log, and connection flags.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -17,6 +18,33 @@ from typing import Any
 import yaml
 
 _PINS_YAML = Path(__file__).parent.parent / "config" / "pins.yaml"
+_HARDWARE_YAML = Path(__file__).parent.parent / "config" / "hardware.yaml"
+
+
+def _load_gps_track_cfg() -> tuple[float, int, float]:
+    """min_move_m, origin_settle_n, smooth_alpha."""
+    min_move_m = 5.0
+    origin_settle_n = 12
+    smooth_alpha = 0.25
+    try:
+        with open(_HARDWARE_YAML) as f:
+            cfg = yaml.safe_load(f) or {}
+        gps = cfg.get("gps") or {}
+        min_move_m = float(gps.get("min_move_m", min_move_m))
+        origin_settle_n = int(gps.get("origin_settle_fixes", origin_settle_n))
+        smooth_alpha = float(gps.get("smooth_alpha", smooth_alpha))
+    except (OSError, TypeError, ValueError):
+        pass
+    return max(0.5, min_move_m), max(1, origin_settle_n), min(1.0, max(0.05, smooth_alpha))
+
+
+def _latlon_to_local_m(
+    lat: float, lon: float, origin_lat: float, origin_lon: float
+) -> tuple[float, float]:
+    lat_rad = math.radians(origin_lat)
+    north_m = (lat - origin_lat) * 110_540.0
+    east_m = (lon - origin_lon) * 111_320.0 * math.cos(lat_rad)
+    return east_m, north_m
 
 
 def _load_leak_meta() -> tuple[list[int], list[str], bool]:
@@ -148,6 +176,10 @@ class SubState:
         self.ballast_aft = BallastTankState()
         self.thruster_value: float | None = None
         self.thruster_pwm: int | None = None
+        self.pca9685_ok: bool = False
+        self.pca9685_addr: int | None = None
+        self.pca9685_sda: int | None = None
+        self.pca9685_scl: int | None = None
         self.esp_status: str = "unknown"
         self.esp_fault: str = "unknown"
         self.last_heartbeat: int | None = None
@@ -170,6 +202,27 @@ class SubState:
         self.gps_track: deque[dict[str, float]] = deque(maxlen=1000)
         self.gps_track_origin: tuple[float, float] | None = None
         self.gps_last_ts: float = 0.0
+        self.gps_settling: bool = False
+        self._gps_min_move_m, self._gps_settle_n, self._gps_smooth_alpha = _load_gps_track_cfg()
+        self._gps_settle: list[tuple[float, float]] = []
+        self._gps_smooth: tuple[float, float] | None = None
+        self._gps_last_track: tuple[float, float] | None = None
+
+        # USB cameras (left / right) — updated by FrameGrabber
+        self.cameras: dict[str, dict[str, Any]] = {
+            "fov": {
+                "connected": False, "device": "", "status": "idle",
+                "error": None, "last_ts": 0.0,
+            },
+            "left": {
+                "connected": False, "device": "", "status": "idle",
+                "error": None, "last_ts": 0.0,
+            },
+            "right": {
+                "connected": False, "device": "", "status": "idle",
+                "error": None, "last_ts": 0.0,
+            },
+        }
 
         # Control — manual default so bench/dashboard starts idle without a gamepad
         self.control_mode: str = "manual"  # xbox | manual | auto
@@ -177,6 +230,8 @@ class SubState:
         self.auto_actuators = SubActuators()
         self.xbox_actuators = SubActuators()
         self.effective_actuators = SubActuators()
+        self.xbox_override_active: bool = False
+        self.linked_flap_enabled: bool = True
 
         # YOLO model selection (Auto mode on dashboard)
         self.yolo_model_id: str = ""
@@ -325,10 +380,10 @@ class SubState:
     ) -> None:
         with self._lock:
             t = self._ballast_tank(tank)
-            if bottom_adc is not None and bottom_adc >= 0:
-                t.cal_bottom_adc = int(bottom_adc)
-            if top_adc is not None and top_adc >= 0:
-                t.cal_top_adc = int(top_adc)
+            if bottom_adc is not None:
+                t.cal_bottom_adc = None if bottom_adc < 0 else int(bottom_adc)
+            if top_adc is not None:
+                t.cal_top_adc = None if top_adc < 0 else int(top_adc)
             if valid is not None:
                 t.cal_valid = bool(valid)
             elif t.cal_top_adc is not None and t.cal_bottom_adc is not None:
@@ -338,10 +393,30 @@ class SubState:
             self.esp_connected = True
         self._notify()
 
+    def clear_ballast_cal(self, tank: str) -> None:
+        with self._lock:
+            t = self._ballast_tank(tank)
+            t.cal_top_adc = None
+            t.cal_bottom_adc = None
+            t.cal_valid = False
+            self.telemetry_timestamp = time.time()
+            self.esp_connected = True
+        self._notify()
+
     def update_thruster(self, value: float, pwm: int) -> None:
         with self._lock:
             self.thruster_value = float(value)
             self.thruster_pwm = int(pwm)
+            self.telemetry_timestamp = time.time()
+            self.esp_connected = True
+        self._notify()
+
+    def update_pca9685(self, ok: bool, addr: int, sda: int, scl: int) -> None:
+        with self._lock:
+            self.pca9685_ok = bool(ok)
+            self.pca9685_addr = int(addr)
+            self.pca9685_sda = int(sda)
+            self.pca9685_scl = int(scl)
             self.telemetry_timestamp = time.time()
             self.esp_connected = True
         self._notify()
@@ -410,9 +485,17 @@ class SubState:
         port: str = "",
     ) -> None:
         with self._lock:
+            if self._gps_smooth is None:
+                slat, slon = lat, lon
+            else:
+                alpha = self._gps_smooth_alpha
+                slat = alpha * lat + (1.0 - alpha) * self._gps_smooth[0]
+                slon = alpha * lon + (1.0 - alpha) * self._gps_smooth[1]
+            self._gps_smooth = (slat, slon)
+
             self.gps = GpsFix(
-                lat=lat,
-                lon=lon,
+                lat=slat,
+                lon=slon,
                 speed_knots=speed_knots,
                 heading_deg=heading_deg,
                 fix_quality=fix_quality,
@@ -421,17 +504,35 @@ class SubState:
             )
             self.gps_connected = True
             self.gps_device_online = True
-            self.gps_status = "fix"
             self.gps_last_ts = time.time()
             if port:
                 self.gps_port = port
+
             if self.gps_track_origin is None:
-                self.gps_track_origin = (lat, lon)
-            self.gps_track.append({
-                "lat": lat,
-                "lon": lon,
-                "ts": time.time(),
-            })
+                self._gps_settle.append((lat, lon))
+                self.gps_settling = True
+                self.gps_status = "fix"
+                if len(self._gps_settle) >= self._gps_settle_n:
+                    o_lat = sum(p[0] for p in self._gps_settle) / len(self._gps_settle)
+                    o_lon = sum(p[1] for p in self._gps_settle) / len(self._gps_settle)
+                    self.gps_track_origin = (o_lat, o_lon)
+                    self._gps_last_track = (o_lat, o_lon)
+                    self._gps_settle.clear()
+                    self.gps_settling = False
+                    self.gps_track.append({"lat": o_lat, "lon": o_lon, "ts": time.time()})
+            else:
+                self.gps_settling = False
+                self.gps_status = "fix"
+                last = self._gps_last_track or self.gps_track_origin
+                east, north = _latlon_to_local_m(
+                    slat, slon, self.gps_track_origin[0], self.gps_track_origin[1]
+                )
+                last_e, last_n = _latlon_to_local_m(
+                    last[0], last[1], self.gps_track_origin[0], self.gps_track_origin[1]
+                )
+                if math.hypot(east - last_e, north - last_n) >= self._gps_min_move_m:
+                    self.gps_track.append({"lat": slat, "lon": slon, "ts": time.time()})
+                    self._gps_last_track = (slat, slon)
         self._notify()
 
     def update_gps_reception(
@@ -459,6 +560,10 @@ class SubState:
         with self._lock:
             self.gps_track.clear()
             self.gps_track_origin = None
+            self.gps_settling = False
+            self._gps_settle.clear()
+            self._gps_smooth = None
+            self._gps_last_track = None
         self._notify()
 
     def set_gps_scanning(self) -> None:
@@ -588,6 +693,18 @@ class SubState:
                 self.ballast_aft.command = cmd
         self._notify()
 
+    def halt_all_movement(self) -> None:
+        """Zero every actuator command, ballast, and Xbox override latch."""
+        zero = SubActuators()
+        with self._lock:
+            self.auto_actuators = zero
+            self.manual_actuators = zero
+            self.xbox_actuators = zero
+            self.ballast_fore.command = 0.0
+            self.ballast_aft.command = 0.0
+            self.xbox_override_active = False
+        self.recompute_effective()
+
     def set_ballast_commands(self, fore: float, aft: float) -> None:
         fore = max(-1.0, min(1.0, float(fore)))
         aft = max(-1.0, min(1.0, float(aft)))
@@ -609,13 +726,18 @@ class SubState:
 
     def set_manual_actuators(self, actuators: SubActuators) -> None:
         with self._lock:
+            if asdict(self.manual_actuators) == asdict(actuators):
+                return
             self.manual_actuators = actuators
         self._notify()
 
-    def set_auto_actuators(self, actuators: SubActuators) -> None:
+    def set_auto_actuators(self, actuators: SubActuators) -> bool:
+        """Update YOLO actuator column; caller should recompute_effective() to publish."""
         with self._lock:
+            if asdict(self.auto_actuators) == asdict(actuators):
+                return False
             self.auto_actuators = actuators
-        self._notify()
+            return True
 
     def set_xbox_actuators(self, actuators: SubActuators) -> None:
         with self._lock:
@@ -624,12 +746,37 @@ class SubState:
             self.xbox_actuators = actuators
         self._notify()
 
+    def set_xbox_override_active(self, active: bool) -> None:
+        with self._lock:
+            if self.xbox_override_active == active:
+                return
+            self.xbox_override_active = active
+        self._notify()
+
+    def set_linked_flap_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            if self.linked_flap_enabled == enabled:
+                return
+            self.linked_flap_enabled = enabled
+        self._notify()
+
+    def is_linked_flap_enabled(self) -> bool:
+        with self._lock:
+            return self.linked_flap_enabled
+
+    def is_xbox_override_active(self) -> bool:
+        with self._lock:
+            return self.xbox_override_active
+
     def recompute_effective(self) -> SubActuators:
         changed = False
         with self._lock:
             prev = asdict(self.effective_actuators)
             if self.control_mode == "auto":
-                self.effective_actuators = SubActuators(**asdict(self.auto_actuators))
+                if self.xbox_override_active and self.xbox.connected:
+                    self.effective_actuators = SubActuators(**asdict(self.xbox_actuators))
+                else:
+                    self.effective_actuators = SubActuators(**asdict(self.auto_actuators))
             elif self.control_mode == "manual":
                 self.effective_actuators = SubActuators(**asdict(self.manual_actuators))
             elif self.control_mode == "xbox":
@@ -647,6 +794,40 @@ class SubState:
         if changed:
             self._notify()
         return result
+
+    def update_camera(
+        self,
+        side: str,
+        *,
+        connected: bool,
+        device: str = "",
+        status: str = "",
+        error: str | None = None,
+    ) -> None:
+        key = str(side).strip().lower()
+        if key in ("l", "cam", "mono"):
+            key = "left"
+        if key not in self.cameras:
+            return
+        changed = False
+        with self._lock:
+            entry = self.cameras[key]
+            if entry["connected"] != connected:
+                entry["connected"] = connected
+                changed = True
+            if device and entry["device"] != device:
+                entry["device"] = device
+                changed = True
+            if status and entry["status"] != status:
+                entry["status"] = status
+                changed = True
+            if entry["error"] != error:
+                entry["error"] = error
+                changed = True
+            if connected:
+                entry["last_ts"] = time.time()
+        if changed:
+            self._notify()
 
     def update_xbox(self, xbox: XboxState) -> None:
         with self._lock:
@@ -703,6 +884,21 @@ class SubState:
                     "pwm": self.thruster_pwm,
                     "connected": self.thruster_pwm is not None,
                 },
+                "pca9685": {
+                    "ok": self.pca9685_ok,
+                    "addr": self.pca9685_addr,
+                    "sda": self.pca9685_sda,
+                    "scl": self.pca9685_scl,
+                },
+                "cameras": {
+                    "fov": dict(self.cameras["fov"]),
+                    "left": dict(self.cameras["left"]),
+                    "right": dict(self.cameras["right"]),
+                    "stereo_ok": bool(
+                        self.cameras["left"]["connected"]
+                        and self.cameras["right"]["connected"]
+                    ),
+                },
                 "heartbeat": {
                     "count": self.last_heartbeat,
                     "last_ts": self.last_heartbeat_ts,
@@ -730,6 +926,8 @@ class SubState:
                     "fix_quality": self.gps.fix_quality,
                     "satellites": self.gps.satellites,
                     "hdop": self.gps.hdop,
+                    "settling": self.gps_settling,
+                    "min_move_m": self._gps_min_move_m,
                     "track": list(self.gps_track),
                     "origin": (
                         {"lat": self.gps_track_origin[0], "lon": self.gps_track_origin[1]}
@@ -747,6 +945,8 @@ class SubState:
                 "ballast_aft_command": self.ballast_aft.command,
                 "ballast_command": self.ballast_fore.command,
                 "xbox": self.xbox.as_dict(),
+                "xbox_override_active": self.xbox_override_active,
+                "linked_flap_enabled": self.linked_flap_enabled,
                 "effective": self.effective_actuators.as_dict(),
                 "auto": self.auto_actuators.as_dict(),
                 "manual": self.manual_actuators.as_dict(),

@@ -6,7 +6,7 @@ Use this to confirm the Raspberry Pi and ESP32 firmware match before your first 
 
 ## Sub vehicle (GPIO UART or USB)
 
-Used by `sub_server.py` and `inference.py` (when `interface: sub`) → `src/esp_bridge.py`.  
+Used by `~/sub` (when `interface: sub`) → `src/esp_bridge.py`.  
 **Single serial owner:** `SubBridgeOutput` → `sub_state` → `esp_bridge` (no duplicate S/D/T client).
 
 ### Wiring
@@ -57,7 +57,7 @@ sub_serial:
 python scripts/probe_esp_uart.py
 
 # 2. Start sub dashboard
-python sub_server.py
+~/sub
 
 # 3. Open http://<pi-ip>:8080/sub/
 #    — ESP connected flag should go green
@@ -131,6 +131,6 @@ Full map: **`config/pins.yaml`**.
 
 ## Summary
 
-- **First sub test:** `probe_esp_uart.py` → `sub_server.py` → open `/sub/` → run pin checklist.
-- **First YOLO test:** `inference.py --web --timing` with trained `weights/best.pt` (when `interface: sub`).
+- **First sub test:** `probe_esp_uart.py` → `~/sub` → open `/sub/` → run pin checklist.
+- **First YOLO test:** `~/sub --yolo --timing` with trained `weights/best.pt` (when `interface: sub`).
 - **YOLO + sub:** layered auto motion — fins, aft steer, thruster, ballast height (`docs/GUIDE.md` §15).

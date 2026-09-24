@@ -1,31 +1,34 @@
 # Quick reference — yolo-project
+# Last updated: 24 September 2026
 
-## Activate venv
-cd ~/yolo-project && source .venv/bin/activate
+## Start stack (from anywhere)
+~/sub                              # dashboard + ESP + cameras (YOLO off)
+~/sub --yolo --backend hailo --timing   # YOLO at startup
+~/sub --help                       # all flags
 
-## YOLO inference (interface: sub in config — recommended)
-python inference.py --web --timing   # YOLO + ESP bridge + /sub/ dashboard
-python inference.py --headless       # SSH / no browser
-python inference.py --no-sub         # YOLO only, no sub stack
-python inference.py --quiet          # skip per-frame terminal table (default with --web/sub)
+Install once: ln -sf ~/yolo-project/sub ~/sub
 
-## Sub dashboard only
-python sub_server.py                 # no YOLO — ESP telemetry + actuators
-python scripts/test_telemetry.py     # simulated ESP data (UI dev)
+## Common flags
+~/sub --no-camera                  # dashboard only
+~/sub --serial-port /dev/ttyACM0
+~/sub --no-xbox --no-gps
+python scripts/test_telemetry.py   # simulated ESP data (UI dev)
 
 ## URLs
 http://<pi-ip>:8080/                 # YOLO MJPEG stream (/video_feed)
 http://<pi-ip>:8080/sub/             # sub dashboard (telemetry + control)
 
-## Auto mode (inference)
+## Auto mode (YOLO)
 Camera → controller (steer/tilt/drive + safety) → sub_motion.py:
   fins (gyro level) → aft steer → thruster → ballast (error_y height)
+  linked flap: fins oppose aft-steer axis (Xbox + YOLO)
 ESP: S2 … F … X …  and  B fore aft  via esp_bridge (single serial owner)
+B button: emergency stop (halt YOLO + zero actuators)
 
 ## Camera
 Expected: 640x480 MJPEG (FIT0819 endoscope). Startup logs fourcc=MJPG.
-Slow FPS? Use --web (headless), --timing, img_size: 320 in model.yaml.
-/sub/ dashboard: SSE live feed (/sub/api/stream) + MJPEG camera (/video_feed, ~15 FPS). No polling.
+Slow FPS? Use --timing, img_size: 320 in model.yaml.
+/sub/ dashboard: SSE live feed (/sub/api/stream) + MJPEG camera (/video_feed, ~15 FPS).
 
 vlc v4l2:///dev/video0 --v4l2-chroma=MJPG
 bash scripts/check_camera.sh
@@ -36,6 +39,6 @@ python scripts/probe_esp_uart.py
 ## Docs
 README.md          — project overview
 STATUS.md          — current status (what's done / in progress)
-docs/GUIDE.md      — full guide (§15 layered sub motion, §7 inference perf)
+docs/GUIDE.md      — full guide
 docs/ESP32_SERIAL.md
 config/hardware.yaml — approach: (safety), sub_motion: (auto actuators)

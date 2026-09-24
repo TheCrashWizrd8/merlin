@@ -14,14 +14,14 @@ if [[ "$ARCH" != "x86_64" ]]; then
 This script compiles .hef files. It must run on Linux x86_64, not $ARCH.
 
 On the PC:
-  1. Copy this project (or at least weights/best.pt and weights/gatebest.pt).
+  1. Copy this project (or at least weights/detect/best.pt and weights/gate/gatebest.pt).
   2. Install Hailo Dataflow Compiler 3.x from https://hailo.ai/developer-zone/
      (Hailo-8 / Hailo-8L — matches HailoRT 4.23 on the Pi).
   3. pip install ultralytics
      pip install /path/to/hailo_dataflow_compiler-*.whl
   4. bash scripts/compile_hailo_hef.sh
-  5. Copy weights/best_hailo_model/ and weights/gatebest_hailo_model/
-     back to the Pi (they must contain a .hef).
+  5. Copy weights/detect/*hailo* and weights/gate/*hailo* (must contain a .hef)
+     back to the Pi.
   6. On the Pi: set backend: hailo in config/model.yaml
 
 ONNX-only folders on the Pi are compiler input, not a runnable Hailo model.
@@ -36,9 +36,9 @@ fi
 
 if "$python_bin" -c "from hailo_sdk_client import ClientRunner" >/dev/null 2>&1; then
   echo "Using Ultralytics + Hailo DFC (hailo8l)"
-  "$python_bin" "$ROOT/scripts/export_model.py" --format hailo --weights "$ROOT/weights/best.pt"
-  "$python_bin" "$ROOT/scripts/export_model.py" --format hailo --weights "$ROOT/weights/gatebest.pt"
-  echo "Copy weights/*_hailo_model/ (with .hef) to the Pi and set backend: hailo"
+  "$python_bin" "$ROOT/scripts/export_model.py" --format hailo --weights "$ROOT/weights/detect/best.pt"
+  "$python_bin" "$ROOT/scripts/export_model.py" --format hailo --weights "$ROOT/weights/gate/gatebest.pt"
+  echo "Copy each model's hailo/ or *_hailo_model/ folder (with .hef) to the Pi and set backend: hailo"
   exit 0
 fi
 

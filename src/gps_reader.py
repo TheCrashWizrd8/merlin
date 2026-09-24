@@ -58,14 +58,12 @@ def _load_gps_config() -> dict:
 
 
 def _is_reserved_esp_port(path: str, esp_port: str = "") -> bool:
-    """Skip the ESP32 serial device — never skip a USB GPS, even on ttyACM0."""
+    """Skip a real ESP32 USB device. ttyACM0 in yaml is not enough — that
+    node is often a u-blox GPS when the ESP is unplugged.
+    """
     if is_gps_usb_device(path):
         return False
-    if is_esp_usb_device(path):
-        return True
-    if esp_port and realpath_port(path) == realpath_port(esp_port):
-        return not is_gps_usb_device(esp_port)
-    return False
+    return is_esp_usb_device(path)
 
 
 def _looks_like_nmea(line: bytes) -> bool:
@@ -312,7 +310,7 @@ class GpsReader:
         )
         if not found:
             self._scan_fails += 1
-            if self._scan_fails <= 2 or self._scan_fails % 10 == 0:
+            if self._scan_fails <= 2:
                 candidates = list_gps_candidates(
                     esp_port=self._esp_port,
                     prefer_port=self._prefer_port,
@@ -321,6 +319,8 @@ class GpsReader:
                     f"[gps] Still scanning ({self._scan_fails}). "
                     f"devices={candidates or 'none'} esp={self._esp_port or 'none'}"
                 )
+            elif self._scan_fails == 3:
+                print("[gps] No USB GPS yet — scanning quietly in the background")
             self._state.set_gps_scanning()
             return False
         self._scan_fails = 0
@@ -350,7 +350,7 @@ class GpsReader:
             if not self.device_online:
                 buf = b""
                 if not self._connect():
-                    time.sleep(self._scan_interval)
+                    self._stop.wait(self._scan_interval)
                     continue
 
             stale = (

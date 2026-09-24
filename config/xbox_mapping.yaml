@@ -1,5 +1,6 @@
 # ---------------------------------------------------------------------------
 # Xbox controller → sub actuator mapping
+#
 # Edit this file to change bindings without touching Python code.
 # Verify: python -m src.xbox_controller
 #
@@ -11,45 +12,122 @@
 # mapping_file: config/xbox_mapping.yaml
 
 sticks:
+
   left:
-    # Dual-axis aft steering (two servos at the stern)
-    aft_steer_y: x
-    aft_steer_z: y
-    invert_y: true
+    # Aft steering / actuator movement
+    # Left/right = X movement
+    # Up/down    = Y movement
+    aft_steer_x: x
+    aft_steer_y: y
+    invert_y: false
+    invert_x: false
+
   right:
-    # Polar fin mapping — bearing from up, +clockwise (degrees):
-    #   up (0°)     both fins up
-    #   down (±180°) both fins down
-    #   -45° (up-left)   left fin up
-    #   -135° (down-left) left fin down
-    #   45° (up-right)   right fin up
-    #   135° (down-right) right fin down
-    #   ±90° (left/right) both fins neutral
-    mode: polar_fins
-    snap_degrees: 5   # ±5° hold at each keypoint; normal blend between windows
+    # Flap control
+    #
+    # Up    → both fore flaps up
+    # Down  → both fore flaps down
+    # Left  → roll left using fore flaps
+    # Right → roll right using fore flaps
+    #
+    # Neutral → flaps neutral
+    mode: flaps
+
+    up: both_flaps_up
+    down: both_flaps_down
+    left: roll_left
+    right: roll_right
+
 
 buttons:
   # SDL / Linux joystick button indices (Xbox over Bluetooth)
-  a: 0
-  b: 1
-  lb: 4   # L1 — drain ballast
+
+  rb: 5   # RB — ballast up
+  lb: 4   # LB — ballast down
+
+  # D-pad
+  dpad_left: dpad_left
+  dpad_up: dpad_up
+  dpad_down: dpad_down
+
 
 triggers:
-  lt: fill   # L2 — fill ballast (analog 0..1)
+  # Thrust
+  rt: forward
+  lt: reverse
+
 
 ballast:
-  # No d-pad  → both tanks
-  # D-pad up  + L1/L2 → fore tank only
-  # D-pad down + L1/L2 → aft tank only
-  drain_button: lb
-  fill_trigger: lt
-  drain_magnitude: 1.0
+  # Normal operation:
+  # RB → ballast up
+  # LB → ballast down
+  #
+  # D-pad up + RB/LB:
+  #   RB → fore ballast up
+  #   LB → fore ballast down
+  #
+  # D-pad down + RB/LB:
+  #   RB → aft ballast up
+  #   LB → aft ballast down
+
+  up_button: rb
+  down_button: lb
+
   dpad_up_tank: fore
   dpad_down_tank: aft
   default_tank: both
 
+  up_magnitude: 1.0
+  down_magnitude: 1.0
+
+
 thruster:
-  forward_button: rb
-  reverse_button: rt
+  # RT → forward thrust
+  # LT → reverse thrust
+
+  forward_trigger: rt
+  reverse_trigger: lt
+
   forward_magnitude: 1.0
   reverse_magnitude: 1.0
+
+
+flaps:
+  # Right stick
+  #
+  # Up    → both flaps up
+  # Down  → both flaps down
+  # Left  → roll left using fore flaps
+  # Right → roll right using fore flaps
+
+  mode: normal
+
+  both_up_axis: y
+  roll_axis: x
+
+  invert_y: false
+  invert_x: false
+
+
+emergency_stop:
+  # B — immediately stop YOLO, zero all actuators/ballast, hand control to the pad.
+  enabled: true
+  button: b
+
+modes:
+  # Clicking LEFT on the D-pad enables linked flap mode.
+
+  linked_flap:
+    button: dpad_left   # press to toggle linked flap on/off
+    toggle: true
+    default_on: true    # fins oppose aft steer axis (Xbox + YOLO auto); not tied to RT/LT
+    gain: 1.0
+    replace_stick: true # when linked: RS flaps off; fins follow aft steer only
+    angle_deadzone: 0.05
+
+
+leak:
+  # When a leak is detected, continuously rumble the controller motors.
+
+  rumble_on_leak: true
+  rumble_constant: true

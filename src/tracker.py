@@ -111,7 +111,12 @@ class Tracker:
         cx_frame, cy_frame = w // 2, h // 2
 
         # Filter to apples only
-        apples = [d for d in detections if d.label.lower() == apple_label.lower()]
+        apples = [
+            d for d in detections
+            if d.label.lower() == apple_label.lower()
+            and (d.x2 - d.x1) >= 2
+            and (d.y2 - d.y1) >= 2
+        ]
 
         if not apples:
             return TrackResult(apple_detected=False)

@@ -5,7 +5,12 @@ from pathlib import Path
 
 import numpy as np
 
-from src.detector import Detection, mask_centroid_and_area, _pt_is_newer_than_export
+from src.detector import (
+    Detection,
+    mask_centroid_and_area,
+    resolve_inference_task,
+    _pt_is_newer_than_export,
+)
 
 
 def test_mask_centroid_square():
@@ -40,3 +45,22 @@ def test_pt_newer_than_export(tmp_path: Path):
     older = (export / "model.bin").stat().st_mtime - 10
     os.utime(export / "model.bin", (older, older))
     assert _pt_is_newer_than_export(pt, export)
+
+
+def test_resolve_task_auto_follows_hef_segment():
+    task, err = resolve_inference_task("auto", None, "segment")
+    assert task == "segment"
+    assert err is None
+
+
+def test_resolve_task_hef_only_overrides_template_detect():
+    task, err = resolve_inference_task("detect", None, "segment")
+    assert task == "segment"
+    assert err is None
+
+
+def test_resolve_task_stale_export_with_pt_errors():
+    task, err = resolve_inference_task("detect", "detect", "segment")
+    assert task == "detect"
+    assert err
+    assert "segment" in err

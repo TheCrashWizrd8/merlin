@@ -19,7 +19,15 @@ from typing import Any
 import yaml
 
 from src.sub_state import SubActuators, XboxState, get_sub_state
-from src.xbox_mapping import load_mapping_config, map_xbox_ballast, map_xbox_to_actuators
+from src.xbox_mapping import (
+    check_emergency_stop,
+    linked_flap_default_enabled,
+    load_mapping_config,
+    map_xbox_ballast,
+    map_xbox_to_actuators,
+    update_linked_flap_toggle,
+    xbox_input_active,
+)
 from src.xbox_stick_filter import StickFilter, StickFilterConfig
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "hardware.yaml"
@@ -51,6 +59,11 @@ def _load_xbox_config() -> dict[str, Any]:
         "smoothing_alpha": float(xbox.get("smoothing_alpha", 0.0)),
         "stick_hold_ms": float(xbox.get("stick_hold_ms", 120.0)),
         "release_alpha": float(xbox.get("release_alpha", 0.55)),
+        "override_auto": bool(xbox.get("override_auto", True)),
+        "override_hold_s": float(xbox.get("override_hold_s", 0.4)),
+        "override_actuator_threshold": float(
+            xbox.get("override_actuator_threshold", 0.12)
+        ),
     }
 
 
@@ -315,6 +328,17 @@ class XboxController:
             active_threshold=max(0.05, self.deadzone * 0.45),
         )
         self._ballast_active = False
+        self._override_auto = bool(cfg.get("override_auto", True))
+        self._override_hold_s = float(cfg.get("override_hold_s", 0.4))
+        self._override_actuator_threshold = float(
+            cfg.get("override_actuator_threshold", 0.12)
+        )
+        self._override_hold_until = 0.0
+        self._linked_flap_enabled = linked_flap_default_enabled(self._mapping)
+        self._linked_flap_btn_prev = False
+        self._estop_btn_prev = False
+        self._state.set_linked_flap_enabled(self._linked_flap_enabled)
+        self._rumble_active = False
 
     def _apply_stick_filter(self, xbox: XboxState) -> XboxState:
         lx, ly, rx, ry = self._stick_filter.filter(
@@ -347,14 +371,129 @@ class XboxController:
         ok = self._pad.open()
         if ok:
             print(f"[xbox] Connected: {self._pad.name}")
+            if self._state.get_control_mode() == "manual":
+                self._state.set_control_mode("xbox")
         return ok
 
     def _on_disconnect(self) -> None:
         self._stick_filter.reset()
         self._ballast_active = False
+        self._override_hold_until = 0.0
+        self._linked_flap_enabled = linked_flap_default_enabled(self._mapping)
+        self._linked_flap_btn_prev = False
+        self._estop_btn_prev = False
+        self._stop_rumble()
+        self._state.set_xbox_override_active(False)
+        self._state.set_linked_flap_enabled(self._linked_flap_enabled)
         self._state.update_xbox(XboxState(connected=False))
         self._state.set_xbox_actuators(SubActuators())
+        if self._state.get_control_mode() == "xbox":
+            self._state.set_control_mode("manual")
         self._state.recompute_effective()
+
+    def _apply_emergency_stop(self) -> None:
+        """B button: stop YOLO, zero outputs, switch to pad control."""
+        try:
+            from src.inference_service import get_inference_service
+
+            inf = get_inference_service()
+            if inf.snapshot().get("running"):
+                inf.stop(preserve_control_mode=True)
+        except Exception as exc:
+            print(f"[xbox] emergency stop — inference: {exc}")
+
+        self._ballast_active = False
+        self._override_hold_until = 0.0
+        self._state.halt_all_movement()
+
+        mode = "xbox" if self._pad.connected else "manual"
+        self._state.set_control_mode(mode)
+        try:
+            from src.control_source import set_mode as set_yolo_mode
+
+            set_yolo_mode("manual")
+        except Exception:
+            pass
+        self._state.recompute_effective()
+        print("[xbox] Emergency stop — YOLO off, all movement zeroed")
+
+    def _update_override_state(
+        self, filtered: XboxState, actuators: SubActuators
+    ) -> bool:
+        """Track deliberate pad input during auto mode (post deadzone + stick filter)."""
+        if not self._override_auto or self._state.get_control_mode() != "auto":
+            self._override_hold_until = 0.0
+            self._state.set_xbox_override_active(False)
+            return False
+
+        now = time.monotonic()
+        if xbox_input_active(
+            filtered,
+            actuators,
+            config=self._mapping,
+            trigger_deadzone=self.trigger_deadzone,
+            actuator_threshold=self._override_actuator_threshold,
+        ):
+            self._override_hold_until = now + self._override_hold_s
+
+        active = self._pad.connected and now < self._override_hold_until
+        self._state.set_xbox_override_active(active)
+        return active
+
+    def _stop_rumble(self) -> None:
+        joy = self._pad._joystick
+        if joy is None and self._pad._controller is not None:
+            try:
+                joy = self._pad._controller.as_joystick()
+            except Exception:
+                joy = None
+        if joy is None:
+            self._rumble_active = False
+            return
+        try:
+            if hasattr(joy, "stop_rumble"):
+                joy.stop_rumble()
+            elif self._rumble_active and hasattr(joy, "rumble"):
+                joy.rumble(0.0, 0.0, 0)
+        except Exception:
+            pass
+        self._rumble_active = False
+
+    def _apply_leak_rumble(self) -> None:
+        leak_cfg = self._mapping.get("leak") or {}
+        if not leak_cfg.get("rumble_on_leak"):
+            self._stop_rumble()
+            return
+        with self._state._lock:
+            leak = self._state.leak_triggered
+        joy = self._pad._joystick
+        if joy is None and self._pad._controller is not None:
+            try:
+                joy = self._pad._controller.as_joystick()
+            except Exception:
+                joy = None
+        if joy is None or not hasattr(joy, "rumble"):
+            return
+        try:
+            if leak:
+                duration = 0 if leak_cfg.get("rumble_constant") else 500
+                joy.rumble(0.85, 0.85, duration)
+                self._rumble_active = True
+            elif self._rumble_active:
+                self._stop_rumble()
+        except Exception:
+            self._rumble_active = False
+
+    def _apply_xbox_ballast(self, filtered: XboxState) -> None:
+        fore, aft = map_xbox_ballast(
+            filtered, self._mapping, trigger_deadzone=self.trigger_deadzone
+        )
+        if fore != 0.0 or aft != 0.0:
+            self._state.set_ballast_commands(fore, aft)
+            self._ballast_active = True
+        elif self._ballast_active:
+            self._state.set_ballast_commands(0.0, 0.0)
+            self._ballast_active = False
 
     def _drain_hotplug_events(self) -> bool:
         """Return True if a connect/disconnect event was handled."""
@@ -363,7 +502,11 @@ class XboxController:
 
         pygame = self._pad._pygame
         changed = False
-        for event in pygame.event.get():
+        try:
+            events = pygame.event.get()
+        except Exception:
+            return False
+        for event in events:
             if event.type == pygame.JOYDEVICEADDED:
                 changed = True
                 if not self._pad.connected:
@@ -378,50 +521,84 @@ class XboxController:
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
-            self._drain_hotplug_events()
-
-            now = time.monotonic()
-            if not self._pad.connected:
-                if now - self._last_scan >= self.scan_interval:
-                    self._last_scan = now
-                    if not self._try_connect():
-                        self._on_disconnect()
-                        time.sleep(self.scan_interval)
-                        continue
-
             try:
-                xbox = self._pad.read()
+                self._poll_once()
             except Exception as exc:
-                print(f"[xbox] Read error: {exc}")
-                self._pad.close()
+                print(f"[xbox] Poll error: {exc}")
+                try:
+                    self._pad.close()
+                except Exception:
+                    pass
                 self._on_disconnect()
-                time.sleep(1.0)
-                continue
+                self._stop.wait(1.0)
 
-            if not xbox.connected:
-                self._pad.close()
-                self._on_disconnect()
-                time.sleep(1.0)
-                continue
+    def _poll_once(self) -> None:
+        self._drain_hotplug_events()
 
-            self._state.update_xbox(xbox)
-            filtered = self._apply_stick_filter(xbox)
-            actuators = map_xbox_to_actuators(filtered, self.deadzone, self._mapping)
-            self._state.set_xbox_actuators(actuators)
+        now = time.monotonic()
+        if not self._pad.connected:
+            if now - self._last_scan >= self.scan_interval:
+                self._last_scan = now
+                if not self._try_connect():
+                    self._on_disconnect()
+                    self._stop.wait(self.scan_interval)
+                    return
 
-            if self._state.get_control_mode() == "xbox":
-                fore, aft = map_xbox_ballast(
-                    filtered, self._mapping, trigger_deadzone=self.trigger_deadzone
-                )
-                if fore != 0.0 or aft != 0.0:
-                    self._state.set_ballast_commands(fore, aft)
-                    self._ballast_active = True
-                elif self._ballast_active:
-                    self._state.set_ballast_commands(0.0, 0.0)
-                    self._ballast_active = False
-            self._state.recompute_effective()
+        try:
+            xbox = self._pad.read()
+        except Exception as exc:
+            print(f"[xbox] Read error: {exc}")
+            self._pad.close()
+            self._on_disconnect()
+            self._stop.wait(1.0)
+            return
 
+        if not xbox.connected:
+            self._pad.close()
+            self._on_disconnect()
+            self._stop.wait(1.0)
+            return
+
+        self._state.update_xbox(xbox)
+        estop, self._estop_btn_prev = check_emergency_stop(
+            xbox,
+            button_was_pressed=self._estop_btn_prev,
+            config=self._mapping,
+        )
+        if estop:
+            self._apply_emergency_stop()
             time.sleep(self.poll_interval)
+            return
+
+        filtered = self._apply_stick_filter(xbox)
+        self._linked_flap_enabled, self._linked_flap_btn_prev = update_linked_flap_toggle(
+            filtered,
+            enabled=self._linked_flap_enabled,
+            button_was_pressed=self._linked_flap_btn_prev,
+            config=self._mapping,
+        )
+        self._state.set_linked_flap_enabled(self._linked_flap_enabled)
+
+        actuators = map_xbox_to_actuators(
+            filtered,
+            self.deadzone,
+            self._mapping,
+            linked_flap_enabled=self._linked_flap_enabled,
+            trigger_deadzone=self.trigger_deadzone,
+        )
+        self._state.set_xbox_actuators(actuators)
+        self._apply_leak_rumble()
+
+        mode = self._state.get_control_mode()
+        override = self._update_override_state(filtered, actuators)
+        if mode == "xbox" or (mode == "auto" and override):
+            self._apply_xbox_ballast(filtered)
+        elif self._ballast_active:
+            self._state.set_ballast_commands(0.0, 0.0)
+            self._ballast_active = False
+        self._state.recompute_effective()
+
+        time.sleep(self.poll_interval)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -453,7 +630,7 @@ def get_xbox_controller(autostart: bool = False) -> XboxController:
 def connect_xbox(*, autostart: bool = True) -> XboxController:
     """
     Simple entry point: start background polling and auto-connect when a pad appears.
-    Used by sub_server.py and inference.py --sub (respects xbox.enabled in config).
+    Used by ~/sub / run.py (respects xbox.enabled in config).
     """
     ctrl = get_xbox_controller(autostart=autostart)
     if autostart and not (ctrl._thread and ctrl._thread.is_alive()):
@@ -505,10 +682,13 @@ def _cli_main() -> int:
             tr = xbox["triggers"]
             btns = xbox.get("buttons") or {}
             pressed = [k for k in ("a", "b", "lb", "dpad_up", "dpad_down") if btns.get(k)]
+            linked = "LINK" if snap.get("linked_flap_enabled") else "free"
             line = (
                 f"  LS ({ls['x']:+.2f},{ls['y']:+.2f})  RS ({rs['x']:+.2f},{rs['y']:+.2f})  "
-                f"LT {tr.get('lt', 0):.2f}  thr {mapped['thrusterX']:+.2f}  "
+                f"LT {tr.get('lt', 0):.2f} RT {tr.get('rt', 0):.2f}  "
+                f"thr {mapped['thrusterX']:+.2f}  "
                 f"fins L{mapped['finLeft']:+.2f}/R{mapped['finRight']:+.2f}  "
+                f"flap {linked}  "
                 f"B fore{snap['ballast_fore_command']:+.2f}/aft{snap['ballast_aft_command']:+.2f}"
             )
             if pressed:

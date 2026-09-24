@@ -38,6 +38,15 @@ PROJECT_ROOT = Path(__file__).parent.parent
 HARDWARE_PATH = PROJECT_ROOT / "config" / "hardware.yaml"
 
 
+def _optional_int(value, *, default: int = 0) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class StereoConfig:
     """Physical + matching settings for a two-camera rig."""
@@ -45,6 +54,9 @@ class StereoConfig:
     enabled: bool = False
     left_device: int | str = 2
     right_device: int | str = 1
+    fov_device: int | str | None = None
+    fov_width: int = 0   # 0 = auto (largest MJPEG mode)
+    fov_height: int = 0
     baseline_m: float = 0.16
     fov_h_deg: float = 67.0
     fov_is_diagonal: bool = True
@@ -52,6 +64,8 @@ class StereoConfig:
     match_max_dy_px: int = 40
     min_disparity_px: float = 2.0
     range_scale: float = 1.0
+    # 1 = both cameras every frame. 2 = left every frame, right every other.
+    detect_stride: int = 1
 
 
 @dataclass(frozen=True)
@@ -82,6 +96,9 @@ def load_stereo_config(path: Path = HARDWARE_PATH) -> StereoConfig:
         enabled=num >= 2,
         left_device=cams.get("left_device", 2),
         right_device=cams.get("right_device", 1),
+        fov_device=cams.get("fov_device"),
+        fov_width=_optional_int(cams.get("fov_width"), default=0),
+        fov_height=_optional_int(cams.get("fov_height"), default=0),
         baseline_m=baseline_cm / 100.0,
         fov_h_deg=float(cams.get("fov_h_deg", 67.0)),
         fov_is_diagonal=bool(cams.get("fov_is_diagonal", True)),
@@ -89,6 +106,7 @@ def load_stereo_config(path: Path = HARDWARE_PATH) -> StereoConfig:
         match_max_dy_px=int(cams.get("match_max_dy_px", 40)),
         min_disparity_px=float(cams.get("min_disparity_px", 2.0)),
         range_scale=float(cams.get("range_scale", 1.0) or 1.0),
+        detect_stride=max(1, int(cams.get("detect_stride", 1) or 1)),
     )
 
 
@@ -120,7 +138,7 @@ def focal_length_px(
 def pair_tracks(
     left: TrackResult,
     right: TrackResult,
-    max_dy_px: int,
+    max_dy_px: int | float,
 ) -> bool:
     """
     True if both cameras have an apple and the bbox centres line up
@@ -129,6 +147,14 @@ def pair_tracks(
     if not left.apple_detected or not right.apple_detected:
         return False
     return abs(left.target_y - right.target_y) <= max_dy_px
+
+
+def match_max_dy_px(cfg: StereoConfig, frame_height: int) -> int:
+    """``match_max_dy_px`` is defined at 480p; scale it with capture height."""
+    base = max(1, int(cfg.match_max_dy_px))
+    if frame_height <= 0:
+        return base
+    return max(base, int(round(base * frame_height / 480.0)))
 
 
 def triangulate(
@@ -151,7 +177,8 @@ def triangulate(
         return StereoResult(ok=False, reason="left_miss")
     if not right.apple_detected:
         return StereoResult(ok=False, reason="right_miss")
-    if not pair_tracks(left, right, cfg.match_max_dy_px):
+    max_dy = match_max_dy_px(cfg, frame_height)
+    if not pair_tracks(left, right, max_dy):
         return StereoResult(
             ok=False,
             reason=f"y_mismatch dy={abs(left.target_y - right.target_y)}px",
@@ -237,8 +264,8 @@ def fuse_tracks(left: TrackResult, right: TrackResult, paired: bool) -> TrackRes
     Build the track used for steering / tilt.
 
     When both cameras see a matched apple, average the normalised errors
-    so control sits on the stereo midpoint.  Bbox size is averaged too so
-    mono-style proximity is not tied to one camera only.
+    so control sits on the stereo midpoint.  Bbox size is averaged for HUD
+    only; drive proximity uses stereo triangulation, not area.
     """
     if paired and left.apple_detected and right.apple_detected:
         return TrackResult(
@@ -285,12 +312,15 @@ def compose_side_by_side(
         pad = height - rh
         right_bgr = cv2.copyMakeBorder(right_bgr, 0, pad, 0, 0, cv2.BORDER_CONSTANT)
     canvas = np.hstack((left_bgr, right_bgr))
+    scale = max(1.0, height / 480.0)
+    font = 0.8 * scale
+    thick = max(2, int(round(2 * scale)))
     cv2.putText(
-        canvas, left_label, (8, 28),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2, cv2.LINE_AA,
+        canvas, left_label, (8, max(28, int(round(28 * scale)))),
+        cv2.FONT_HERSHEY_SIMPLEX, font, (0, 220, 255), thick, cv2.LINE_AA,
     )
     cv2.putText(
-        canvas, right_label, (lw + 8, 28),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2, cv2.LINE_AA,
+        canvas, right_label, (lw + 8, max(28, int(round(28 * scale)))),
+        cv2.FONT_HERSHEY_SIMPLEX, font, (0, 220, 255), thick, cv2.LINE_AA,
     )
     return canvas
