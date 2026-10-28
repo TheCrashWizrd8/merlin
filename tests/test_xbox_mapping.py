@@ -1,6 +1,7 @@
 """Tests for config/xbox_mapping.yaml → actuator mapping."""
 
 from src.sub_state import XboxState
+from src.xbox_controller import scale_trigger_axis, sdl_trigger_axis
 from src.xbox_mapping import (
     check_emergency_stop,
     linked_flap_default_enabled,
@@ -34,6 +35,29 @@ def test_load_mapping_includes_new_sections():
     assert cfg["ballast"].get("up_button") == "rb"
 
 
+def test_sdl_trigger_release_is_off_and_half_is_half():
+    assert sdl_trigger_axis(0.0) == 0.0
+    assert abs(sdl_trigger_axis(16384) - 0.5) < 0.02
+    assert sdl_trigger_axis(32767) == 1.0
+    assert sdl_trigger_axis(-32768) == 0.0
+
+
+def test_trigger_resting_at_zero_is_off():
+    pressed, rest = scale_trigger_axis(1.0, None)
+    assert pressed == 1.0
+    released, rest = scale_trigger_axis(0.0, rest)
+    assert released == 0.0
+
+
+def test_trigger_resting_at_minus_one_is_off():
+    rest_v, rest = scale_trigger_axis(-1.0, None)
+    assert rest_v == 0.0
+    full, rest = scale_trigger_axis(1.0, rest)
+    assert full == 1.0
+    half, rest = scale_trigger_axis(0.0, rest)
+    assert abs(half - 0.5) < 0.02
+
+
 def test_rt_lt_thruster_mapping():
     xbox = _xbox(triggers={"lt": 0.0, "rt": 0.9})
     act = map_xbox_to_actuators(xbox, deadzone=0.05, trigger_deadzone=0.05)
@@ -42,6 +66,10 @@ def test_rt_lt_thruster_mapping():
     xbox = _xbox(triggers={"lt": 0.9, "rt": 0.0})
     act = map_xbox_to_actuators(xbox, deadzone=0.05, trigger_deadzone=0.05)
     assert act.thruster_x < -0.8
+
+    xbox = _xbox(triggers={"lt": 1.0, "rt": 0.4})
+    act = map_xbox_to_actuators(xbox, deadzone=0.05, trigger_deadzone=0.05)
+    assert act.thruster_x > 0.2
 
 
 def test_rb_lb_ballast_both_tanks():
@@ -186,10 +214,67 @@ def test_deliberate_stick_counts_as_active():
 
 
 def test_left_stick_aft_steer_axes():
+    # Horizontal wins when both components are present: only aft Y moves.
     xbox = _xbox(left_stick_x=0.8, left_stick_y=-0.5)
     act = map_xbox_to_actuators(xbox, deadzone=0.05, linked_flap_enabled=False)
     assert act.aft_steer_y > 0.7
-    assert act.aft_steer_z < -0.4
+    assert abs(act.aft_steer_z) < 0.05
+
+
+def test_left_stick_axes_move_one_aft_servo():
+    left = map_xbox_to_actuators(
+        _xbox(left_stick_x=-0.9, left_stick_y=0.35),
+        deadzone=0.05,
+        linked_flap_enabled=False,
+    )
+    assert left.aft_steer_y < -0.8
+    assert abs(left.aft_steer_z) < 0.05
+
+    up = map_xbox_to_actuators(
+        _xbox(left_stick_x=0.4, left_stick_y=-0.9),
+        deadzone=0.05,
+        linked_flap_enabled=False,
+    )
+    assert up.aft_steer_z < -0.8
+    assert abs(up.aft_steer_y) < 0.05
+
+
+def test_aft_stick_axes_independent_without_legacy_cross_fallback():
+    """If aft_steer_x is omitted, aft Y must not fall back to aft_steer_y axis (same as Z)."""
+    cfg = load_mapping_config()
+    sticks = dict(cfg.get("sticks") or {})
+    left = dict(sticks.get("left") or {})
+    left.pop("aft_steer_x", None)
+    left.pop("aft_y_stick_axis", None)
+    left["aft_steer_y"] = "y"
+    left["aft_steer_z"] = "y"
+    sticks["left"] = left
+    cfg = dict(cfg)
+    cfg["sticks"] = sticks
+    x_only = map_xbox_to_actuators(
+        _xbox(left_stick_x=0.9, left_stick_y=0.0),
+        deadzone=0.05,
+        config=cfg,
+        linked_flap_enabled=False,
+    )
+    y_only = map_xbox_to_actuators(
+        _xbox(left_stick_x=0.0, left_stick_y=-0.9),
+        deadzone=0.05,
+        config=cfg,
+        linked_flap_enabled=False,
+    )
+    assert abs(x_only.aft_steer_y) > 0.7
+    assert abs(x_only.aft_steer_z) < 0.05
+    assert abs(y_only.aft_steer_z) > 0.7
+    assert abs(y_only.aft_steer_y) < 0.05
+
+
+def test_aft_stick_per_axis_deadzone_avoids_cross_bleed():
+    """Mostly-horizontal stick must not deflect aft Z from circular deadzone scaling."""
+    xbox = _xbox(left_stick_x=0.92, left_stick_y=0.08)
+    act = map_xbox_to_actuators(xbox, deadzone=0.18, linked_flap_enabled=False)
+    assert act.aft_steer_y > 0.55
+    assert abs(act.aft_steer_z) < 0.05
 
 
 def test_emergency_stop_edge_detect():

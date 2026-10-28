@@ -1,0 +1,36 @@
+description: Ultralytics YOLOv8s-seg model trained on C:\Users\fluff\Downloads\training_system
+  2\training_system\datasets\combined\data.yaml
+author: Ultralytics
+date: '2026-09-28T01:47:38.159875+00:00'
+version: 8.4.164
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: segment
+head: Segment
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: ball_red
+  1: ball_green
+  2: ball_orange
+  3: ball_pink
+  4: gate
+  5: boat_benchy
+  6: boat_cargo
+  7: rock
+args:
+  data: coco128-seg.yaml
+  name: hailo8l
+  fraction: 1.0
+  conf: null
+  iou: 0.7
+  quantize: 8
+  simplify: true
+channels: 3
+end2end: false
+hailo_arch: hailo8l
+nms: false
+semantic_baked: false

@@ -21,3 +21,6 @@ pyserial>=3.5
 
 # Xbox controller (--sub mode, optional)
 pygame>=2.5.0
+
+# Pi leak/fault relay on GPIO 18 (gpiozero; preinstalled on Raspberry Pi OS)
+gpiozero>=2.0

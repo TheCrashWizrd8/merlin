@@ -50,29 +50,26 @@ Wire **SDA and SCL in parallel** to every module on the bus:
 
 | PCA9685 channel | Actuator |
 |-----------------|----------|
+| 0 | Thruster ESC (neutral arms, + forward, − reverse) |
 | 1 | Sonar rotate (HS-646WP) |
 | 2 | Aft steer X (aftSteerZ) |
 | 3 | Aft steer Y |
 | 4 | Fore fin left |
 | 5 | Fore fin right |
 
-### Thruster (L298N)
+### Thruster (ESC on PCA channel 0)
 
-| ESP32 GPIO | L298N pin |
-|------------|-----------|
-| 13 | IN1 |
-| 12 | IN2 |
-| 6 | Enable PWM |
+Blue Robotics Basic ESC on PCA ch0: **1500 µs** stop, **1900 / 1100 µs** forward/reverse, prescale **121**, 5 s software arm with RT/LT released. Operator steps, serial/`TEL esc`, and troubleshooting: **[docs/THRUSTER_ESC.md](../docs/THRUSTER_ESC.md)**.
 
 ### Ballast tanks (Makerverse Motor Driver 2 Channel)
 
 Each tank: **5 wires** — DIR, PWM, pot wiper (ADC), pot 3.3 V, pot GND.  
 Fill/drain is **on/off** via DIR + PWM enable (no speed control).
 
-| Tank | DIR GPIO | PWM GPIO | Pot ADC |
-|------|----------|----------|---------|
-| Fore (A) | 16 (DIR A) | 15 (PWM A) | 10 |
-| Aft (B) | 4 (DIR B) | 5 (PWM B) | 3 (IO3) |
+| Tank | DIR GPIO | PWM GPIO | Pot ADC (wiper) |
+|------|----------|----------|-----------------|
+| Fore (A) | 16 (DIR A) | 15 (PWM A) | **6** (ADC1; not GPIO 3 strapping) |
+| Aft (B) | 4 (DIR B) | 5 (PWM B) | **2** (ADC1) |
 
 | State | DIR | PWM |
 |-------|-----|-----|
@@ -85,8 +82,9 @@ Fill/drain is **on/off** via DIR + PWM enable (no speed control).
 | ESP32 GPIO | Sensor |
 |------------|--------|
 | 1 (IO1 / D1) | 4-zone leak board (combined signal — any zone wet → HIGH) |
-| 2 | Battery ADC |
+| 2 | Aft ballast pot (ADC1) |
 | 7 | Depth ADC (or I2C depth later) |
+| 10 | Battery ADC |
 
 ---
 
@@ -98,11 +96,10 @@ Pi header pin 10 (GPIO15 RX) ◄── ESP GPIO 43 (TX)
 Pi GND ──────────────────────── ESP GND
 
 PCA9685 + GY-521 SDA/SCL ──► ESP GPIO 8/9 (shared I2C bus)
-Servo signals ─────────────► PCA9685 channels 1–5 (sonar on 1)
-L298N IN1/IN2/PWM ► ESP GPIO 13/12/6
-Ballast DIR/PWM ──► ESP GPIO 16/15 (fore A), 4/5 (aft B) + pot wiper on 10/3
+Servo signals ─────────────► PCA9685 channels 0–5 (ESC on 0, sonar on 1)
+Ballast DIR/PWM ──► ESP GPIO 16/15 (fore A), 4/5 (aft B) + pot wipers on **6** (fore) and **2** (aft)
 Leak sensor ──────► ESP GPIO 1 (IO1 / D1, 4-zone combined)
-Battery / depth ──► ESP ADC GPIO 2/7
+Battery / depth ──► ESP ADC GPIO 10 / 7
 Sonar TRIG/ECHO ──► ESP GPIO 17/18
 ```
 

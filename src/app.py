@@ -35,8 +35,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         )
     )
     web = p.add_argument_group("web / dashboard")
-    web.add_argument("--host", "--web-host", dest="host", default="0.0.0.0",
-                     help="Bind address (default 0.0.0.0)")
+    web.add_argument("--host", "--web-host", dest="host", default="::",
+                     help="Bind address (default :: — IPv4 + IPv6 dual-stack)")
     web.add_argument("--port", "--web-port", dest="port", type=int, default=8080,
                      help="HTTP port (default 8080)")
     web.add_argument("--web", action="store_true",
@@ -99,7 +99,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def _print_urls(host: str, port: int) -> None:
     print(f"[run] Dashboard: http://localhost:{port}/sub/")
     print(f"[run] Stream:    http://localhost:{port}/")
-    if host != "0.0.0.0":
+    print("[run] Use http:// (not https://) — the dashboard is plain HTTP on port", port)
+    if host not in ("0.0.0.0", "::"):
         if host not in ("127.0.0.1", "localhost") and not str(host).startswith("127."):
             print(f"[run] Dashboard (LAN): http://{host}:{port}/sub/")
         return
@@ -198,7 +199,19 @@ def main(argv: Optional[list[str]] = None) -> None:
         from src.esp_bridge import get_esp_bridge
         bridge = get_esp_bridge(port=args.serial_port, autostart=False)
         bridge.start()
-        print(f"[run] ESP bridge on {bridge.port}")
+        from src.serial_util import is_esp_usb_device, serial_by_id_path
+
+        port = bridge.port
+        by_id = serial_by_id_path(port) if port else port
+        esp_hint = is_esp_usb_device(port) if port else False
+        print(f"[run] ESP bridge on {port}")
+        if port and by_id != port:
+            print(f"[run]           ({by_id})")
+        if port and port.startswith("/dev/tty") and not esp_hint:
+            print(
+                "[run] WARN: port is not Espressif by-id — if dashboard stays offline, run:\n"
+                "       .venv/bin/python scripts/probe_sub_serial.py"
+            )
         esp_port = bridge.port
     elif args.no_esp or skip_peripherals:
         print("[run] ESP bridge skipped")
@@ -226,6 +239,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     elif args.no_xbox or skip_peripherals:
         print("[run] Xbox skipped")
 
+    # Drive the relay RCIN to idle at boot — otherwise GPIO18 floats until the
+    # first TEL leak/fault line, which never arrives while the ESP is offline.
+    from src.fault_indicator import connect_fault_indicator, is_fault_indicator_enabled
+    if is_fault_indicator_enabled():
+        connect_fault_indicator()
+
     from src.inference_service import get_inference_service
 
     yolo = get_inference_service()
@@ -246,8 +265,17 @@ def main(argv: Optional[list[str]] = None) -> None:
         force_mono=bool(args.no_stereo),
     )
     if not args.no_camera:
-        preview_dev = args.left_device or args.camera_device or 0
-        yolo.enable_idle_preview(preview_dev)
+        from src.camera import format_usb_camera_report, usb_capture_nodes
+
+        nodes = usb_capture_nodes()
+        if not nodes:
+            print("[run] No USB cameras detected — skipping camera preview.")
+            print(format_usb_camera_report())
+            print("[run] Bench without cameras: ~/sub --no-camera")
+            print("[run] After plugging cameras in: python scripts/camera_paths.py")
+        else:
+            preview_dev = args.left_device or args.camera_device or nodes[0]
+            yolo.enable_idle_preview(preview_dev)
     else:
         print("[run] Cameras skipped (--no-camera)")
 

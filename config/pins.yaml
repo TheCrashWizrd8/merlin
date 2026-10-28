@@ -1,173 +1,175 @@
-# ---------------------------------------------------------------------------
-# Pins & channel reference (Pi <-> ESP32 <-> PCA9685 + motor driver)
-#
-# This file is documentation/config only; it should not affect runtime
-# behavior until code starts consuming it.
-# ---------------------------------------------------------------------------
-
 version: 1
 generated_from:
-  - esp32/sub_rc/sub_rc.ino
-  - config/hardware.yaml
-
-# ---------------------------------------------------------------------------
-# Raspberry Pi ↔ ESP32 serial (sub stack)
-# ---------------------------------------------------------------------------
+- esp32/sub_rc/sub_rc.ino
+- config/hardware.yaml
 pi:
   gpio_uart:
-    device: "/dev/serial0"   # Pi 5: ttyAMA10; pins 14 TX / 15 RX
+    device: /dev/serial0
     baud_rate: 115200
-    tx_gpio: 14              # header pin 8  → ESP RX
-    rx_gpio: 15              # header pin 10 ← ESP TX
+    tx_gpio: 14
+    rx_gpio: 15
     setup_script: scripts/setup_pi_uart.sh
-
-# ---------------------------------------------------------------------------
-# ESP32 configuration
-# ---------------------------------------------------------------------------
 esp32:
   serial:
     baud_rate: 115200
     serial_timeout_ms: 8000
-
   i2c:
-    sda_gpio: 8     # NOT 29/30 — flash pins on ESP32-S3 (boot loop)
+    sda_gpio: 8
     scl_gpio: 9
-    # Shared bus — wire SDA/SCL in parallel to each module
     devices:
-      - name: PCA9685
-        address: 0x40
-        role: 16-channel servo driver (aft steer Y/Z, fore fins L/R)
-      - name: MPU6050
-        module: GY-521
-        address: 0x68    # AD0 → GND; use 0x69 if AD0 → 3.3V
-        role: gyro + accelerometer (pitch/roll telemetry)
-
-# ---------------------------------------------------------------------------
-# PCA9685 (servo driver)
-# ---------------------------------------------------------------------------
+    - name: PCA9685
+      address: 64
+      role: 16-channel servo driver (aft steer Y/Z, fore fins L/R)
+    - name: MPU6050
+      module: GY-521
+      address: 104
+      role: gyro + accelerometer (pitch/roll telemetry)
 pca9685:
-  i2c_address: 0x40    # all A0–A5 OPEN; closed A0=0x41 (Open=0 Closed=1)
+  i2c_address: 64
   pwm_frequency_hz: 50
   servo_tick_calibration:
     min_tick: 150
-    centre_tick: 375
+    centre_deg: 96.5
+    centre_tick: 391
     max_tick: 600
     tick_us: 4.8828
-    centre_us_approx: 1500
+    centre_us_approx: 1536
     min_us_approx: 1000
     max_us_approx: 2000
-
+  servo_center_ticks:
+    '2': 318
+    '3': 370
+    '4': 352
+    '5': 305
   channels:
+    fin_2:
+      channel: 2
+      role: sub_fin (S2 aftSteerZ)
+    fin_3:
+      channel: 3
+      role: sub_fin (S2 aftSteerY)
+    fin_4:
+      channel: 4
+      role: sub_fin (S2 finLeft)
+    fin_5:
+      channel: 5
+      role: sub_fin (S2 finRight)
+      invert_command: true
+    thruster_esc:
+      channel: 0
+      role: Blue Robotics Basic ESC (S2 X). 0 = 1500 µs stop, +1 ≈1900 µs, -1 ≈1100
+        µs
     steering_servo:
       channel: 0
-      role: sub_steering
+      role: alias thruster_esc
     camera_tilt_servo:
       channel: 1
-      role: sub_camera_tilt
+      role: sonar_sweep when ENABLE_SONAR
     aft_steer_y:
       channel: 3
-      role: sub_aft_steering_y
-    aft_steer_x:
-      channel: 2
-      role: sub_aft_steering_x
+      role: alias fin_3 (S2 aftY)
     aft_steer_z:
       channel: 2
-      role: sub_aft_steering_z
+      role: alias fin_2 (S2 aftZ)
+    aft_steer_x:
+      channel: 2
+      role: deprecated alias — same servo as aft_steer_z (ch2); not a third axis
     fin_left:
       channel: 4
-      role: sub_fore_fin_left
+      role: alias fin_4
     fin_right:
       channel: 5
-      role: sub_fore_fin_right
+      role: alias fin_5
     sonar_servo:
       channel: 1
       role: sub_sonar_sweep
-      sweep_deg: [-180, 180]
+      sweep_deg:
+      - -180
+      - 180
       step_deg: 5
-
-# ---------------------------------------------------------------------------
-# Motor driver (L298N) — thruster
-# ---------------------------------------------------------------------------
+  servo_travel_ticks:
+    '2':
+      min: 207
+      max: 399
+    '5':
+      min: 247
+      max: 396
+    '4':
+      min: 311
+      max: 409
+    '3':
+      min: 222
+      max: 448
 l298n:
   motor:
-    in1_gpio: 13    # moved off GPIO 4 (aft ballast DIR B)
-    in2_gpio: 12
-    pwm_gpio: 6
-    motor_pwm_freq_hz: 5000
-    motor_pwm_resolution_bits: 8
-
-  thruster:
     in1_gpio: 13
     in2_gpio: 12
-    pwm_gpio: 6
-
-# ---------------------------------------------------------------------------
-# Sub vehicle (matches esp32/sub_rc/sub_rc.ino)
-# ---------------------------------------------------------------------------
+    pwm_gpio: -1
+    motor_pwm_freq_hz: 5000
+    motor_pwm_resolution_bits: 8
+  thruster:
+    driver: pca9685_esc
+    channel: 0
+    note: GPIO 13/12/6 are held low and are not the thruster
 sub:
   pi_uart:
-    esp_rx: 44    # optional GPIO UART (USE_PI_UART=1)
+    esp_rx: 44
     esp_tx: 43
   usb_serial:
-    device: "/dev/ttyACM0"
+    device: /dev/ttyACM0
     baud_rate: 115200
-
   ballast:
-    # Makerverse Motor Driver 2 Channel — DIR/PWM mode (on/off fill/drain, no speed PWM)
-    # 5 wires per tank: DIR, PWM, pot wiper (ADC), pot 3.3V, pot GND
     driver: makerverse_2ch
     fore:
-      dir_gpio: 16    # DIR A (IO16)
-      pwm_gpio: 15    # PWM A (IO15)
-      pot_adc_gpio: 10    # ADC1; GPIO 0 is boot strap and will brick boot
+      dir_gpio: 16
+      pwm_gpio: 15
+      pot_adc_gpio: 6
     aft:
-      dir_gpio: 4     # DIR B (IO4)
-      pwm_gpio: 5     # PWM B (IO5)
-      pot_adc_gpio: 3     # IO3
-
+      dir_gpio: 4
+      pwm_gpio: 5
+      pot_adc_gpio: 2
   leaks:
-    board: 4_zone_combined      # one signal pin, four probes on the leak board
-    signal_gpio: 1    # IO1 / D1
-    gpios: [1]
-    zones: [fore, aft, electronics, battery]
+    board: 4_zone_combined
+    signal_gpio: 1
+    gpios:
+    - 1
+    zones:
+    - fore
+    - aft
+    - electronics
+    - battery
     active_high: true
-
   adc:
-    battery: 2
-    depth: 7    # moved off GPIO 3 (aft pot)
-
+    battery: 10
+    depth: 7
   imu:
     module: GY-521
     chip: MPU6050
-    i2c_address: 0x68
-    bus: i2c    # same SDA/SCL as PCA9685
+    i2c_address: 104
+    bus: i2c
   depth_i2c_addr: 0
-
   sonar:
     module: HC-SR04_or_JSN-SR04T
-    trig_gpio: 17    # moved off GPIO 15 (fore ballast PWM A)
-    echo_gpio: 18    # moved off GPIO 16 (fore ballast DIR A)
+    trig_gpio: 17
+    echo_gpio: 18
     max_range_m: 6.0
-    servo_channel: 1   # PCA9685 header 1 (HS-646WP)
-
+    servo_channel: 1
   axes:
     aftSteerY: float in [-1,1]
     aftSteerZ: float in [-1,1]
     thrusterX: float in [-1,1]
     finLeft: float in [-1,1]
     finRight: float in [-1,1]
-
-  serial_line_format: "S2 <aftSteerY> <aftSteerZ> F <finLeft> <finRight> X <thrusterX>\\n"
-  ballast_line_format: "B <fore> <aft>\\n"
-
+  serial_line_format: S2 <aftSteerY> <aftSteerZ> F <finLeft> <finRight> X <thrusterX>\n
+  ballast_line_format: B <fore> <aft>\n
   diagnostics:
-    ping: "PING"
-    pins: "PINS"
-    test_servo: "TEST S <ch 1-5> <val -1..1>"
-    test_thruster: "TEST T <val -1..1>"
-    test_ballast_fore: "TEST B fore fill|drain|stop"
-    test_ballast_aft: "TEST B aft fill|drain|stop"
-    cal_ballast: "CAL B <fore|aft> top|bottom|show|clear"
-    test_leaks: "TEST L"
-    test_adc: "TEST A"
-    help: "HELP"
+    ping: PING
+    pins: PINS
+    test_servo: TEST S <ch 1-5> <val -1..1>
+    test_thruster: TEST T <val -1..1>
+    test_ballast_fore: TEST B fore fill|drain|stop
+    test_ballast_aft: TEST B aft fill|drain|stop
+    cal_ballast: CAL B <fore|aft> top|bottom|show|clear
+    test_leaks: TEST L
+    test_adc: TEST A
+    help: HELP

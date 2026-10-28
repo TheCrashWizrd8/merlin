@@ -1,0 +1,2 @@
+python scripts/export_model.py --format hailo --weights weights/best.pt
+python scripts/export_model.py --format hailo --weights weights/gatebest.pt

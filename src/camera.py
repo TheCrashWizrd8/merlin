@@ -42,6 +42,14 @@ except Exception:
     except Exception:
         pass
 
+_warned_camera_notes: set[str] = set()
+
+
+def _log_camera_note_once(note: str) -> None:
+    if note and note not in _warned_camera_notes:
+        _warned_camera_notes.add(note)
+        print(f"[camera] {note}")
+
 
 def _v4l_device_path(device: int | str) -> Optional[str]:
     if isinstance(device, int) or (isinstance(device, str) and device.isdigit()):
@@ -351,6 +359,12 @@ def assign_camera_device(
             note = resolve_note
             return resolved, note
 
+    if (resolved and resolved.startswith(("/dev/v4l/by-path/", "/dev/v4l/by-id/"))
+            and not os.path.exists(resolved)):
+        # Configured to a specific USB port: wait for that port to re-enumerate
+        # instead of taking another camera's node (which strands both slots).
+        return resolved, resolve_note
+
     for node in capture:
         if not _device_excluded(node, exclude) and os.path.exists(node):
             if resolved and resolved != node:
@@ -441,9 +455,9 @@ class Camera:
         """Open the camera.  Raises CameraError if it cannot be opened."""
         if self._cap is not None:
             self.release()
-        path, note = resolve_camera_device(self.device)
+        path, note = assign_camera_device(self.device)
         if note:
-            print(f"[camera] {note}")
+            _log_camera_note_once(note)
         self.device = path or str(self.device)
         force_v4l2_mjpg(self.device, self.width, self.height, self.fps)
         force_v4l2_low_latency(self.device)

@@ -1,0 +1,175 @@
+# ---------------------------------------------------------------------------
+# Hardware configuration
+# ---------------------------------------------------------------------------
+# cameras: 1 = mono (bbox-size distance only).  2 = stereo triangulation.
+# UVC cameras often expose two /dev/video nodes each (capture + metadata).
+# There is often no /dev/video0; capture nodes are typically video1 and video2.
+# ---------------------------------------------------------------------------
+cameras:
+  num_cameras: 2
+  # Stable USB port paths (plug-order safe). Run: python scripts/camera_paths.py
+  left_device: /dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1:1.0-video-index0
+  # FOV / pilot USB port. 0×0 = auto max MJPEG for whatever camera is plugged in.
+  fov_device: /dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0
+  # Second stereo cam (port 2). FOV also uses port 2 — only one of stereo-right / FOV at a time on 2 cameras.
+  right_device: /dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0
+  fov_width: 0            # 0 = auto (largest MJPEG mode from v4l2)
+  fov_height: 0
+  baseline_cm: 16.0       # centre-to-centre spacing of the two lenses
+  fov_h_deg: 67.0         # camera spec FOV (degrees)
+  fov_is_diagonal: true   # USB specs are almost always diagonal, not horizontal
+  range_scale: 1.045      # after 1.045: 2.25→2.18, 0.50→0.49, 0.70→0.72 (apple)
+                          # Close / other shapes still run long (0.20→0.24, other 0.50→0.56)
+  # focal_length_px:      # optional override; otherwise computed from fov + width
+  match_max_dy_px: 40     # Y-match at 480p (auto-scaled at 1200p)
+  min_disparity_px: 2.0   # ignore near-zero disparity (object too far / unmatched)
+  detect_stride: 1        # both cameras every frame (Hailo is fast enough)
+
+# ---------------------------------------------------------------------------
+# interface: the physical layer used to drive actuators.
+#   "stub"  — no hardware; commands are printed only (default for dev)
+#   "sub"   — sub_rc over USB/GPIO UART via esp_bridge (S2/B/TEL)
+#
+# Set to "stub" while developing so inference.py runs without hardware.
+# ---------------------------------------------------------------------------
+interface: sub
+
+# Sub vehicle serial (Pi USB ↔ ESP32 sub_rc.ino)
+sub_serial:
+  port: "/dev/ttyACM0"  # ESP32-S3 USB when plugged in. A u-blox GPS often appears as ACM0 too — GPS scan will use it if it is not Espressif.
+  baud_rate: 115200
+
+# Ballast pump DIR/PWM only (slide-pot telemetry stays fore=GPIO6, aft=GPIO2).
+ballast:
+  swap_motor_commands: true   # dashboard/Xbox FORE → ESP aft driver, AFT → ESP fore driver
+
+# USB GPS — auto-detected on plug-in (no manual port required)
+gps:
+  enabled: true
+  scan_interval_s: 3.0
+  baud_rates: [9600, 115200, 38400, 4800, 57600]
+  track_max_points: 1000
+  min_move_m: 5.0            # ignore GPS wander below this (u-blox 7 is typically 2.5–5 m)
+  origin_settle_fixes: 12    # average this many fixes before locking the start point
+  # port: "/dev/serial/by-id/..."  # optional: prefer a specific device when several are connected
+
+# Sonar sweep (ESP PCA9685 ch4 + trigger/echo GPIO — see config/pins.yaml)
+sonar:
+  max_range_m: 6.0
+
+# Pi GPIO → relay module IN/RCIN (Omron G5LE-14 via driver). See docs/RELAY_G5LE.md
+fault_indicator:
+  enabled: true
+  gpio: 18
+  backend: pinctrl           # Pi OS: use pinctrl (gpioset often no-ops on Pi 5 header)
+  gpio_chip: auto            # only used if backend=gpioset
+  # NC LEDs off only when coil is energized (confirmed: idle=1 on gpiochip4 line 18)
+  idle_rcin_level: 1         # no leak — coil on — LEDs off
+  fault_rcin_level: 0        # TEL leak/fault — coil off — LEDs on
+  hold_refresh_s: 0.05       # lgpio fallback only; gpioset holds until state changes
+  sources:
+    leak: true               # TEL leak …
+    esp_fault: true          # TEL fault … (not NONE/UNKNOWN)
+
+# ---------------------------------------------------------------------------
+# Xbox / gamepad (sub stack only — started by sub_server.py or inference --sub)
+# Plug in via USB or pair over Bluetooth; no extra setup scripts required.
+# Verify: python -m src.xbox_controller
+# ---------------------------------------------------------------------------
+xbox:
+  enabled: true         # set false to skip gamepad polling (same as --no-xbox)
+  deadzone: 0.18        # circular stick deadzone (0–1); raise if sticks drift at rest
+  trigger_deadzone: 0.12 # ignore LT/RT below this (prevents ghost thrust/fill)
+  smoothing_alpha: 0.35  # EMA on sticks (0=off); use with stick_hold_ms below
+  stick_hold_ms: 120     # ignore brief zero reads while stick held (fixes BT jitter)
+  release_alpha: 0.55    # decay speed when stick returns to centre
+  poll_hz: 30           # read rate while connected
+  scan_interval_s: 2.0  # how often to retry when no pad is found
+  mapping_file: config/xbox_mapping.yaml
+  override_auto: true   # while YOLO runs (auto mode), deliberate pad input takes control
+  override_hold_s: 0.4  # keep override latched briefly after sticks return to centre
+  override_actuator_threshold: 0.12  # ignore mapped output below this (stick drift)
+  # device_index: 0     # omit to auto-pick (prefers Xbox-named devices)
+
+# ---------------------------------------------------------------------------
+# Control scaling
+# All ControlOutput values are in the range -1.0 to +1.0.
+# The sub stack maps these to actuator commands via sub_control.py.
+# ---------------------------------------------------------------------------
+deadzone: 0.02        # smaller deadzone = reacts to smaller target movement
+gain_steer: 1.8       # >1.0 makes steering respond more aggressively
+gain_tilt: 1.4        # >1.0 makes camera tilt react more strongly
+max_drive_speed: 0.9  # cap forward speed at 90%
+min_steer_command: 0.25  # keep steering moving until centred (no tiny pulses)
+min_tilt_command: 0.18   # keep tilt correcting until centred
+min_drive_command: 0.55  # keep sub moving; raise if thruster still barely moves
+min_detection_confidence: 0.45  # ignore weaker detections (jitter/noise)
+hold_missed_frames: 12          # persist last valid target briefly on dropouts
+smoothing_alpha: 0.30           # EMA smoothing (lower = smoother, slower)
+damping_steer: 0.22             # derivative damping for steering overshoot
+damping_tilt: 0.18              # derivative damping for tilt overshoot
+max_drive_when_turning: 0.55    # min drive while turning; raise for more power
+
+# ---------------------------------------------------------------------------
+# Size-based distance — MONO only. Stereo triangulation is the default
+# distance source (bbox area lies about oblique / asymmetric apples).
+# ---------------------------------------------------------------------------
+use_size_for_drive: false
+size_drive_far: 1.0             # D when apple is small in frame (far)
+size_drive_close: 0.0           # D when apple is large (close); bump to ~0.08 if motor needs min torque
+size_min_ratio: 0.008           # bbox/frame at/under this → size_drive_far (tune to your “far” HUD Size)
+size_max_ratio: 0.12            # bbox/frame at/over this → size_drive_close (tune to your “close” HUD Size)
+size_smoothing_alpha: 0.22
+size_curve: sqrt                # linear | sqrt
+
+# ---------------------------------------------------------------------------
+# Telemetry safety (does not steer — drive/steer/tilt come from the camera)
+# When interface: sub, inference passes live ESP data; only leak/battery affect drive.
+# ---------------------------------------------------------------------------
+approach:
+  use_telemetry: true
+  use_stereo_range: true   # Prox/D from stereo triangulation (bbox centres), not area
+  range_far_m: 1.8        # at/ beyond → prox 0 (far, full drive)
+  range_near_m: 0.35       # at/ within → prox 1 (close, creep)
+  range_hold_frames: 12    # keep last good range through brief pair dropouts
+  range_smoothing_alpha: 0.35
+  stop_on_leak: true
+  min_battery_v: 10.5
+  low_battery_drive_scale: 0.45
+  max_error_x_for_drive: 0.40   # steer toward centre before full forward
+  max_error_y_for_drive: 0.45
+
+# GY-521 mounting vs hull when the sub sits level (gravity should be +Z).
+# Sit the hull level when you start ~/sub so auto can lock the rest pose.
+# mount: auto | 0–6
+#   auto = pick the axis permutation that levels rest gravity
+#   0 = chip Z up (board flat)   1 = chip -X up   2 = chip +X up
+#   3 = chip +Y up               4 = chip -Y up
+#   5 / 6 = 90° yaw (swap pitch/roll) — only if the horizon still rolls
+#   when you pitch the hull (or pitches when you roll). Do not use yaw
+#   to "fix" a 90° rest pose; that is mount auto 1–4.
+# yaw: 0 | 90 | -90  applied after mount (swap pitch and roll).
+imu:
+  mount: auto
+  yaw: 0
+
+# ---------------------------------------------------------------------------
+# Sub motion layering (auto mode): fins → aft steer → thruster + ballast height
+# Camera drives intent; gyro levels body; ballast adjusts when apple is above/below.
+# error_y > 0 = apple below centre → fill (sink); error_y < 0 → drain (rise)
+# ---------------------------------------------------------------------------
+sub_motion:
+  level_roll_gain: 0.035          # fin command per degree roll
+  level_pitch_gain: 0.025
+  max_fin_command: 0.85
+  max_roll_deg: 12.0
+  max_pitch_deg: 10.0
+  require_level_for_steer: true
+  require_level_for_drive: true
+  use_ballast_for_height: true
+  ballast_height_gain: 0.55
+  ballast_error_deadzone: 0.12
+  ballast_max_command: 1.0
+  hold_missed_frames: 12           # keep steer/thruster/ballast through brief detection gaps
+  output_smoothing_alpha: 0.40     # EMA on actuator outputs; 0 = off
+  linked_flap: true                # YOLO/auto: fins oppose aft steer (same as Xbox linked flap)

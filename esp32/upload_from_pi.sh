@@ -5,7 +5,8 @@
 #   bash esp32/upload_from_pi.sh scan
 #   bash esp32/upload_from_pi.sh [BOARD] [PORT]
 #   bash esp32/upload_from_pi.sh [BOARD] [PORT] [SKETCH]
-#   bash esp32/upload_from_pi.sh --sketch sub_hw_test
+#   bash esp32/upload_from_pi.sh --free-port
+#   bash esp32/upload_from_pi.sh --free-port sub_hw_test
 # Prerequisites: Arduino CLI and ESP32 board support installed (see esp32/README.md).
 
 set -e
@@ -48,6 +49,12 @@ done
 if [ "${1:-}" = "--sketch" ]; then
   SKETCH_NAME="${2:-}"
   shift 2
+fi
+
+# Sketch name as first positional arg (e.g. --free-port sub_rc), not an FQBN.
+if [ -n "${1:-}" ] && [[ "${1}" != *:* ]] && [ -d "esp32/${1}" ]; then
+  SKETCH_NAME="${1}"
+  shift
 fi
 
 # --- Build and upload ---
@@ -139,7 +146,7 @@ if command -v fuser &>/dev/null && [ -n "${PORT}" ]; then
       echo "Error: ${PORT} is still busy (${holders})."
       echo "  pkill -f 'run.py|sub'"
       echo "  pkill -f sub_server.py"
-      echo "Or retry with:  bash esp32/upload_from_pi.sh --free-port ${BOARD} ${PORT} ${SKETCH_NAME}"
+      echo "Or retry with:  bash esp32/upload_from_pi.sh --free-port [SKETCH]"
       exit 1
     fi
     echo "Port ${PORT} is free."

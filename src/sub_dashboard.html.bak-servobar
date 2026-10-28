@@ -1,0 +1,3901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sub — Control</title>
+  <style>
+    :root {
+      --bg: #0b1117;
+      --panel: #141c27;
+      --panel2: #1a2433;
+      --border: #243044;
+      --text: #e6edf5;
+      --muted: #7d8da6;
+      --accent: #3b82f6;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --leak-flash: #ff1744;
+      /* Diagnostics sliders (HUD overrides these on .hud-viewport) */
+      --fader-h: 176px;
+      --fader-w: 42px;
+      --fader-radius: 10px;
+      --fader-bg: rgba(8, 13, 18, 0.95);
+      --fader-track-h: 14px;
+      --fader-thumb: 28px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+    }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100%;
+    }
+    body.leak-alarm {
+      animation: leak-bg 0.6s step-end infinite;
+    }
+    @keyframes leak-bg {
+      0%, 49% { background: #1a0508; }
+      50%, 100% { background: var(--bg); }
+    }
+    .badges { display: flex; gap: 0.35rem; flex-wrap: wrap; justify-content: center; }
+    .badge {
+      font-size: 0.72rem;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--muted);
+    }
+    .badge.ok { color: var(--ok); border-color: #166534; }
+    .badge.warn { color: var(--warn); border-color: #92400e; }
+    .badge.off { color: var(--muted); }
+    .badge.alarm {
+      color: #fff;
+      background: var(--danger);
+      border-color: var(--danger);
+      animation: pulse 0.8s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+    /* --- HUD first view (full viewport) --- */
+    .hud-viewport {
+      /* Fit entire HUD within 100dvh at 100% browser zoom (3 grid rows share height) */
+      --hud-u: clamp(12px, 1.55vh, 20px);
+      --gauge-h: clamp(68px, calc((100dvh - 7rem) / 3), 210px);
+      --ballast-unit-h: clamp(76px, calc(var(--gauge-h) * 1.05), 210px);
+      --fader-h: var(--gauge-h);
+      --fader-w: clamp(36px, calc(var(--gauge-h) * 0.28), 62px);
+      --fader-radius: clamp(8px, calc(var(--hud-u) * 0.45), 14px);
+      --fader-track-h: clamp(10px, calc(var(--hud-u) * 0.55), 16px);
+      --fader-thumb: clamp(22px, calc(var(--fader-h) * 0.16), 40px);
+      --hud-horizon: clamp(56px, calc(var(--fader-h) * 0.52), 120px);
+      --hud-stick: clamp(36px, calc(var(--fader-h) * 0.3), 68px);
+      position: relative;
+      width: 100%;
+      height: 100vh;
+      height: 100dvh;
+      max-height: 100dvh;
+      background: #000;
+      overflow: hidden;
+    }
+    .hud-camera {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      overflow: hidden;
+      background: #000;
+    }
+    .hud-camera img,
+    .hud-camera canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #000;
+      pointer-events: none;
+      object-fit: cover;
+      object-position: center;
+    }
+    .hud-frame {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      max-height: 100%;
+      z-index: 3;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto);
+      padding: calc(var(--hud-u) * 0.45);
+      gap: calc(var(--hud-u) * 0.35);
+      font-size: var(--hud-u);
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .hud-cell {
+      pointer-events: none;
+      min-width: 0;
+    }
+    .hud-cell > * { pointer-events: auto; }
+    .hud-tl { grid-area: 1 / 1; align-self: start; }
+    .hud-tc { grid-area: 1 / 2; justify-self: center; align-self: start; max-width: 100%; }
+    .hud-tr { grid-area: 1 / 3; justify-self: end; align-self: start; display: flex; gap: calc(var(--hud-u) * 0.35); align-items: flex-start; }
+    .hud-ml { grid-area: 2 / 1; align-self: center; padding-top: 0; }
+    .hud-mr { grid-area: 2 / 3; justify-self: end; align-self: center; }
+    .hud-bl { grid-area: 3 / 1; align-self: end; }
+    .hud-bc { grid-area: 3 / 2; justify-self: center; align-self: end; }
+    .hud-br { grid-area: 3 / 3; justify-self: end; align-self: end; display: flex; gap: calc(var(--hud-u) * 0.45); align-items: flex-end; }
+    .hud-overlay { position: static; pointer-events: none; }
+    .hud-overlay > * { pointer-events: auto; }
+    .hud-chip {
+      background: rgba(11, 17, 23, 0.92);
+      border: 1px solid rgba(36, 48, 68, 0.95);
+      border-radius: calc(var(--hud-u) * 0.5);
+      backdrop-filter: blur(8px);
+      padding: calc(var(--hud-u) * 0.55) calc(var(--hud-u) * 0.65);
+      width: max-content;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    .hud-top-left { }
+    .hud-top-right {
+      display: flex;
+      flex-direction: row;
+      gap: calc(var(--hud-u) * 0.35);
+      align-items: flex-start;
+    }
+    .hud-top-center { }
+    .hud-left { display: flex; gap: 0.4rem; }
+    .hud-right { display: flex; justify-content: flex-end; }
+    .hud-bottom-left { }
+    .hud-bottom-center {
+      display: flex;
+      align-items: center;
+      gap: calc(var(--hud-u) * 0.55);
+      flex-wrap: nowrap;
+    }
+    .hud-bottom-center.hud-chip {
+      padding: calc(var(--hud-u) * 0.55) calc(var(--hud-u) * 0.7);
+    }
+    .hud-bottom-right {
+      display: flex;
+      flex-direction: row;
+      gap: calc(var(--hud-u) * 0.35);
+      align-items: flex-end;
+    }
+    .hud-scroll-hint {
+      display: block;
+      width: 100%;
+      margin: 0;
+      font-size: 0.85rem;
+      color: rgba(230, 237, 245, 0.85);
+      text-decoration: none;
+      padding: 0.55rem 1rem;
+      background: #101820;
+      border: none;
+      border-top: 1px solid rgba(36, 48, 68, 0.9);
+      border-bottom: 1px solid rgba(36, 48, 68, 0.9);
+      font: inherit;
+      font-family: inherit;
+      cursor: pointer;
+      text-align: center;
+    }
+    .hud-scroll-hint:hover { color: #fff; background: rgba(20, 28, 39, 0.9); }
+    .hud-label {
+      font-size: 0.88em;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0 0 0.35em;
+      line-height: 1.2;
+      flex-shrink: 0;
+    }
+    .hud-select {
+      width: 9em;
+      min-width: 9em;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--hud-u) * 0.4);
+      color: var(--text);
+      padding: 0.42em 0.5em;
+      font-size: 1em;
+    }
+    .hud-mode-stack {
+      display: flex;
+      flex-direction: column;
+      gap: calc(var(--hud-u) * 0.4);
+    }
+    .hud-mode-row {
+      display: flex;
+      flex-direction: column;
+    }
+    .hud-mode-row[hidden] {
+      display: none !important;
+    }
+    .hud-mode-row .hud-label {
+      margin-bottom: 0.28em;
+    }
+    .badges.hud-badges {
+      display: flex;
+      gap: 0.32em;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: min(72vw, 36em);
+    }
+    .badges.hud-badges .badge {
+      font-size: 0.92em;
+      padding: 0.34em 0.62em;
+      line-height: 1.3;
+    }
+    .hud-ballast-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.35em;
+    }
+    .hud-ballast-panel .hud-ballast-title {
+      position: static;
+      transform: none;
+      margin: 0 0 0.15em;
+      font-size: 0.82em;
+      padding: 0.2em 0.65em;
+      background: rgba(11, 17, 23, 0.94);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      white-space: nowrap;
+      pointer-events: none;
+      align-self: center;
+    }
+    .hud-ballast-row {
+      display: flex;
+      gap: calc(var(--hud-u) * 0.75);
+      justify-content: center;
+    }
+    .hud-ballast-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.28em;
+      min-width: calc(var(--fader-w) + var(--hud-u) * 0.5);
+    }
+    .hud-ballast-num {
+      font-size: 0.95em;
+      font-weight: 700;
+      color: var(--muted);
+      line-height: 1;
+    }
+    .hud-ballast-col .ballast-vtrack,
+    .hud-ballast-col .vfader {
+      height: var(--ballast-unit-h);
+    }
+    .hud-ballast-col .vfader {
+      width: calc(var(--fader-w) + var(--hud-u) * 0.25);
+    }
+    .ballast-vtrack,
+    .vbar-track {
+      position: relative;
+      width: var(--fader-w);
+      height: var(--fader-h);
+      font-size: calc(var(--hud-u) * 0.72);
+      background: var(--fader-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--fader-radius);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .ballast-vfill {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 0%;
+      background: linear-gradient(to top, var(--accent), #60a5fa);
+      transition: height 0.3s;
+    }
+    .ballast-vtrack.unwired .ballast-vfill {
+      background: var(--muted);
+      opacity: 0.35;
+    }
+    .ballast-vmark {
+      position: absolute;
+      left: 0;
+      right: 0;
+      font-size: 0.62em;
+      color: rgba(255,255,255,0.62);
+      text-align: center;
+      pointer-events: none;
+      line-height: 1.1;
+      padding: 0 1px;
+    }
+    .ballast-vmark.top { top: 3px; }
+    .ballast-vmark.mid {
+      top: 50%;
+      transform: translateY(-50%);
+      border-top: 1px dashed rgba(255,255,255,0.22);
+    }
+    .ballast-vmark.bot { bottom: 3px; }
+    .vfader {
+      width: calc(var(--fader-w) + var(--hud-u) * 0.35);
+      height: var(--fader-h);
+      flex-shrink: 0;
+    }
+    .vfader-track {
+      position: relative;
+      width: var(--fader-w);
+      height: 100%;
+      margin: 0 auto;
+      border-radius: var(--fader-radius);
+      background: var(--fader-bg);
+      border: 1px solid var(--border);
+      cursor: ns-resize;
+      touch-action: none;
+      user-select: none;
+    }
+    .vfader-track:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .vfader-mid {
+      position: absolute;
+      left: 5px;
+      right: 5px;
+      top: 50%;
+      border-top: 1px dashed rgba(255, 255, 255, 0.28);
+      pointer-events: none;
+    }
+    .vfader-thumb {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: var(--fader-thumb);
+      height: var(--fader-thumb);
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid rgba(255, 255, 255, 0.92);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+      pointer-events: none;
+    }
+    .ballast-level {
+      font-size: 0.82em;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+      line-height: 1.2;
+      max-width: calc(var(--fader-w) + var(--hud-u));
+      word-break: break-word;
+      min-height: 1.2em;
+    }
+    .ballast-adc {
+      display: block;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.15rem;
+    }
+    .ballast-cmd { display: none; }
+    .vfader-val {
+      font-size: 0.88em;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+      line-height: 1.2;
+      min-height: 1.2em;
+      color: var(--text);
+    }
+    .hud-input-src {
+      font-size: 0.72em;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--accent);
+      text-align: center;
+      margin-top: 0.15em;
+    }
+    .hud-bl-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: calc(var(--hud-u) * 0.35);
+    }
+    .fin-bar-row {
+      display: flex;
+      gap: calc(var(--hud-u) * 0.45);
+      align-items: flex-end;
+      justify-content: center;
+    }
+    .fin-bar-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.2em;
+    }
+    .fin-bar-lbl {
+      font-size: 0.75em;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .fin-bar-track {
+      position: relative;
+      width: calc(var(--fader-w) * 0.55);
+      height: calc(var(--hud-u) * 4.2);
+      min-height: 48px;
+      background: var(--fader-bg);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--hud-u) * 0.35);
+      overflow: hidden;
+    }
+    .fin-bar-fill {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 50%;
+      height: 0%;
+      background: linear-gradient(to top, var(--accent), #60a5fa);
+      transition: height 0.12s, bottom 0.12s;
+    }
+    .fin-bar-fill.neg {
+      background: linear-gradient(to bottom, #f59e0b, #ef4444);
+    }
+    .fin-bar-val {
+      font-size: 0.82em;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .dual-axis-viz {
+      position: relative;
+      width: var(--hud-stick);
+      height: var(--hud-stick);
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--hud-u) * 0.35);
+      margin: 0 auto;
+    }
+    .dual-axis-cross {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .dual-axis-cross::before,
+    .dual-axis-cross::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 255, 255, 0.2);
+    }
+    .dual-axis-cross::before {
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 1px;
+    }
+    .dual-axis-cross::after {
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 1px;
+    }
+    .dual-axis-dot {
+      position: absolute;
+      width: calc(var(--hud-u) * 0.75);
+      height: calc(var(--hud-u) * 0.75);
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid rgba(255, 255, 255, 0.9);
+      transform: translate(-50%, -50%);
+      left: 50%;
+      top: 50%;
+      transition: left 0.08s, top 0.08s;
+    }
+    .dual-axis-readouts {
+      font-size: 0.82em;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+    .dual-axis-readouts span {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .hud-toast-stack {
+      position: absolute;
+      top: calc(var(--hud-u) * 0.5);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 12;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.35rem;
+      pointer-events: none;
+      max-width: min(92vw, 28rem);
+    }
+    .hud-toast {
+      padding: 0.45em 0.85em;
+      border-radius: 999px;
+      font-size: calc(var(--hud-u) * 0.82);
+      font-weight: 600;
+      background: rgba(11, 17, 23, 0.94);
+      border: 1px solid var(--border);
+      color: var(--text);
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+      animation: hud-toast-in 0.22s ease-out;
+    }
+    .hud-toast.info { border-color: var(--accent); color: #bfdbfe; }
+    .hud-toast.ok { border-color: var(--ok); color: #bbf7d0; }
+    .hud-toast.warn { border-color: var(--warn); color: #fde68a; }
+    @keyframes hud-toast-in {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .vbar-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.28em;
+      min-width: calc(var(--fader-w) + var(--hud-u) * 1.2);
+    }
+    .vbar-wrap .vbar-track {
+      height: var(--gauge-h);
+      flex-shrink: 0;
+    }
+    .vbar-wrap .vbar-val {
+      flex-shrink: 0;
+      min-height: 1.2em;
+    }
+    .vbar-fill {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 0%;
+      background: var(--accent);
+      transition: height 0.25s;
+    }
+    .vbar-fill.accel { background: linear-gradient(to top, #22c55e, #f59e0b); }
+    .vbar-val {
+      font-size: 1em;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+      text-align: center;
+      line-height: 1.2;
+    }
+    .battery-chip {
+      min-width: calc(var(--hud-u) * 5.5);
+    }
+    .battery-chip .value {
+      font-size: 1.55em;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.15;
+      min-height: 1.15em;
+    }
+    .battery-chip .unit { font-size: 0.85em; color: var(--muted); font-weight: 400; }
+    .battery-chip.warn .value { color: var(--warn); }
+    .battery-chip.danger .value { color: var(--danger); }
+    .horizon.hud-horizon {
+      width: var(--hud-horizon);
+      height: var(--hud-horizon);
+      flex-shrink: 0;
+      border: none;
+      background: transparent;
+      overflow: visible;
+      filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.55));
+    }
+    .horizon-bezel {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.22), transparent 42%),
+        radial-gradient(circle at 50% 50%, #0a1018 0%, #05080c 100%);
+      box-shadow:
+        inset 0 0 0 2px rgba(255, 255, 255, 0.14),
+        inset 0 -8px 16px rgba(0, 0, 0, 0.45),
+        0 0 0 1px rgba(0, 0, 0, 0.8);
+    }
+    .horizon-yaw-ring {
+      position: absolute;
+      inset: 5%;
+      border-radius: 50%;
+      overflow: hidden;
+      transform: rotate(var(--horizon-yaw, 0deg));
+      transition: transform 0.12s linear;
+    }
+    .horizon-yaw-ticks {
+      position: absolute;
+      inset: -2%;
+      border-radius: 50%;
+      background: repeating-conic-gradient(
+        from 0deg,
+        rgba(255, 255, 255, 0.55) 0deg 1.2deg,
+        transparent 1.2deg 9deg
+      );
+      mask: radial-gradient(circle, transparent 86%, #000 87%, #000 94%, transparent 95%);
+      -webkit-mask: radial-gradient(circle, transparent 86%, #000 87%, #000 94%, transparent 95%);
+      opacity: 0.65;
+    }
+    .horizon-yaw-cardinal {
+      position: absolute;
+      inset: 0;
+      font-size: calc(var(--hud-u) * 0.62);
+      font-weight: 700;
+      color: rgba(255, 255, 255, 0.75);
+      letter-spacing: 0.04em;
+    }
+    .horizon-yaw-cardinal span {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%) rotate(calc(var(--a, 0) * 1deg)) translateY(calc(var(--hud-horizon) * -0.34));
+    }
+    .horizon-inner {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 280%;
+      height: 280%;
+      margin: -140% 0 0 -140%;
+      transform-origin: center center;
+      will-change: transform;
+      transition: transform 0.1s ease-out;
+    }
+    .horizon-sky,
+    .horizon-ground {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 50%;
+    }
+    .horizon-sky {
+      top: 0;
+      background:
+        radial-gradient(ellipse 120% 80% at 50% 100%, rgba(147, 197, 253, 0.35), transparent 55%),
+        linear-gradient(180deg, #0c4a9e 0%, #1d6fd4 38%, #38bdf8 100%);
+    }
+    .horizon-sky::after {
+      content: "";
+      position: absolute;
+      inset: 8% 10% auto;
+      height: 35%;
+      background:
+        radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.9) 0 1px, transparent 2px),
+        radial-gradient(circle at 55% 18%, rgba(255, 255, 255, 0.7) 0 1px, transparent 2px),
+        radial-gradient(circle at 78% 42%, rgba(255, 255, 255, 0.55) 0 1px, transparent 2px),
+        radial-gradient(circle at 35% 55%, rgba(255, 255, 255, 0.45) 0 1px, transparent 2px);
+      opacity: 0.55;
+    }
+    .horizon-ground {
+      bottom: 0;
+      background:
+        linear-gradient(0deg, #3f2a14 0%, #6b4423 42%, #92400e 100%);
+    }
+    .horizon-ground::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        90deg,
+        transparent 0 14px,
+        rgba(0, 0, 0, 0.08) 14px 15px
+      );
+      opacity: 0.5;
+    }
+    .horizon-line {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 2px;
+      margin-top: -1px;
+      background: linear-gradient(90deg, transparent, #fff 12%, #fff 88%, transparent);
+      box-shadow: 0 0 6px rgba(255, 255, 255, 0.65);
+      z-index: 2;
+    }
+    .horizon-pitch-ladder {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .horizon-pitch-ladder span {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 28%;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.42);
+      transform: translate(-50%, -50%) translateY(calc(var(--p, 0) * 1px));
+    }
+    .horizon-pitch-ladder span::before,
+    .horizon-pitch-ladder span::after {
+      content: "";
+      position: absolute;
+      top: -3px;
+      width: 1px;
+      height: 7px;
+      background: rgba(255, 255, 255, 0.42);
+    }
+    .horizon-pitch-ladder span::before { left: 0; }
+    .horizon-pitch-ladder span::after { right: 0; }
+    .horizon-shine {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: radial-gradient(circle at 28% 22%, rgba(255, 255, 255, 0.28), transparent 38%);
+      pointer-events: none;
+      z-index: 4;
+    }
+    .horizon-aircraft {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 46%;
+      height: 46%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 5;
+    }
+    .horizon-aircraft::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 72%;
+      height: 3px;
+      margin: -1.5px 0 0 -36%;
+      background: linear-gradient(90deg, #f97316, #fbbf24);
+      border-radius: 2px;
+      box-shadow: 0 0 8px rgba(251, 191, 36, 0.65);
+    }
+    .horizon-aircraft::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 3px;
+      height: 22%;
+      margin: -11% 0 0 -1.5px;
+      background: #fbbf24;
+      border-radius: 2px;
+      box-shadow: 0 0 6px rgba(251, 191, 36, 0.5);
+    }
+    .horizon.hud-horizon.tilt-warn .horizon-bezel {
+      box-shadow:
+        inset 0 0 0 2px rgba(245, 158, 11, 0.45),
+        inset 0 -8px 16px rgba(0, 0, 0, 0.45),
+        0 0 12px rgba(245, 158, 11, 0.25);
+    }
+    .gyro-readouts.hud-gyro {
+      font-size: 0.92em;
+      font-weight: 500;
+      line-height: 1.5;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .thrust-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.28em;
+      min-width: calc(var(--fader-w) + var(--hud-u) * 1.2);
+      flex-shrink: 0;
+    }
+    .thrust-col .hud-label {
+      align-self: stretch;
+      text-align: center;
+    }
+    .thrust-col .vfader {
+      width: calc(var(--fader-w) + var(--hud-u) * 0.25);
+      height: calc(var(--ballast-unit-h) * 2 + var(--hud-u) * 0.65);
+      flex-shrink: 0;
+    }
+    .thrust-col .vbar-val {
+      flex-shrink: 0;
+      min-height: 1.2em;
+      text-align: center;
+      width: 100%;
+    }
+    .xbox-mini {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.3em;
+      width: calc(var(--hud-stick) * 2 + var(--hud-u) * 0.85);
+      min-width: calc(var(--hud-stick) * 2 + var(--hud-u) * 0.85);
+    }
+    .xbox-mini .hud-label {
+      margin-bottom: 0.2em;
+    }
+    .xbox-mini .xbox-grid {
+      display: flex;
+      gap: 0.25rem;
+      width: 100%;
+      justify-content: center;
+    }
+    .xbox-mini .stick-viz {
+      width: var(--hud-stick);
+      height: var(--hud-stick);
+      max-width: none;
+      flex-shrink: 0;
+    }
+    .xbox-mini .stick-dot {
+      width: calc(var(--hud-u) * 0.85);
+      height: calc(var(--hud-u) * 0.85);
+    }
+    .xbox-name {
+      font-size: 0.82em;
+      color: var(--muted);
+      text-align: center;
+      width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cam-alert {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 2;
+      background: rgba(127, 29, 29, 0.88);
+      color: #fecaca;
+      padding: calc(var(--hud-u) * 0.4) calc(var(--hud-u) * 0.65);
+      font-size: calc(var(--hud-u) * 0.88);
+      line-height: 1.35;
+    }
+    .cam-alert[hidden] { display: none; }
+    /* --- Diagnostics (scroll below HUD) --- */
+    .diagnostics {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      font-size: 1.05rem;
+    }
+    .diag-head {
+      padding: 0.75rem 0 0.25rem;
+      border-top: 1px solid var(--border);
+    }
+    .diag-head h2 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .diag-grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+    }
+    @media (max-width: 700px) {
+      .diag-grid-3 { grid-template-columns: 1fr; }
+    }
+    .model-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      align-items: center;
+    }
+    .model-row select {
+      flex: 1;
+      min-width: 140px;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 0.4rem 0.5rem;
+      font-size: 0.78rem;
+    }
+    .model-row button { flex: 0 1 auto; min-width: 72px; }
+    #modelTabsRow { display: none; }
+    .mode-tabs { display: none; }
+    .yolo-feed-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    @media (max-width: 800px) {
+      .yolo-feed-grid { grid-template-columns: 1fr; }
+    }
+    .yolo-feed {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .yolo-feed-head {
+      padding: 0.4rem 0.55rem;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    .yolo-feed canvas {
+      width: 100%;
+      display: block;
+      background: #000;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+    }
+    .yolo-feed-meta {
+      padding: 0.35rem 0.55rem;
+      font-size: 0.65rem;
+      color: var(--muted);
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 0.55rem 0.85rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel-body { padding: 0.85rem; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.65rem;
+    }
+    .metric {
+      background: var(--panel2);
+      border-radius: 8px;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+    }
+    .metric .label {
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .metric .value {
+      font-size: 1.45rem;
+      font-weight: 600;
+      margin-top: 0.2rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .metric .unit { font-size: 0.85rem; color: var(--muted); font-weight: 400; }
+    .metric.warn .value { color: var(--warn); }
+    .metric.danger .value { color: var(--danger); }
+    .gyro-viz {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      justify-content: center;
+      padding: 0.5rem 0;
+    }
+    .horizon {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      position: relative;
+      overflow: hidden;
+    }
+    .gyro-readouts { font-size: 0.82rem; line-height: 1.7; color: var(--muted); }
+    .gyro-readouts span { color: var(--text); font-weight: 500; }
+    .leak-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+      gap: 0.5rem;
+    }
+    .leak-cell {
+      text-align: center;
+      padding: 0.55rem 0.25rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      font-size: 0.72rem;
+    }
+    .leak-cell .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      margin: 0 auto 0.35rem;
+      background: var(--ok);
+    }
+    .leak-cell.triggered .dot {
+      background: var(--danger);
+      box-shadow: 0 0 12px var(--danger);
+      animation: pulse 0.5s ease-in-out infinite;
+    }
+    .leak-cell.triggered {
+      border-color: var(--danger);
+      background: rgba(239,68,68,0.12);
+    }
+    .leak-cell.unwired {
+      opacity: 0.45;
+    }
+    .leak-cell.unwired span { color: var(--muted); }
+    .ballast-bar {
+      display: none;
+    }
+    .ballast-fill {
+      display: none;
+    }
+    .ballast-level.unwired { color: var(--warn); }
+    .btn-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    button {
+      flex: 1;
+      min-width: 70px;
+      padding: 0.45rem 0.6rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.78rem;
+    }
+    button:hover { background: #243044; }
+    button.primary { background: #1d4ed8; border-color: #2563eb; }
+    button.danger { background: #991b1b; border-color: #b91c1c; }
+    .serial-log {
+      font-family: ui-monospace, monospace;
+      font-size: 0.75rem;
+      line-height: 1.5;
+      height: min(52vh, 520px);
+      min-height: 320px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      scroll-behavior: auto;
+      background: #080d12;
+      border-radius: 6px;
+      padding: 0.55rem 0.65rem;
+      border: 1px solid var(--border);
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    .serial-log::-webkit-scrollbar { width: 10px; }
+    .serial-log::-webkit-scrollbar-track { background: #0c1218; border-radius: 6px; }
+    .serial-log::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 6px;
+      border: 2px solid #0c1218;
+    }
+    .serial-log::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .serial-log.paused::after {
+      content: "paused — scroll to bottom to resume live feed";
+      position: sticky;
+      bottom: 0;
+      display: block;
+      margin-top: 0.35rem;
+      padding: 0.25rem 0.4rem;
+      font-size: 0.65rem;
+      color: var(--muted);
+      background: linear-gradient(transparent, #080d12 35%);
+      pointer-events: none;
+      text-align: right;
+    }
+    .serial-line { white-space: pre-wrap; word-break: break-word; padding: 0.05rem 0; }
+    .serial-line.rx { color: #86efac; }
+    .serial-line.tx { color: #93c5fd; }
+    .serial-line.sys { color: var(--warn); }
+    .serial-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.5rem;
+      font-size: 0.8rem;
+    }
+    .serial-toolbar button {
+      padding: 0.25rem 0.55rem;
+      font-size: 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #e2e8f0;
+      cursor: pointer;
+    }
+    .serial-toolbar button:hover { background: #334155; }
+    .serial-toolbar label { display: flex; align-items: center; gap: 0.35rem; cursor: pointer; color: var(--muted); }
+    .serial-highlights {
+      max-height: 7.5rem;
+      overflow-y: auto;
+      padding: 0.35rem 0.5rem;
+      margin-bottom: 0.5rem;
+      border-radius: 6px;
+      background: #0a1018;
+      border: 1px solid #1e293b;
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem;
+      line-height: 1.35;
+    }
+    .serial-highlights .serial-line { opacity: 0.95; }
+    .esc-status {
+      margin-top: 0.35rem;
+      font-size: 0.72rem;
+      line-height: 1.35;
+      text-align: center;
+      color: var(--muted);
+      max-width: 6.5rem;
+    }
+    .esc-status.ready { color: var(--ok); }
+    .esc-status.arm { color: var(--warn); }
+    .esc-status.blocked { color: #f87171; }
+    .serial-input {
+      display: flex;
+      gap: 0.4rem;
+      margin-top: 0.45rem;
+    }
+    .serial-input input {
+      flex: 1;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 0.4rem 0.55rem;
+      font-family: inherit;
+      font-size: 0.78rem;
+    }
+    .xbox-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.45rem;
+      font-size: 0.78rem;
+    }
+    .stick-viz {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      aspect-ratio: 1;
+      position: relative;
+      max-width: 100px;
+    }
+    .stick-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      position: absolute;
+      transform: translate(-50%, -50%);
+      left: 50%;
+      top: 50%;
+    }
+    .mode-tabs {
+      display: flex;
+      gap: 0.35rem;
+      margin-bottom: 0.65rem;
+    }
+    .mode-tabs button.active {
+      background: #1e3a5f;
+      border-color: var(--accent);
+      color: #bfdbfe;
+    }
+    .model-tabs {
+      display: block;
+      margin-top: 0.65rem;
+    }
+    .model-card {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.45rem 0.55rem;
+      margin-bottom: 0.4rem;
+    }
+    .model-card.active {
+      border-color: var(--ok);
+    }
+    .model-card.main:not(.active) {
+      border-color: #3b82f6;
+    }
+    .badge-main {
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #93c5fd;
+      margin-left: 0.35rem;
+    }
+    .model-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 0.78rem;
+      margin-bottom: 0.3rem;
+    }
+    .model-card-head .meta {
+      color: var(--muted);
+      font-size: 0.68rem;
+    }
+    .backend-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+    }
+    .backend-row button.active {
+      background: #1a3d2e;
+      border-color: var(--ok);
+      color: #bbf7d0;
+    }
+    .backend-row button.unavailable {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .yolo-toolbar {
+      display: flex;
+      gap: 0.35rem;
+      align-items: center;
+      margin-bottom: 0.45rem;
+    }
+    .model-status {
+      margin-top: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      min-height: 1rem;
+    }
+    .model-status.error { color: var(--danger); }
+    .model-status.loading { color: var(--warn); }
+    .actuator-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+      font-size: 0.78rem;
+    }
+    .actuator-row label { width: 4.5rem; color: var(--muted); }
+    .actuator-row .bar {
+      flex: 1;
+      height: 8px;
+      background: var(--panel2);
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .actuator-row .bar-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 50%;
+      transition: width 0.15s;
+    }
+    .actuator-row .num { width: 2.8rem; text-align: right; font-variant-numeric: tabular-nums; }
+    #actuatorBars { display: none; }
+    .pin-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+    }
+    @media (max-width: 900px) {
+      .pin-grid { grid-template-columns: 1fr; }
+    }
+    .pin-box {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .pin-box h4 {
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.4rem;
+    }
+    .pin-line { font-family: ui-monospace, monospace; line-height: 1.5; color: var(--text); }
+    .pin-line.mismatch { color: var(--warn); }
+    .test-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-top: 0.5rem;
+    }
+    .test-grid button { flex: 0 1 auto; min-width: 60px; }
+    .test-grid button.pass { border-color: var(--ok); color: var(--ok); }
+    .test-grid button.fail { border-color: var(--danger); color: var(--danger); }
+    .diag-status {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.45rem;
+      font-family: ui-monospace, monospace;
+    }
+    .manual-sliders { display: none; margin-top: 0.65rem; }
+    .manual-sliders.visible { display: block; }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      margin-bottom: 0.55rem;
+    }
+    .slider-row label { width: 5.25rem; font-weight: 600; color: var(--text); }
+    .slider-row .val { width: 3rem; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+    /* Horizontal sliders — same track + thumb as vertical vfaders */
+    input[type=range].std-slider {
+      flex: 1;
+      height: calc(var(--fader-thumb) + 12px);
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      cursor: pointer;
+    }
+    input[type=range].std-slider::-webkit-slider-runnable-track {
+      height: var(--fader-track-h);
+      border-radius: 999px;
+      background: var(--fader-bg);
+      border: 1px solid var(--border);
+    }
+    input[type=range].std-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: var(--fader-thumb);
+      height: var(--fader-thumb);
+      margin-top: calc((var(--fader-track-h) - var(--fader-thumb)) / 2);
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid rgba(255, 255, 255, 0.92);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+    }
+    input[type=range].std-slider::-moz-range-track {
+      height: var(--fader-track-h);
+      border-radius: 999px;
+      background: var(--fader-bg);
+      border: 1px solid var(--border);
+    }
+    input[type=range].std-slider::-moz-range-thumb {
+      width: var(--fader-thumb);
+      height: var(--fader-thumb);
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid rgba(255, 255, 255, 0.92);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+    }
+    .viz-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    @media (max-width: 900px) {
+      .viz-grid { grid-template-columns: 1fr; }
+    }
+    .viz-canvas-wrap {
+      background: #080d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      position: relative;
+      aspect-ratio: 1;
+      min-height: 220px;
+    }
+    .viz-canvas-wrap.wide { aspect-ratio: 4 / 3; }
+    .viz-canvas-wrap canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .viz-meta {
+      margin-top: 0.55rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      line-height: 1.6;
+    }
+    .viz-meta span { color: var(--text); }
+    .viz-actions { margin-top: 0.45rem; }
+    .viz-actions button { flex: 0 1 auto; min-width: 90px; }
+    .viz-offline {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.78rem;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <section class="hud-viewport">
+    <div class="hud-camera">
+      <canvas id="camFeed" aria-label="FOV pilot camera"></canvas>
+      <div class="cam-alert" id="camAlert" hidden></div>
+    </div>
+
+    <div class="hud-frame">
+      <div class="hud-cell hud-tl">
+        <div class="hud-overlay hud-top-left hud-chip">
+          <div class="hud-mode-stack">
+            <div class="hud-mode-row">
+              <div class="hud-label">Mode</div>
+              <select id="modeSelect" class="hud-select">
+                <option value="manual">Manual</option>
+                <option value="xbox">Xbox</option>
+                <option value="auto">Auto (YOLO)</option>
+              </select>
+            </div>
+            <div class="hud-mode-row" id="hudModelRow" hidden>
+              <div class="hud-label">Model</div>
+              <select id="hudModelSelect" class="hud-select">
+                <option value="">— model —</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-tc">
+        <div class="hud-overlay hud-top-center hud-chip">
+          <div class="badges hud-badges">
+            <span class="badge off" id="badgeEsp">ESP — …</span>
+            <span class="badge off" id="badgePca">PCA9685 — …</span>
+            <span class="badge off" id="badgeXbox">Xbox — …</span>
+            <span class="badge off" id="badgeLinkedFlap">Flap — …</span>
+            <span class="badge off" id="badgeLeak">Leaks — OK</span>
+            <span class="badge off" id="badgeSonar">Sonar — …</span>
+            <span class="badge off" id="badgeGps">GPS — …</span>
+            <span class="badge off" id="badgeCam">Cam — …</span>
+            <span class="badge off" id="badgeMode">Mode — …</span>
+            <span class="badge off" id="badgeEsc" title="Thruster ESC arming (ESP)">ESC — …</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-tr">
+        <div class="hud-overlay hud-top-right">
+          <div class="hud-chip battery-chip" id="metricBattery">
+            <div class="hud-label">Battery</div>
+            <div class="value"><span id="batteryVal">—</span> <span class="unit">V</span></div>
+          </div>
+          <div class="vbar-wrap hud-chip">
+            <div class="hud-label">Depth</div>
+            <div class="vbar-track"><div class="vbar-fill" id="depthBarFill"></div></div>
+            <div class="vbar-val"><span id="depthVal">—</span> m</div>
+          </div>
+          <div class="vbar-wrap hud-chip">
+            <div class="hud-label">Tilt</div>
+            <div class="vbar-track"><div class="vbar-fill accel" id="accelBarFill"></div></div>
+            <div class="vbar-val" id="accelVal">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-ml">
+        <div class="hud-overlay hud-left hud-chip hud-ballast-panel">
+          <div class="hud-label hud-ballast-title">Ballast</div>
+          <div class="hud-ballast-row">
+            <div class="ballast-tank hud-ballast-col" data-tank="fore">
+              <div class="hud-ballast-num">FORE</div>
+              <div class="ballast-vtrack">
+                <span class="ballast-vmark top">100%</span>
+                <span class="ballast-vmark mid">N</span>
+                <span class="ballast-vmark bot">0%</span>
+                <div class="ballast-vfill"></div>
+              </div>
+              <div class="vfader" data-min="-1" data-max="1" data-step="0.05">
+                <div class="vfader-track" role="slider" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="0" tabindex="0">
+                  <div class="vfader-mid"></div>
+                  <div class="vfader-thumb"></div>
+                </div>
+                <input type="hidden" class="ballast-slider" value="0">
+              </div>
+              <span class="vfader-val ballast-vfader-val">0.00</span>
+              <span class="ballast-level">—</span>
+              <span class="ballast-adc">ADC —</span>
+              <span class="ballast-cmd">cmd —</span>
+            </div>
+            <div class="ballast-tank hud-ballast-col" data-tank="aft">
+              <div class="hud-ballast-num">AFT</div>
+              <div class="ballast-vtrack">
+                <span class="ballast-vmark top">100%</span>
+                <span class="ballast-vmark mid">N</span>
+                <span class="ballast-vmark bot">0%</span>
+                <div class="ballast-vfill"></div>
+              </div>
+              <div class="vfader" data-min="-1" data-max="1" data-step="0.05">
+                <div class="vfader-track" role="slider" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="0" tabindex="0">
+                  <div class="vfader-mid"></div>
+                  <div class="vfader-thumb"></div>
+                </div>
+                <input type="hidden" class="ballast-slider" value="0">
+              </div>
+              <span class="vfader-val ballast-vfader-val">0.00</span>
+              <span class="ballast-level">—</span>
+              <span class="ballast-adc">ADC —</span>
+              <span class="ballast-cmd">cmd —</span>
+            </div>
+          </div>
+          <div class="hud-input-src" id="hudInputSrc">—</div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-mr">
+        <div class="hud-overlay hud-right">
+          <div class="thrust-col hud-chip">
+            <div class="hud-label">Thrust</div>
+            <div class="vfader" data-min="-1" data-max="1" data-step="0.05">
+              <div class="vfader-track" role="slider" aria-label="Thrust" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="0" tabindex="0">
+                <div class="vfader-mid"></div>
+                <div class="vfader-thumb"></div>
+              </div>
+              <input type="hidden" id="hudThrustSlider" value="0">
+            </div>
+            <div class="vbar-val" id="hudThrustVal">0.00</div>
+            <div class="esc-status arm" id="escStatus">ESC — waiting for telemetry</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-bl">
+        <div class="hud-overlay hud-bottom-left">
+          <div class="hud-chip aft-steer-panel">
+            <div class="hud-label">Aft steer · 2 servos</div>
+            <div class="dual-axis-viz">
+              <div class="dual-axis-cross"></div>
+              <div class="dual-axis-dot" id="aftSteerDot"></div>
+            </div>
+            <div class="dual-axis-readouts">
+              Y <span class="muted" style="font-size:0.65rem;">ch3</span>
+              <span id="aftSteerYVal">0.00</span><br>
+              Z <span class="muted" style="font-size:0.65rem;">ch2</span>
+              <span id="aftSteerZVal">0.00</span>
+            </div>
+            <div style="font-size:0.62rem;color:var(--muted);margin-top:0.25rem;line-height:1.35;">
+              Left → Y only. Up/down → Z only.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-bc">
+        <div class="hud-overlay hud-bottom-center hud-chip">
+          <div class="horizon hud-horizon" id="horizon">
+            <div class="horizon-bezel">
+              <div class="horizon-yaw-ring" id="horizonYawRing">
+                <div class="horizon-yaw-ticks"></div>
+                <div class="horizon-yaw-cardinal" aria-hidden="true">
+                  <span style="--a:0">N</span>
+                  <span style="--a:90">E</span>
+                  <span style="--a:180">S</span>
+                  <span style="--a:270">W</span>
+                </div>
+                <div class="horizon-inner" id="horizonInner">
+                  <div class="horizon-sky"></div>
+                  <div class="horizon-ground"></div>
+                  <div class="horizon-line"></div>
+                  <div class="horizon-pitch-ladder" aria-hidden="true">
+                    <span style="--p:-36"></span>
+                    <span style="--p:-24"></span>
+                    <span style="--p:-12"></span>
+                    <span style="--p:12"></span>
+                    <span style="--p:24"></span>
+                    <span style="--p:36"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="horizon-aircraft" aria-hidden="true"></div>
+              <div class="horizon-shine"></div>
+            </div>
+          </div>
+          <div class="gyro-readouts hud-gyro">
+            P <span id="gyroPitch">—</span>°<br>
+            R <span id="gyroRoll">—</span>°<br>
+            Y <span id="gyroYaw">—</span>°
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-cell hud-br">
+        <div class="hud-overlay hud-bottom-right">
+          <div class="hud-chip fin-panel">
+            <div class="hud-label">Fins</div>
+            <div class="fin-bar-row">
+              <div class="fin-bar-col">
+                <div class="fin-bar-track"><div class="fin-bar-fill" id="finLeftFill"></div></div>
+                <span class="fin-bar-val" id="finLeftVal">0.00</span>
+                <span class="fin-bar-lbl">L</span>
+              </div>
+              <div class="fin-bar-col">
+                <div class="fin-bar-track"><div class="fin-bar-fill" id="finRightFill"></div></div>
+                <span class="fin-bar-val" id="finRightVal">0.00</span>
+                <span class="fin-bar-lbl">R</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hud-toast-stack" id="hudToastStack" aria-live="polite"></div>
+  </section>
+
+  <button type="button" class="hud-scroll-hint" id="diagnosticsScrollHint">↓ diagnostics</button>
+
+  <div id="diagnostics" class="diagnostics">
+    <div class="diag-head"><h2>Diagnostics &amp; setup</h2></div>
+
+    <section class="panel" id="yoloFeedsPanel">
+      <div class="panel-head">YOLO stereo feeds <span style="font-weight:400;text-transform:none;color:var(--muted);">lazy — loads when scrolled into view</span></div>
+      <div class="panel-body">
+        <div class="yolo-feed-grid">
+          <div class="yolo-feed" id="yoloFeedLeft" data-stream="/snapshot/yolo_left">
+            <div class="yolo-feed-head">Stereo left · detections</div>
+            <canvas class="yolo-canvas" aria-label="YOLO left camera"></canvas>
+            <div class="yolo-feed-meta" id="yoloLeftMeta">Waiting…</div>
+          </div>
+          <div class="yolo-feed" id="yoloFeedRight" data-stream="/snapshot/yolo_right">
+            <div class="yolo-feed-head">Stereo right · detections</div>
+            <canvas class="yolo-canvas" aria-label="YOLO right camera"></canvas>
+            <div class="yolo-feed-meta" id="yoloRightMeta">Waiting…</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="diag-grid-3">
+      <section class="panel">
+        <div class="panel-head">ESP Serial</div>
+        <div class="panel-body">
+          <div class="serial-toolbar">
+            <button type="button" id="serialJumpLatest" class="btn-sm">Jump to latest</button>
+            <label><input type="checkbox" id="serialHideTel" checked> Hide TEL spam</label>
+          </div>
+          <div class="serial-highlights" id="serialHighlights" aria-label="ESC and command highlights"></div>
+          <div class="serial-log" id="serialLog"></div>
+          <div class="serial-input">
+            <input type="text" id="serialInput" placeholder="Send raw line to ESP…">
+            <button id="serialSend">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">Pins / Ping <span id="pinDiagStatus">—</span></div>
+        <div class="panel-body">
+          <div class="pin-grid">
+            <div class="pin-box">
+              <h4>Expected (pins.yaml)</h4>
+              <div id="expectedPins" class="pin-line">Loading…</div>
+            </div>
+            <div class="pin-box">
+              <h4>ESP reported</h4>
+              <div id="espPins" class="pin-line">No data — click PINS</div>
+            </div>
+          </div>
+          <div class="test-grid" id="pinTestButtons">
+            <button data-cmd="PING">PING</button>
+            <button data-cmd="PINS">PINS</button>
+            <button data-cmd="TEST S 1 1.0">Sonar</button>
+            <button data-cmd="TEST S 2 1.0">Aft Z · ch2</button>
+            <button data-cmd="TEST S 3 1.0">Aft Y · ch3</button>
+            <button data-cmd="TEST S 4 1.0">Fin L</button>
+            <button data-cmd="TEST S 5 1.0">Fin R</button>
+            <button data-cmd="TEST T 0.5">Thr Fwd</button>
+            <button data-cmd="TEST T -0.5">Thr Rev</button>
+            <button data-cmd="TEST T 0">Thr Stop</button>
+            <button data-cmd="TEST B fore fill">Fore Fill</button>
+            <button data-cmd="TEST B fore drain">Fore Drain</button>
+            <button data-cmd="TEST B fore stop">Fore Stop</button>
+            <button data-cmd="TEST B aft fill">Aft Fill</button>
+            <button data-cmd="TEST B aft drain">Aft Drain</button>
+            <button data-cmd="TEST B aft stop">Aft Stop</button>
+            <button data-cmd="TEST L">Leaks</button>
+            <button data-cmd="TEST A">ADC</button>
+            <button class="primary" id="runAllTests">Run All Tests</button>
+          </div>
+          <div class="diag-status" id="lastDiag">Last diagnostic: —</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">Model &amp; camera</div>
+        <div class="panel-body">
+          <div class="model-row">
+            <select id="modelSelect"><option value="">— model —</option></select>
+            <select id="backendSelect"><option value="">— backend —</option></select>
+            <button type="button" id="yoloStartBtn" class="primary">Start</button>
+            <button type="button" id="yoloStopBtn">Stop</button>
+          </div>
+          <div class="model-status" id="modelStatus"></div>
+          <div id="modelTabsRow"></div>
+          <div style="margin-top:0.65rem;font-size:0.72rem;color:var(--muted);">
+            FOV <span id="camStatus">USB</span> · overlay <code>/sub/api/vision/detections</code>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">Servo centre &amp; travel (per channel)</div>
+      <div class="panel-body">
+        <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.65rem;">
+          <strong>Centre</strong> — command&nbsp;0 at neutral. <strong>Min / max travel</strong> — PCA ticks at
+          full stick (−1 / +1) from that centre. Saved to <code>config/pins.yaml</code> and ESP32 NVS (channels 2–5).
+          Reflash <code>sub_rc</code> if limit tune commands are not recognized.
+          Limits apply to <strong>all</strong> control modes (linked flap, free fins, manual, auto) on the ESP;
+          fin&nbsp;R invert + travel matching runs on the Pi for every S2 send.
+        </div>
+        <div id="servoCenterRows"></div>
+        <div class="btn-row" style="margin-top:0.5rem;">
+          <button type="button" id="servoCenterDoneBtn">Done adjusting</button>
+          <span id="servoCenterCalHint" style="font-size:0.72rem;color:var(--muted);">
+            Move a slider to jog that servo (raw PCA tick). Click <strong>Done adjusting</strong> when finished so Xbox/S2 control works again.
+          </span>
+        </div>
+        <div id="servoCenterCalBanner" style="display:none;margin-top:0.5rem;padding:0.4rem 0.6rem;font-size:0.72rem;background:rgba(255,180,0,0.15);border-radius:4px;">
+          Calibration mode — normal fin commands paused on ESP. Click <strong>Done adjusting</strong>.
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        Ballast calibration
+        <button class="cal-clear" data-tank="both">Clear both</button>
+      </div>
+      <div class="panel-body" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+        <div class="ballast-diag" data-tank="fore">
+          <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.35rem;">Fore pot → ESP GPIO 6 (ADC1)</div>
+          <div class="btn-row">
+            <button class="danger" data-ballast="drain" data-tank="fore">Drain</button>
+            <button data-ballast="neutral" data-tank="fore">Hold</button>
+            <button class="primary" data-ballast="fill" data-tank="fore">Fill</button>
+          </div>
+          <div class="btn-row" style="margin-top:0.35rem;">
+            <button class="cal-top" data-tank="fore">Cal Top</button>
+            <button class="cal-bottom" data-tank="fore">Cal Bottom</button>
+            <button class="cal-centre" data-tank="fore">Centre</button>
+            <button class="cal-clear" data-tank="fore">Clear Cal</button>
+          </div>
+          <div class="ballast-cal-info" style="margin-top:0.35rem;font-size:0.68rem;color:var(--muted);">Cal: —</div>
+        </div>
+        <div class="ballast-diag" data-tank="aft">
+          <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.35rem;">Aft pot → ESP GPIO 2 (ADC1)</div>
+          <div class="btn-row">
+            <button class="danger" data-ballast="drain" data-tank="aft">Drain</button>
+            <button data-ballast="neutral" data-tank="aft">Hold</button>
+            <button class="primary" data-ballast="fill" data-tank="aft">Fill</button>
+          </div>
+          <div class="btn-row" style="margin-top:0.35rem;">
+            <button class="cal-top" data-tank="aft">Cal Top</button>
+            <button class="cal-bottom" data-tank="aft">Cal Bottom</button>
+            <button class="cal-centre" data-tank="aft">Centre</button>
+            <button class="cal-clear" data-tank="aft">Clear Cal</button>
+          </div>
+          <div class="ballast-cal-info" style="margin-top:0.35rem;font-size:0.68rem;color:var(--muted);">Cal: —</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="leakPanel">
+      <div class="panel-head">Leaks <span id="leakStatus">—</span></div>
+      <div class="panel-body">
+        <div style="font-size:0.68rem;color:var(--muted);margin-bottom:0.45rem;" id="leakBoardMeta">4 zones · GPIO —</div>
+        <div class="leak-grid" id="leakGrid">
+          <div class="leak-cell"><div class="dot"></div>L1</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">Sonar &amp; GPS</div>
+      <div class="panel-body viz-grid">
+        <div>
+          <div class="viz-canvas-wrap" id="sonarWrap">
+            <canvas id="sonarCanvas"></canvas>
+            <div class="viz-offline" id="sonarOffline">Waiting for sonar sweep…</div>
+          </div>
+          <div class="viz-meta" id="sonarMeta">Servo — · points —</div>
+        </div>
+        <div>
+          <div class="viz-canvas-wrap wide" id="gpsWrap">
+            <canvas id="gpsCanvas"></canvas>
+            <div class="viz-offline" id="gpsOffline">Scanning for USB GPS…</div>
+          </div>
+          <div class="viz-meta" id="gpsMeta">East — m · North — m · Range — m</div>
+          <div class="viz-actions btn-row">
+            <button type="button" id="gpsClearTrack">Clear track</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">Manual actuators</div>
+      <div class="panel-body">
+        <div class="mode-tabs">
+          <button data-mode="xbox">Xbox</button>
+          <button data-mode="manual">Manual</button>
+          <button data-mode="auto">Auto</button>
+        </div>
+        <div class="manual-sliders visible" id="manualSliders"></div>
+        <div id="actuatorBars"></div>
+        <div style="margin-top:0.5rem;font-size:0.78rem;color:var(--muted);">
+          B → stop YOLO · RT/LT → thrust · RB/LB → ballast · LS → aft steer · RS → fins · D-pad ← linked flap
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/live_jpeg.js"></script>
+  <script>
+    /* Don't stay scrolled to diagnostics after refresh (legacy #diagnostics URLs). */
+    (function resetDiagnosticsHashScroll() {
+      if (window.location.hash !== '#diagnostics') return;
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+      window.scrollTo(0, 0);
+    })();
+
+    function attachVfader(el) {
+      const min = Number(el.dataset.min ?? -1);
+      const max = Number(el.dataset.max ?? 1);
+      const step = Number(el.dataset.step ?? 0.05);
+      const track = el.querySelector('.vfader-track');
+      const thumb = el.querySelector('.vfader-thumb');
+      const hidden = el.querySelector('input[type=hidden]');
+      if (!track || !thumb) return null;
+
+      let value = Number(hidden?.value ?? 0);
+
+      function snap(v) {
+        return step > 0 ? Math.round(v / step) * step : v;
+      }
+      function clamp(v) {
+        return Math.max(min, Math.min(max, v));
+      }
+      function thumbTop(v) {
+        const pct = (clamp(v) - min) / (max - min);
+        return (1 - pct) * 100;
+      }
+      function refreshValLabel() {
+        const valEl = el.querySelector('.vfader-val');
+        if (valEl) valEl.textContent = fmt(value);
+      }
+      function setValue(v, silent) {
+        value = snap(clamp(v));
+        thumb.style.top = thumbTop(value) + '%';
+        if (hidden) hidden.value = String(value);
+        track.setAttribute('aria-valuenow', String(value));
+        refreshValLabel();
+        if (!silent && hidden) {
+          hidden.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+      function yToValue(clientY) {
+        const rect = track.getBoundingClientRect();
+        const pct = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+        return min + pct * (max - min);
+      }
+      function onDown(e) {
+        e.preventDefault();
+        el._vfaderDragging = true;
+        track.setPointerCapture(e.pointerId);
+        setValue(yToValue(e.clientY), false);
+      }
+      function onMove(e) {
+        if (!track.hasPointerCapture(e.pointerId)) return;
+        setValue(yToValue(e.clientY), false);
+      }
+      function onUp(e) {
+        if (track.hasPointerCapture(e.pointerId)) {
+          track.releasePointerCapture(e.pointerId);
+        }
+        el._vfaderDragging = false;
+      }
+      track.addEventListener('pointerdown', onDown);
+      track.addEventListener('pointermove', onMove);
+      track.addEventListener('pointerup', onUp);
+      track.addEventListener('pointercancel', onUp);
+
+      setValue(value, true);
+      return { setValue, get value() { return value; } };
+    }
+
+    function initVfaders() {
+      document.querySelectorAll('.vfader').forEach(el => {
+        if (el._vfader) return;
+        el._vfader = attachVfader(el);
+      });
+    }
+
+    function setVfaderFromInput(input, v) {
+      if (!input) return;
+      input.value = String(v);
+      const vf = input.closest('.vfader');
+      if (vf && vf._vfader) vf._vfader.setValue(Number(v), true);
+    }
+
+    initVfaders();
+
+    attachLiveJpeg(document.getElementById('camFeed'), '/snapshot/fov', {
+      overlayUrl: '/sub/api/vision/detections',
+      overlaySource: 'fov',
+      fit: 'cover',
+    });
+
+    attachLazyLiveJpeg(
+      document.getElementById('yoloFeedLeft'),
+      '.yolo-canvas',
+      '/snapshot/yolo_left',
+    );
+    attachLazyLiveJpeg(
+      document.getElementById('yoloFeedRight'),
+      '.yolo-canvas',
+      '/snapshot/yolo_right',
+    );
+
+    const ACTUATORS = [
+      { key: 'aftSteerY', label: 'Aft Y (ch3)' },
+      { key: 'aftSteerZ', label: 'Aft Z (ch2)' },
+      { key: 'thrusterX', label: 'Thruster' },
+      { key: 'finLeft', label: 'Fin L (ch4)' },
+      { key: 'finRight', label: 'Fin R (ch5)' },
+    ];
+
+    const actuatorBars = document.getElementById('actuatorBars');
+    ACTUATORS.forEach(a => {
+      const row = document.createElement('div');
+      row.className = 'actuator-row';
+      row.innerHTML = `
+        <label>${a.label}</label>
+        <div class="bar"><div class="bar-fill" data-key="${a.key}"></div></div>
+        <span class="num" data-num="${a.key}">0.00</span>`;
+      actuatorBars.appendChild(row);
+    });
+
+    const manualSliders = document.getElementById('manualSliders');
+    const manualValues = {};
+    const CONTROL_STORE_KEY = 'subDashboardControl';
+    let localControlMode = 'manual';
+    let localModelId = '';
+    let localBackend = '';
+    let yoloRunning = false;
+    let controlRestored = false;
+    let catalogModels = [];
+    let modelUiDirty = false;
+    const BACKEND_ORDER = ['hailo', 'ncnn', 'pytorch', 'openvino'];
+    const notifyState = {
+      mode: null,
+      xboxOverride: null,
+      yoloRunning: null,
+    };
+
+    function showHudToast(message, kind = 'info', ms = 3200) {
+      const stack = document.getElementById('hudToastStack');
+      if (!stack || !message) return;
+      const el = document.createElement('div');
+      el.className = 'hud-toast ' + kind;
+      el.textContent = message;
+      stack.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.35s';
+        setTimeout(() => el.remove(), 380);
+      }, ms);
+    }
+
+    function controlSourceLabel(ctrl) {
+      if (ctrl.mode === 'auto' && ctrl.xbox_override_active) return 'Xbox override';
+      if (ctrl.mode === 'xbox') return 'Xbox';
+      if (ctrl.mode === 'auto') return 'Auto';
+      return 'Manual';
+    }
+
+    function hudFaderSyncEnabled(ctrl, models) {
+      if (!ctrl) return false;
+      // Mirror remote actuators for auto/xbox and while YOLO is running.
+      if (ctrl.mode === 'auto' || ctrl.mode === 'xbox') return true;
+      if (models?.running) return true;
+      return false;
+    }
+
+    function hudActuatorSource(ctrl, models) {
+      if (!ctrl) return {};
+      if (ctrl.xbox_override_active) {
+        return ctrl.effective || {};
+      }
+      const yoloUp = !!(models && models.running);
+      if (ctrl.mode === 'auto' || yoloUp) {
+        return ctrl.auto || ctrl.effective || {};
+      }
+      return ctrl.effective || {};
+    }
+
+    function syncLocalModeFromServer(ctrl, models) {
+      if (!controlRestored || !ctrl) return;
+      const yoloUp = !!(models && models.running);
+      if (yoloUp && ctrl.mode === 'auto' && localControlMode !== 'auto') {
+        localControlMode = 'auto';
+        syncModeUi();
+        saveControlState();
+      }
+    }
+
+    function updateFinBar(fillEl, valEl, v) {
+      if (!fillEl || !valEl) return;
+      const n = Number(v) || 0;
+      valEl.textContent = fmt(n);
+      const pct = Math.min(50, Math.abs(n) * 50);
+      fillEl.classList.toggle('neg', n < 0);
+      if (n >= 0) {
+        fillEl.style.bottom = '50%';
+        fillEl.style.height = pct + '%';
+      } else {
+        fillEl.style.bottom = (50 - pct) + '%';
+        fillEl.style.height = pct + '%';
+      }
+    }
+
+    function updateAftSteerViz(y, z) {
+      const dot = document.getElementById('aftSteerDot');
+      const yEl = document.getElementById('aftSteerYVal');
+      const zEl = document.getElementById('aftSteerZVal');
+      if (yEl) yEl.textContent = fmt(y);
+      if (zEl) zEl.textContent = fmt(z);
+      if (dot) {
+        /* Match Xbox stick viz: up/left = smaller % (same as stickL) */
+        dot.style.left = ((Number(y) + 1) / 2 * 100) + '%';
+        dot.style.top = ((Number(z) + 1) / 2 * 100) + '%';
+      }
+    }
+
+    function syncBallastVfader(tank, cmd, allowSync) {
+      const root = document.querySelector(`.ballast-tank[data-tank="${tank}"]`);
+      if (!root) return;
+      const vf = root.querySelector('.vfader');
+      if (vf && vf._vfaderDragging) return;
+      if (!allowSync) return;
+      const slider = root.querySelector('.ballast-slider');
+      setVfaderFromInput(slider, cmd);
+      const valEl = root.querySelector('.ballast-vfader-val');
+      if (valEl) valEl.textContent = fmt(cmd);
+    }
+
+    function checkControlNotifications(ctrl, modelsPayload) {
+      const mode = ctrl.mode;
+      if (notifyState.mode != null && notifyState.mode !== mode) {
+        const labels = { xbox: 'Xbox', manual: 'Manual', auto: 'Auto (YOLO)' };
+        showHudToast('Control mode → ' + (labels[mode] || mode), 'info');
+      }
+      notifyState.mode = mode;
+
+      const override = !!(ctrl.mode === 'auto' && ctrl.xbox_override_active);
+      if (notifyState.xboxOverride != null && notifyState.xboxOverride !== override) {
+        showHudToast(
+          override ? 'Xbox override — manual control' : 'Xbox override released',
+          override ? 'warn' : 'info'
+        );
+      }
+      notifyState.xboxOverride = override;
+
+      if (modelsPayload) {
+        const running = !!modelsPayload.running;
+        if (notifyState.yoloRunning != null && notifyState.yoloRunning !== running) {
+          showHudToast(
+            running ? 'YOLO running' : 'YOLO stopped',
+            running ? 'ok' : 'info'
+          );
+        }
+        notifyState.yoloRunning = running;
+      }
+    }
+
+    function readControlState() {
+      try {
+        const raw = sessionStorage.getItem(CONTROL_STORE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function saveControlState() {
+      const ballast = {};
+      document.querySelectorAll('.ballast-tank').forEach(root => {
+        const tank = root.dataset.tank;
+        const slider = root.querySelector('.ballast-slider');
+        if (tank && slider) ballast[tank] = +slider.value;
+      });
+      sessionStorage.setItem(CONTROL_STORE_KEY, JSON.stringify({
+        mode: localControlMode,
+        modelId: localModelId,
+        backend: localBackend,
+        manual: { ...manualValues },
+        ballast,
+      }));
+    }
+
+    function applyManualToUi(values) {
+      ACTUATORS.forEach(a => {
+        const v = values[a.key] ?? 0;
+        manualValues[a.key] = v;
+        const sl = manualSliders.querySelector(`[data-slider="${a.key}"]`);
+        if (sl) sl.value = v;
+        const lab = document.querySelector(`[data-slider-val="${a.key}"]`);
+        if (lab) lab.textContent = fmt(v);
+      });
+    }
+
+    function applyBallastToUi(ballast) {
+      document.querySelectorAll('.ballast-tank').forEach(root => {
+        const tank = root.dataset.tank;
+        const slider = root.querySelector('.ballast-slider');
+        if (!tank || !slider) return;
+        setVfaderFromInput(slider, ballast[tank] ?? 0);
+      });
+    }
+
+    function syncModeUi() {
+      const sel = document.getElementById('modeSelect');
+      if (sel) sel.value = localControlMode;
+      const modelRow = document.getElementById('hudModelRow');
+      if (modelRow) modelRow.hidden = localControlMode !== 'auto';
+      document.querySelectorAll('.mode-tabs button').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === localControlMode);
+      });
+      document.getElementById('manualSliders').classList.toggle('visible', localControlMode === 'manual');
+    }
+
+    function modelCatalogSignature() {
+      return catalogModels.map(m => {
+        const be = Object.entries(m.backends || {})
+          .filter(([, info]) => info && info.available)
+          .map(([k]) => k)
+          .sort()
+          .join('+');
+        return `${m.id}:${m.label || ''}:${be}`;
+      }).join('|');
+    }
+
+    function syncModelSelectElement(selectEl) {
+      if (!selectEl) return;
+      const sig = modelCatalogSignature();
+      const desired = localModelId || '';
+      if (selectEl.dataset.catalogSig !== sig) {
+        selectEl.dataset.catalogSig = sig;
+        selectEl.innerHTML = '<option value="">— model —</option>';
+        catalogModels.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = `${m.label || m.id}${m.main ? ' ★' : ''}`;
+          selectEl.appendChild(opt);
+        });
+      }
+      if (selectEl.value !== desired) {
+        selectEl.value = desired;
+      }
+    }
+
+    function syncHudModelSelect() {
+      syncModelSelectElement(document.getElementById('hudModelSelect'));
+      syncModelSelectElement(document.getElementById('modelSelect'));
+    }
+
+    function startAutoModelIfNeeded() {
+      if (localControlMode !== 'auto' || !localModelId) return;
+      const model = catalogModels.find(m => m.id === localModelId);
+      const backend = pickBackendForModel(model, localBackend);
+      if (!backend) {
+        updateModelStatus({ state: 'error', error: 'No backend available for ' + localModelId });
+        return;
+      }
+      localBackend = backend;
+      selectModel(localModelId, backend);
+    }
+
+    function pickBackendForModel(model, prefer) {
+      if (!model) return '';
+      const backends = model.backends || {};
+      if (prefer && backends[prefer]?.available) return prefer;
+      const def = model.default_backend;
+      if (def && backends[def]?.available) return def;
+      for (const be of BACKEND_ORDER) {
+        if (backends[be]?.available) return be;
+      }
+      return '';
+    }
+
+    function populateBackendSelect(model) {
+      const backendSel = document.getElementById('backendSelect');
+      if (!backendSel) return;
+      const backends = model?.backends || {};
+      const picked = pickBackendForModel(model, localBackend);
+      if (picked) localBackend = picked;
+      backendSel.innerHTML = '<option value="">— backend —</option>';
+      BACKEND_ORDER.forEach(be => {
+        const info = backends[be] || { available: false };
+        const opt = document.createElement('option');
+        opt.value = be;
+        opt.textContent = info.available ? be : `${be} (unavailable)`;
+        opt.disabled = !info.available;
+        if (be === localBackend) opt.selected = true;
+        backendSel.appendChild(opt);
+      });
+    }
+
+    function renderModelTabs(modelsPayload) {
+      if (!modelsPayload) return;
+      catalogModels = modelsPayload.models || [];
+      yoloRunning = !!modelsPayload.running;
+      const userPicking = modelUiDirty || selectModel._inflight;
+      if (modelsPayload.pending && modelsPayload.pending_id) {
+        localModelId = modelsPayload.pending_id;
+        if (modelsPayload.pending_backend) localBackend = modelsPayload.pending_backend;
+      } else if (!userPicking) {
+        const activeId = modelsPayload.active_id || localModelId;
+        const activeBackend = modelsPayload.backend || localBackend;
+        if (activeId) localModelId = activeId;
+        if (activeBackend) localBackend = activeBackend;
+      }
+
+      if (!localModelId && catalogModels.length && !userPicking) {
+        const main = catalogModels.find(m => m.main) || catalogModels[0];
+        localModelId = main.id;
+        localBackend = pickBackendForModel(main, localBackend);
+      }
+
+      syncHudModelSelect();
+
+      const activeModel = catalogModels.find(m => m.id === localModelId) || catalogModels[0];
+      populateBackendSelect(activeModel);
+      updateModelStatus(modelsPayload.status, modelsPayload);
+    }
+
+    function updateModelStatus(status, payload) {
+      const el = document.getElementById('modelStatus');
+      if (!el) return;
+      el.classList.remove('error', 'loading');
+      const running = payload ? !!payload.running : yoloRunning;
+      const be = (status && status.backend) || localBackend;
+      if (status && (status.state === 'loading' || status.state === 'pending')) {
+        el.textContent = `Loading ${status.label || localModelId} (${be || '…'}) — closing the previous backend if needed`;
+        el.classList.add('loading');
+        return;
+      }
+      if (status && status.state === 'error') {
+        el.textContent = status.error || 'Model load failed';
+        el.classList.add('error');
+        return;
+      }
+      if (running && localModelId) {
+        const loaded = (status && status.loaded) || (payload && payload.loaded_ids) || [];
+        let extra = '';
+        if (Array.isArray(loaded) && loaded.length) {
+          extra = ' · loaded ' + loaded.map(x => {
+            if (typeof x === 'string') return x;
+            return `${x.id}${x.backend ? '(' + x.backend + ')' : ''}`;
+          }).join(', ');
+        }
+        el.textContent = `Running ${localModelId} · ${be || 'backend'}${extra}`;
+        return;
+      }
+      el.textContent = 'YOLO off — pick a backend to start inference';
+    }
+
+    async function selectModel(modelId, backend) {
+      if (!modelId || !backend) return;
+      if (selectModel._inflight) {
+        selectModel._pending = { modelId, backend };
+        return;
+      }
+      selectModel._inflight = true;
+      selectModel._pending = null;
+      modelUiDirty = true;
+      localModelId = modelId;
+      localBackend = backend;
+      syncHudModelSelect();
+      saveControlState();
+      updateModelStatus({ state: 'loading', label: modelId, backend });
+      try {
+        const r = await fetch('/sub/api/models/select', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: modelId, backend }),
+          signal: AbortSignal.timeout(60000),
+        });
+        let data;
+        try {
+          data = await r.json();
+        } catch (_) {
+          data = { ok: false, error: r.ok ? 'Invalid server response' : `HTTP ${r.status}` };
+        }
+        if (data.pending && data.pending_id) {
+          localModelId = data.pending_id;
+          if (data.pending_backend) localBackend = data.pending_backend;
+        } else {
+          if (data.active_id) localModelId = data.active_id;
+          if (data.backend) localBackend = data.backend;
+        }
+        syncHudModelSelect();
+        if (data.models) renderModelTabs(data);
+        if (data.ok) {
+          modelUiDirty = false;
+          localControlMode = 'auto';
+          syncModeUi();
+          saveControlState();
+          showHudToast(`Model → ${localModelId} (${localBackend})`, 'ok');
+          fetch('/sub/api/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'auto' }),
+          });
+          if (!data.models) {
+            updateModelStatus({ state: 'loading', label: modelId, backend });
+          }
+        } else if (data.error) {
+          modelUiDirty = false;
+          updateModelStatus({ state: 'error', error: data.error });
+          showHudToast(data.error, 'warn');
+        }
+      } catch (e) {
+        modelUiDirty = false;
+        const msg = e && e.name === 'TimeoutError'
+          ? 'Start timed out — restart ~/sub if the dashboard is stuck'
+          : String(e);
+        updateModelStatus({ state: 'error', error: msg });
+        showHudToast(msg, 'warn');
+      } finally {
+        selectModel._inflight = false;
+        const pending = selectModel._pending;
+        selectModel._pending = null;
+        if (pending) selectModel(pending.modelId, pending.backend);
+      }
+    }
+
+    async function stopYolo() {
+      updateModelStatus({ state: 'loading', label: 'stopping' });
+      try {
+        const r = await fetch('/sub/api/models/stop', { method: 'POST' });
+        const data = await r.json();
+        renderModelTabs(data);
+      } catch (e) {
+        updateModelStatus({ state: 'error', error: String(e) });
+      }
+    }
+
+    async function pushControlStateToServer() {
+      await fetch('/sub/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: localControlMode }),
+      });
+      if (localControlMode === 'manual') {
+        await fetch('/sub/api/control/actuators', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(manualValues),
+        });
+        const ballast = {};
+        document.querySelectorAll('.ballast-tank').forEach(root => {
+          const tank = root.dataset.tank;
+          const slider = root.querySelector('.ballast-slider');
+          if (tank && slider) ballast[tank] = +slider.value;
+        });
+        await fetch('/sub/api/control/ballast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fore: ballast.fore ?? 0,
+            aft: ballast.aft ?? 0,
+          }),
+        });
+      }
+    }
+
+    const servoCenterTuneTimers = {};
+    const servoLimitTuneTimers = {};
+
+    function renderServoCenterRows(channels) {
+      const root = document.getElementById('servoCenterRows');
+      if (!root) return;
+      root.innerHTML = '';
+      (channels || []).forEach((ch) => {
+        const tMin = ch.travel_min_tick != null ? ch.travel_min_tick : ch.tick_min;
+        const tMax = ch.travel_max_tick != null ? ch.travel_max_tick : ch.tick_max;
+        const centre = ch.centre_tick;
+        const loCap = Math.max(ch.tick_min, Math.min(centre - 1, ch.tick_max));
+        const hiCap = Math.min(ch.tick_max, Math.max(centre + 1, ch.tick_min));
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:0.85rem;padding-bottom:0.65rem;border-bottom:1px solid var(--border);';
+        row.innerHTML = `
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin-bottom:0.35rem;">
+            <strong style="font-size:0.78rem;">Ch ${ch.channel} · ${ch.label}</strong>
+            <span style="font-size:0.72rem;color:var(--muted);">saved zero: tick <span data-saved-tick="${ch.channel}">${ch.centre_tick}</span>
+              (~${ch.centre_deg}°)</span>
+            <span style="font-size:0.72rem;color:var(--muted);">limits:
+              <span data-saved-min="${ch.channel}">${tMin}</span> … <span data-saved-max="${ch.channel}">${tMax}</span></span>
+            <span data-status="${ch.channel}" style="font-size:0.68rem;color:var(--muted);margin-left:auto;"></span>
+          </div>
+          <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.2rem;">Centre (zero)</div>
+          <input type="range" data-tune="${ch.channel}" min="${ch.tick_min}" max="${ch.tick_max}" step="1"
+            value="${ch.centre_tick}" style="width:100%;max-width:32rem;" />
+          <div style="font-size:0.72rem;margin-top:0.25rem;">Centre tick: <strong data-live-tick="${ch.channel}">${ch.centre_tick}</strong></div>
+          <div class="btn-row" style="margin-top:0.35rem;">
+            <button type="button" class="primary" data-save-center="${ch.channel}">Set as zero</button>
+          </div>
+          <div style="font-size:0.7rem;color:var(--muted);margin:0.55rem 0 0.2rem;">Min travel (full −1, tick ≤ centre)</div>
+          <input type="range" data-tune-min="${ch.channel}" min="${ch.tick_min}" max="${loCap}" step="1"
+            value="${Math.min(tMin, loCap)}" style="width:100%;max-width:32rem;" />
+          <div style="font-size:0.72rem;margin-top:0.2rem;">Min tick: <strong data-live-min="${ch.channel}">${tMin}</strong>
+            ${ch.travel_min_deg != null ? `(~${ch.travel_min_deg}°)` : ''}</div>
+          <div class="btn-row" style="margin-top:0.3rem;">
+            <button type="button" data-save-limit-min="${ch.channel}">Set min limit</button>
+          </div>
+          <div style="font-size:0.7rem;color:var(--muted);margin:0.55rem 0 0.2rem;">Max travel (full +1, tick ≥ centre)</div>
+          <input type="range" data-tune-max="${ch.channel}" min="${hiCap}" max="${ch.tick_max}" step="1"
+            value="${Math.max(tMax, hiCap)}" style="width:100%;max-width:32rem;" />
+          <div style="font-size:0.72rem;margin-top:0.2rem;">Max tick: <strong data-live-max="${ch.channel}">${tMax}</strong>
+            ${ch.travel_max_deg != null ? `(~${ch.travel_max_deg}°)` : ''}</div>
+          <div class="btn-row" style="margin-top:0.3rem;">
+            <button type="button" data-save-limit-max="${ch.channel}">Set max limit</button>
+          </div>`;
+        root.appendChild(row);
+      });
+
+      root.querySelectorAll('input[data-tune]').forEach((slider) => {
+        slider.addEventListener('input', (e) => {
+          const ch = parseInt(e.target.dataset.tune, 10);
+          const tick = parseInt(e.target.value, 10);
+          const live = root.querySelector(`[data-live-tick="${ch}"]`);
+          if (live) live.textContent = String(tick);
+          clearTimeout(servoCenterTuneTimers[ch]);
+          servoCenterTuneTimers[ch] = setTimeout(() => tuneServoCenter(ch, tick), 80);
+        });
+      });
+      root.querySelectorAll('input[data-tune-min]').forEach((slider) => {
+        slider.addEventListener('input', (e) => {
+          const ch = parseInt(e.target.dataset.tuneMin, 10);
+          const tick = parseInt(e.target.value, 10);
+          const live = root.querySelector(`[data-live-min="${ch}"]`);
+          if (live) live.textContent = String(tick);
+          const key = `${ch}-min`;
+          clearTimeout(servoLimitTuneTimers[key]);
+          servoLimitTuneTimers[key] = setTimeout(() => tuneServoLimit(ch, 'min', tick), 80);
+        });
+      });
+      root.querySelectorAll('input[data-tune-max]').forEach((slider) => {
+        slider.addEventListener('input', (e) => {
+          const ch = parseInt(e.target.dataset.tuneMax, 10);
+          const tick = parseInt(e.target.value, 10);
+          const live = root.querySelector(`[data-live-max="${ch}"]`);
+          if (live) live.textContent = String(tick);
+          const key = `${ch}-max`;
+          clearTimeout(servoLimitTuneTimers[key]);
+          servoLimitTuneTimers[key] = setTimeout(() => tuneServoLimit(ch, 'max', tick), 80);
+        });
+      });
+      root.querySelectorAll('[data-save-center]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const ch = parseInt(btn.dataset.saveCenter, 10);
+          const slider = root.querySelector(`input[data-tune="${ch}"]`);
+          const tick = slider ? parseInt(slider.value, 10) : 0;
+          saveServoCenter(ch, tick);
+        });
+      });
+      root.querySelectorAll('[data-save-limit-min]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const ch = parseInt(btn.dataset.saveLimitMin, 10);
+          const slider = root.querySelector(`input[data-tune-min="${ch}"]`);
+          const tick = slider ? parseInt(slider.value, 10) : 0;
+          saveServoLimit(ch, 'min', tick);
+        });
+      });
+      root.querySelectorAll('[data-save-limit-max]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const ch = parseInt(btn.dataset.saveLimitMax, 10);
+          const slider = root.querySelector(`input[data-tune-max="${ch}"]`);
+          const tick = slider ? parseInt(slider.value, 10) : 0;
+          saveServoLimit(ch, 'max', tick);
+        });
+      });
+    }
+
+    function setServoCalBanner(active) {
+      const el = document.getElementById('servoCenterCalBanner');
+      if (el) el.style.display = active ? 'block' : 'none';
+    }
+
+    async function loadServoCentersUi() {
+      const root = document.getElementById('servoCenterRows');
+      try {
+        const r = await fetch('/sub/api/servo/centers', { cache: 'no-store' });
+        const j = await r.json();
+        if (!j.channels || !j.channels.length) {
+          if (root) root.innerHTML = '<p style="font-size:0.72rem;color:var(--muted);">No channel config.</p>';
+          return;
+        }
+        renderServoCenterRows(j.channels);
+        setServoCalBanner(!!j.cal_active);
+      } catch (e) {
+        if (root) {
+          root.innerHTML = '<p style="font-size:0.72rem;color:var(--danger,#f66);">Could not load servo centres — restart ~/sub</p>';
+        }
+      }
+    }
+
+    async function tuneServoCenter(channel, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      try {
+        const r = await fetch('/sub/api/servo/centers/tune', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, centre_tick: tick }),
+        });
+        const j = await r.json();
+        if (status) {
+          status.textContent = j.ok ? 'moving…' : (j.error || 'Send failed');
+          status.style.color = j.ok ? '' : 'var(--danger, #f66)';
+        }
+        setServoCalBanner(!!j.cal_active);
+      } catch (_) {
+        if (status) status.textContent = 'tune failed';
+      }
+    }
+
+    async function saveServoCenter(channel, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      if (status) status.textContent = 'Saving…';
+      try {
+        const r = await fetch('/sub/api/servo/centers/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, centre_tick: tick }),
+        });
+        const j = await r.json();
+        if (status) status.textContent = j.ok ? 'Saved as zero' : 'Saved on Pi; ESP sync failed';
+        const saved = document.querySelector(`[data-saved-tick="${channel}"]`);
+        if (saved && j.centre_tick != null) saved.textContent = String(j.centre_tick);
+      } catch (_) {
+        if (status) status.textContent = 'Save failed';
+      }
+    }
+
+    async function tuneServoLimit(channel, end, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      try {
+        const r = await fetch('/sub/api/servo/limits/tune', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, end, tick }),
+        });
+        const j = await r.json();
+        if (status) {
+          status.textContent = j.ok ? `limit ${end}…` : (j.error || 'Send failed');
+          status.style.color = j.ok ? '' : 'var(--danger, #f66)';
+        }
+        setServoCalBanner(!!j.cal_active);
+      } catch (_) {
+        if (status) status.textContent = 'limit tune failed';
+      }
+    }
+
+    async function saveServoLimit(channel, end, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      if (status) status.textContent = `Saving ${end}…`;
+      try {
+        const r = await fetch('/sub/api/servo/limits/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, end, tick }),
+        });
+        const j = await r.json();
+        if (status) status.textContent = j.ok ? `Saved ${end} limit` : (j.error || 'Save failed');
+        const selMin = document.querySelector(`[data-saved-min="${channel}"]`);
+        const selMax = document.querySelector(`[data-saved-max="${channel}"]`);
+        if (selMin && j.min_tick != null) selMin.textContent = String(j.min_tick);
+        if (selMax && j.max_tick != null) selMax.textContent = String(j.max_tick);
+      } catch (_) {
+        if (status) status.textContent = 'Save failed';
+      }
+    }
+
+    loadServoCentersUi();
+
+    document.getElementById('servoCenterDoneBtn')?.addEventListener('click', async () => {
+      try {
+        const r = await fetch('/sub/api/servo/centers/done', { method: 'POST' });
+        const j = await r.json();
+        setServoCalBanner(!!j.cal_active);
+      } catch (_) { /* ignore */ }
+    });
+
+    async function restoreControlState() {
+      const saved = readControlState();
+      localModelId = saved?.modelId || '';
+      localBackend = saved?.backend || '';
+      applyManualToUi(saved?.manual || {});
+      applyBallastToUi(saved?.ballast || { fore: 0, aft: 0 });
+
+      let serverCtrl = null;
+      let modelsPayload = null;
+      try {
+        const [ctrlRes, modelsRes] = await Promise.all([
+          fetch('/sub/api/control', { cache: 'no-store', signal: AbortSignal.timeout(4000) }),
+          fetch('/sub/api/models', { cache: 'no-store', signal: AbortSignal.timeout(4000) }),
+        ]);
+        serverCtrl = await ctrlRes.json();
+        modelsPayload = await modelsRes.json();
+      } catch (_) { /* SSE will catch up */ }
+
+      const yoloUp = !!(modelsPayload && modelsPayload.running);
+      if (yoloUp && serverCtrl?.mode === 'auto') {
+        localControlMode = 'auto';
+      } else if (serverCtrl?.mode && serverCtrl.mode !== 'manual') {
+        localControlMode = serverCtrl.mode;
+      } else {
+        localControlMode = saved?.mode || 'manual';
+      }
+      syncModeUi();
+
+      // Don't clobber an active YOLO auto session with stale localStorage manual.
+      if (!(yoloUp && serverCtrl?.mode === 'auto')) {
+        pushControlStateToServer();
+      }
+
+      if (modelsPayload) {
+        renderModelTabs(modelsPayload);
+        if (localControlMode === 'auto') startAutoModelIfNeeded();
+      }
+      if (!saved) saveControlState();
+      controlRestored = true;
+      notifyState.mode = localControlMode;
+    }
+
+    ACTUATORS.forEach(a => {
+      manualValues[a.key] = 0;
+      const row = document.createElement('div');
+      row.className = 'slider-row';
+      row.innerHTML = `
+        <label>${a.label}</label>
+        <input type="range" class="std-slider" min="-1" max="1" step="0.05" value="0" data-slider="${a.key}">
+        <span class="val" data-slider-val="${a.key}">0.00</span>`;
+      manualSliders.appendChild(row);
+    });
+
+    let manualTimer;
+    function sendManualActuators() {
+      clearTimeout(manualTimer);
+      manualTimer = setTimeout(async () => {
+        await fetch('/sub/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'manual' }),
+        });
+        await fetch('/sub/api/control/actuators', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(manualValues),
+        });
+      }, 80);
+    }
+
+    manualSliders.querySelectorAll('input[type=range]').forEach(sl => {
+      sl.addEventListener('input', () => {
+        const key = sl.dataset.slider;
+        manualValues[key] = +sl.value;
+        document.querySelector(`[data-slider-val="${key}"]`).textContent = fmt(+sl.value);
+        localControlMode = 'manual';
+        syncModeUi();
+        saveControlState();
+        sendManualActuators();
+      });
+    });
+
+    function renderExpectedPins(pins) {
+      const sub = pins.expected?.sub || {};
+      const pca = pins.expected?.pca9685?.channels || {};
+      const thr = pins.expected?.l298n?.thruster || {};
+      const lines = [
+        `I2C SDA=${pins.expected?.esp32?.i2c?.sda_gpio ?? '?'} SCL=${pins.expected?.esp32?.i2c?.scl_gpio ?? '?'}`,
+        `Servos: ch0=thruster ESC · ch1=sonar · ch2=aftZ · ch3=aftY · ch4=finL · ch5=finR`,
+        `        ch4=finL=${pca.fin_left?.channel ?? '?'} ch5=finR=${pca.fin_right?.channel ?? '?'}`,
+        `Thruster ESC: PCA ch${pca.thruster_esc?.channel ?? thr.channel ?? 0} · RT forward, LT reverse`,
+        `Fore ballast DIR=${sub.ballast?.fore?.dir_gpio ?? '?'} PWM=${sub.ballast?.fore?.pwm_gpio ?? '?'} pot=${sub.ballast?.fore?.pot_adc_gpio ?? '?'}`,
+        `Aft ballast DIR=${sub.ballast?.aft?.dir_gpio ?? '?'} PWM=${sub.ballast?.aft?.pwm_gpio ?? '?'} pot=${sub.ballast?.aft?.pot_adc_gpio ?? '?'}`,
+        `Leak board GPIO ${sub.leaks?.signal_gpio ?? sub.leaks?.gpios?.[0] ?? '?'} (${(sub.leaks?.zones || sub.leaks?.labels || []).length || 4} zones)`,
+        `ADC battery=${sub.adc?.battery ?? '?'} depth=${sub.adc?.depth ?? '?'}`,
+        `Pi UART: ESP RX=${sub.pi_uart?.esp_rx ?? '?'} TX=${sub.pi_uart?.esp_tx ?? '?'}`,
+      ];
+      document.getElementById('expectedPins').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+    }
+
+    function renderEspPins(pins, diag) {
+      const lines = pins.esp_pins_lines || [];
+      const el = document.getElementById('espPins');
+      if (!lines.length) {
+        el.textContent = 'No data — click PINS or Run All';
+        return;
+      }
+      el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+      if (diag.last_pong_ts) {
+        document.getElementById('pinDiagStatus').textContent =
+          'PONG ' + new Date(diag.last_pong_ts * 1000).toLocaleTimeString();
+      }
+    }
+
+    async function sendPinCmd(cmd) {
+      await fetch('/sub/api/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd }),
+      });
+    }
+
+    document.querySelectorAll('[data-cmd]').forEach(btn => {
+      btn.addEventListener('click', () => sendPinCmd(btn.dataset.cmd));
+    });
+
+    document.getElementById('runAllTests').addEventListener('click', async () => {
+      const btn = document.getElementById('runAllTests');
+      btn.disabled = true;
+      btn.textContent = 'Running…';
+      try {
+        const r = await fetch('/sub/api/test/run', { method: 'POST' });
+        const data = await r.json();
+        document.getElementById('pinDiagStatus').textContent =
+          data.all_ok ? 'ALL PASS' : `${data.results.filter(x => x.ok).length}/${data.results.length} pass`;
+        document.getElementById('pinDiagStatus').style.color = data.all_ok ? 'var(--ok)' : 'var(--warn)';
+        data.results.forEach(res => {
+          const match = [...document.querySelectorAll('[data-cmd]')].find(
+            b => b.dataset.cmd === res.command || (res.command.startsWith('TEST S') && b.dataset.cmd.startsWith('TEST S'))
+          );
+          if (match) match.classList.toggle('pass', res.ok);
+          if (match) match.classList.toggle('fail', !res.ok);
+        });
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run All Tests';
+      }
+    });
+
+    function fmt(v, d = 2) {
+      if (v == null || Number.isNaN(v)) return '—';
+      return Number(v).toFixed(d);
+    }
+
+    function setBadge(el, text, cls) {
+      el.textContent = text;
+      el.className = 'badge ' + (cls || 'off');
+    }
+
+    function updateActuators(eff, ctrl, models) {
+      const thr = eff.thrusterX ?? eff.thruster_x ?? 0;
+      const hudThr = document.getElementById('hudThrustSlider');
+      const hudThrVal = document.getElementById('hudThrustVal');
+      const thrustVf = hudThr?.closest('.vfader');
+      const syncRemote = hudFaderSyncEnabled(ctrl, models);
+      if (hudThr && syncRemote && !(thrustVf && thrustVf._vfaderDragging)) {
+        setVfaderFromInput(hudThr, thr);
+      }
+      if (hudThrVal) hudThrVal.textContent = fmt(thr);
+
+      const finL = eff.finLeft ?? eff.fin_left ?? 0;
+      const finR = eff.finRight ?? eff.fin_right ?? 0;
+      updateFinBar(
+        document.getElementById('finLeftFill'),
+        document.getElementById('finLeftVal'),
+        finL
+      );
+      updateFinBar(
+        document.getElementById('finRightFill'),
+        document.getElementById('finRightVal'),
+        finR
+      );
+
+      const aftY = eff.aftSteerY ?? eff.aft_steer_y ?? 0;
+      const aftZ = eff.aftSteerZ ?? eff.aft_steer_z ?? 0;
+      updateAftSteerViz(aftY, aftZ);
+
+      if (ctrl) {
+        syncBallastVfader('fore', ctrl.ballast_fore_command ?? 0, syncRemote);
+        syncBallastVfader('aft', ctrl.ballast_aft_command ?? 0, syncRemote);
+        const srcEl = document.getElementById('hudInputSrc');
+        if (srcEl) srcEl.textContent = controlSourceLabel(ctrl);
+      }
+
+      ACTUATORS.forEach(a => {
+        const v = eff[a.key] ?? 0;
+        const pct = ((v + 1) / 2) * 100;
+        const bar = document.querySelector(`.bar-fill[data-key="${a.key}"]`);
+        const num = document.querySelector(`[data-num="${a.key}"]`);
+        if (bar) bar.style.width = pct + '%';
+        if (num) num.textContent = fmt(v);
+      });
+    }
+
+    function updateHudBars(tel) {
+      const depthM = tel.depth?.meters;
+      const depthFill = document.getElementById('depthBarFill');
+      if (depthFill) {
+        const pct = depthM != null && depthM >= 0 ? Math.min(100, (depthM / 10) * 100) : 0;
+        depthFill.style.height = pct + '%';
+      }
+      const g = tel.gyro || {};
+      const tilt = Math.min(90, Math.hypot(g.pitch || 0, g.roll || 0));
+      const accelFill = document.getElementById('accelBarFill');
+      const accelVal = document.getElementById('accelVal');
+      if (accelFill) accelFill.style.height = Math.min(100, (tilt / 90) * 100) + '%';
+      if (accelVal) accelVal.textContent = fmt(tilt, 0) + '°';
+    }
+
+    function updateSticks(_xbox) {
+      /* Xbox stick viz removed from HUD — status stays on badgeXbox */
+    }
+
+    function updateLeaks(leaks, labels) {
+      const grid = document.getElementById('leakGrid');
+      const meta = document.getElementById('leakBoardMeta');
+      const names = labels && labels.length ? labels : (leaks.labels || []);
+      const combined = leaks.combined !== false;
+      const sensors = leaks.sensors && leaks.sensors.length ? leaks.sensors : [];
+      const gpio = leaks.gpios && leaks.gpios.length ? leaks.gpios[0] : '?';
+      if (meta) {
+        meta.textContent = combined
+          ? `${names.length || 4} zones · shared GPIO ${gpio}`
+          : `${sensors.length} sensor(s)`;
+      }
+      if (!sensors.length) {
+        grid.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;">No leak data yet</div>';
+        return;
+      }
+      const triggered = !!leaks.triggered;
+      const displayCount = combined ? (names.length || sensors.length) : sensors.length;
+      grid.innerHTML = Array.from({ length: displayCount }, (_, i) => {
+        const name = names[i] || ('Zone ' + (i + 1));
+        const active = combined ? triggered : !!sensors[i];
+        return `<div class="leak-cell ${active ? 'triggered' : ''}">
+          <div class="dot"></div>
+          <span>${name}</span>
+        </div>`;
+      }).join('');
+      document.body.classList.toggle('leak-alarm', triggered);
+      const badge = document.getElementById('badgeLeak');
+      if (triggered) {
+        setBadge(badge, 'LEAK DETECTED', 'alarm');
+      } else {
+        setBadge(badge, 'Leaks — OK', 'ok');
+      }
+      document.getElementById('leakStatus').textContent = triggered ? 'ALARM' : 'OK';
+    }
+
+    function updateGyro(g) {
+      document.getElementById('gyroPitch').textContent = fmt(g.pitch, 1);
+      document.getElementById('gyroRoll').textContent = fmt(g.roll, 1);
+      document.getElementById('gyroYaw').textContent = fmt(g.yaw, 1);
+      const roll = g.roll ?? 0;
+      const pitch = g.pitch ?? 0;
+      const yaw = g.yaw ?? 0;
+      const horizonEl = document.getElementById('horizon');
+      const scale = horizonEl?.offsetWidth || 80;
+      const pitchPx = pitch * (scale * 0.018);
+      document.getElementById('horizonInner').style.transform =
+        `rotate(${roll}deg) translateY(${pitchPx}px)`;
+      const yawRing = document.getElementById('horizonYawRing');
+      if (yawRing) yawRing.style.setProperty('--horizon-yaw', `${-yaw}deg`);
+      const horizon = document.getElementById('horizon');
+      if (horizon) {
+        horizon.classList.toggle('tilt-warn', Math.hypot(roll, pitch) > 25);
+      }
+    }
+
+    const sonarCanvas = document.getElementById('sonarCanvas');
+    const sonarCtx = sonarCanvas.getContext('2d');
+    const gpsCanvas = document.getElementById('gpsCanvas');
+    const gpsCtx = gpsCanvas.getContext('2d');
+    let lastSonar = {};
+    let lastGps = {};
+
+    function resizeVizCanvas(canvas, wrap) {
+      const rect = wrap.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.floor(rect.width * dpr));
+      const h = Math.max(1, Math.floor(rect.height * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      return { w, h, dpr };
+    }
+
+    function sonarPolarXY(cx, cy, radius, angleDeg, rangeM, maxRange) {
+      const rad = angleDeg * Math.PI / 180;
+      const r = Math.min(1, rangeM / maxRange) * radius;
+      return {
+        x: cx + r * Math.sin(rad),
+        y: cy - r * Math.cos(rad),
+      };
+    }
+
+    function updateSonar(sonar) {
+      const wrap = document.getElementById('sonarWrap');
+      const offline = document.getElementById('sonarOffline');
+      const meta = document.getElementById('sonarMeta');
+      const { w, h } = resizeVizCanvas(sonarCanvas, wrap);
+      const cx = w / 2;
+      const cy = h / 2;
+      const radius = Math.min(cx, cy) * 0.88;
+      const maxRange = sonar.max_range_m || 6;
+
+      sonarCtx.clearRect(0, 0, w, h);
+      sonarCtx.fillStyle = '#080d12';
+      sonarCtx.fillRect(0, 0, w, h);
+
+      sonarCtx.strokeStyle = '#243044';
+      sonarCtx.lineWidth = 1;
+      for (let ring = 1; ring <= 3; ring++) {
+        sonarCtx.beginPath();
+        sonarCtx.arc(cx, cy, (radius * ring) / 3, 0, Math.PI * 2);
+        sonarCtx.stroke();
+      }
+      sonarCtx.strokeStyle = '#334155';
+      sonarCtx.beginPath();
+      sonarCtx.moveTo(cx, cy - radius);
+      sonarCtx.lineTo(cx, cy + radius);
+      sonarCtx.moveTo(cx - radius, cy);
+      sonarCtx.lineTo(cx + radius, cy);
+      sonarCtx.stroke();
+
+      sonarCtx.fillStyle = '#3b82f6';
+      sonarCtx.beginPath();
+      sonarCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+      sonarCtx.fill();
+
+      const points = sonar.points || [];
+      const valid = points.filter(p => p.range_m != null && p.range_m > 0);
+      offline.style.display = sonar.connected && valid.length ? 'none' : 'flex';
+
+      if (valid.length >= 2) {
+        sonarCtx.strokeStyle = 'rgba(34, 197, 94, 0.55)';
+        sonarCtx.lineWidth = 2;
+        sonarCtx.beginPath();
+        valid.forEach((p, i) => {
+          const pt = sonarPolarXY(cx, cy, radius, p.angle_deg, p.range_m, maxRange);
+          if (i === 0) sonarCtx.moveTo(pt.x, pt.y);
+          else sonarCtx.lineTo(pt.x, pt.y);
+        });
+        sonarCtx.closePath();
+        sonarCtx.stroke();
+      }
+
+      valid.forEach(p => {
+        const pt = sonarPolarXY(cx, cy, radius, p.angle_deg, p.range_m, maxRange);
+        const isNear = p.range_m < maxRange * 0.75;
+        sonarCtx.fillStyle = isNear ? '#f59e0b' : '#22c55e';
+        sonarCtx.beginPath();
+        sonarCtx.arc(pt.x, pt.y, isNear ? 4 : 3, 0, Math.PI * 2);
+        sonarCtx.fill();
+      });
+
+      meta.innerHTML =
+        `Servo <span>${sonar.servo_deg != null ? sonar.servo_deg + '°' : '—'}</span> · ` +
+        `points <span>${valid.length}</span> · max <span>${fmt(maxRange, 1)} m</span>`;
+    }
+
+    function latLonToLocalM(lat, lon, origin) {
+      if (!origin) return { x: 0, y: 0 };
+      const latRad = origin.lat * Math.PI / 180;
+      const y = (lat - origin.lat) * 110540;
+      const x = (lon - origin.lon) * 111320 * Math.cos(latRad);
+      return { x, y };
+    }
+
+    function niceMetreStep(spanM) {
+      const raw = Math.max(spanM / 5, 0.5);
+      const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+      const n = raw / pow;
+      if (n < 1.5) return pow;
+      if (n < 3.5) return 2 * pow;
+      if (n < 7.5) return 5 * pow;
+      return 10 * pow;
+    }
+
+    function fmtMetres(value, digits) {
+      if (value == null || Number.isNaN(value)) return '—';
+      const abs = Math.abs(value);
+      const d = digits != null ? digits : (abs >= 100 ? 0 : abs >= 10 ? 1 : 2);
+      return value.toFixed(d);
+    }
+
+    function updateGps(gps) {
+      const wrap = document.getElementById('gpsWrap');
+      const offline = document.getElementById('gpsOffline');
+      const meta = document.getElementById('gpsMeta');
+      const { w, h, dpr } = resizeVizCanvas(gpsCanvas, wrap);
+
+      gpsCtx.clearRect(0, 0, w, h);
+      gpsCtx.fillStyle = '#080d12';
+      gpsCtx.fillRect(0, 0, w, h);
+
+      const track = gps.track || [];
+      const hasFix = gps.connected && gps.lat != null && gps.lon != null;
+      const online = gps.device_online;
+      if (!online) {
+        offline.textContent = 'Scanning for USB GPS…';
+        offline.style.display = hasFix ? 'none' : 'flex';
+      } else if (!hasFix) {
+        const sats = gps.satellites || 0;
+        offline.textContent = sats > 0
+          ? `GPS connected — ${sats} satellites, waiting for a 3D fix…`
+          : 'GPS connected — 0 satellites. Place the dongle outdoors or in a window.';
+        offline.style.display = 'flex';
+      } else {
+        offline.style.display = 'none';
+      }
+
+      const origin = gps.origin || (hasFix && !gps.settling ? { lat: gps.lat, lon: gps.lon } : null);
+      if (online && hasFix && gps.settling) {
+        offline.textContent = 'Hold still — averaging GPS start position…';
+        offline.style.display = 'flex';
+      }
+      if (!origin || track.length === 0) {
+        const sats = gps.satellites ?? '—';
+        const hdop = gps.hdop != null ? fmt(gps.hdop, 1) : '—';
+        meta.innerHTML =
+          `East <span>—</span> m · North <span>—</span> m · Range <span>—</span> m · ` +
+          `Sats <span>${sats}</span> · HDOP <span>${hdop}</span>`;
+        return;
+      }
+
+      const locals = track.map(pt => latLonToLocalM(pt.lat, pt.lon, origin));
+      const cur = latLonToLocalM(gps.lat, gps.lon, origin);
+      const minMove = gps.min_move_m || 5;
+      let rangeM = Math.hypot(cur.x, cur.y);
+      if (rangeM < minMove) {
+        cur.x = 0;
+        cur.y = 0;
+        rangeM = 0;
+      }
+      let minX = 0, maxX = 0, minY = 0, maxY = 0;
+      locals.concat([cur]).forEach(p => {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      });
+
+      const MIN_SPAN_M = 10;
+      const viewSpan = Math.max(maxX - minX, maxY - minY, MIN_SPAN_M) * 1.2;
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      const half = viewSpan / 2;
+      const left = midX - half;
+      const bottom = midY - half;
+      const pad = 28 * (dpr || 1);
+      const scale = Math.min((w - pad * 2) / viewSpan, (h - pad * 2) / viewSpan);
+      const toCanvas = (p) => ({
+        x: pad + (p.x - left) * scale,
+        y: h - pad - (p.y - bottom) * scale,
+      });
+
+      const step = niceMetreStep(viewSpan);
+      const fontPx = Math.max(10, 11 * (dpr || 1));
+      gpsCtx.lineWidth = Math.max(1, dpr || 1);
+      gpsCtx.font = `${fontPx}px ui-sans-serif, system-ui, sans-serif`;
+      gpsCtx.textBaseline = 'top';
+
+      const gridStartX = Math.floor(left / step) * step;
+      const gridStartY = Math.floor(bottom / step) * step;
+      for (let gx = gridStartX; gx <= left + viewSpan + step; gx += step) {
+        const c = toCanvas({ x: gx, y: bottom });
+        gpsCtx.strokeStyle = Math.abs(gx) < 1e-6 ? '#3b4a5c' : '#1b2533';
+        gpsCtx.beginPath();
+        gpsCtx.moveTo(c.x, pad);
+        gpsCtx.lineTo(c.x, h - pad);
+        gpsCtx.stroke();
+        gpsCtx.fillStyle = '#64748b';
+        gpsCtx.textAlign = 'center';
+        gpsCtx.fillText(`${gx === 0 ? '0' : gx.toFixed(gx >= 10 || gx <= -10 ? 0 : 1)}`, c.x, h - pad + 4);
+      }
+      gpsCtx.textAlign = 'right';
+      gpsCtx.textBaseline = 'middle';
+      for (let gy = gridStartY; gy <= bottom + viewSpan + step; gy += step) {
+        const c = toCanvas({ x: left, y: gy });
+        gpsCtx.strokeStyle = Math.abs(gy) < 1e-6 ? '#3b4a5c' : '#1b2533';
+        gpsCtx.beginPath();
+        gpsCtx.moveTo(pad, c.y);
+        gpsCtx.lineTo(w - pad, c.y);
+        gpsCtx.stroke();
+        gpsCtx.fillStyle = '#64748b';
+        gpsCtx.fillText(`${gy === 0 ? '0' : gy.toFixed(gy >= 10 || gy <= -10 ? 0 : 1)}`, pad - 4, c.y);
+      }
+
+      const originC = toCanvas({ x: 0, y: 0 });
+      gpsCtx.strokeStyle = '#64748b';
+      gpsCtx.lineWidth = Math.max(1, dpr || 1);
+      gpsCtx.beginPath();
+      gpsCtx.moveTo(originC.x - 6, originC.y);
+      gpsCtx.lineTo(originC.x + 6, originC.y);
+      gpsCtx.moveTo(originC.x, originC.y - 6);
+      gpsCtx.lineTo(originC.x, originC.y + 6);
+      gpsCtx.stroke();
+      gpsCtx.fillStyle = '#94a3b8';
+      gpsCtx.textAlign = 'left';
+      gpsCtx.textBaseline = 'bottom';
+      gpsCtx.fillText('start', originC.x + 8, originC.y - 4);
+
+      gpsCtx.fillStyle = '#64748b';
+      gpsCtx.textAlign = 'center';
+      gpsCtx.textBaseline = 'bottom';
+      gpsCtx.fillText('N', w / 2, pad - 4);
+      gpsCtx.textAlign = 'left';
+      gpsCtx.textBaseline = 'middle';
+      gpsCtx.fillText('E', w - pad + 6, h / 2);
+
+      const barM = step;
+      const barPx = barM * scale;
+      const barX = w - pad - barPx;
+      const barY = pad + 8;
+      gpsCtx.strokeStyle = '#94a3b8';
+      gpsCtx.lineWidth = 2 * (dpr || 1);
+      gpsCtx.beginPath();
+      gpsCtx.moveTo(barX, barY);
+      gpsCtx.lineTo(barX + barPx, barY);
+      gpsCtx.moveTo(barX, barY - 4);
+      gpsCtx.lineTo(barX, barY + 4);
+      gpsCtx.moveTo(barX + barPx, barY - 4);
+      gpsCtx.lineTo(barX + barPx, barY + 4);
+      gpsCtx.stroke();
+      gpsCtx.fillStyle = '#94a3b8';
+      gpsCtx.textAlign = 'center';
+      gpsCtx.textBaseline = 'top';
+      gpsCtx.fillText(`${barM >= 10 ? barM.toFixed(0) : barM} m`, barX + barPx / 2, barY + 6);
+
+      if (locals.length >= 2) {
+        gpsCtx.strokeStyle = '#3b82f6';
+        gpsCtx.lineWidth = 2 * (dpr || 1);
+        gpsCtx.beginPath();
+        locals.forEach((p, i) => {
+          const c = toCanvas(p);
+          if (i === 0) gpsCtx.moveTo(c.x, c.y);
+          else gpsCtx.lineTo(c.x, c.y);
+        });
+        gpsCtx.stroke();
+      }
+
+      const curC = toCanvas(cur);
+      gpsCtx.fillStyle = '#22c55e';
+      gpsCtx.beginPath();
+      gpsCtx.arc(curC.x, curC.y, 5 * (dpr || 1), 0, Math.PI * 2);
+      gpsCtx.fill();
+
+      if (gps.heading_deg != null) {
+        const headRad = (gps.heading_deg - 90) * Math.PI / 180;
+        const headLen = 16 * (dpr || 1);
+        gpsCtx.strokeStyle = '#22c55e';
+        gpsCtx.lineWidth = 2 * (dpr || 1);
+        gpsCtx.beginPath();
+        gpsCtx.moveTo(curC.x, curC.y);
+        gpsCtx.lineTo(curC.x + Math.cos(headRad) * headLen, curC.y + Math.sin(headRad) * headLen);
+        gpsCtx.stroke();
+      }
+
+      let pathM = 0;
+      for (let i = 1; i < locals.length; i++) {
+        const dx = locals[i].x - locals[i - 1].x;
+        const dy = locals[i].y - locals[i - 1].y;
+        pathM += Math.hypot(dx, dy);
+      }
+      const speedMs = gps.speed_knots != null ? gps.speed_knots * 0.514444 : null;
+      const speedShow = speedMs != null && speedMs >= 0.4 ? speedMs : 0;
+      meta.innerHTML =
+        `East <span>${fmtMetres(cur.x)}</span> m · North <span>${fmtMetres(cur.y)}</span> m · ` +
+        `Range <span>${fmtMetres(rangeM)}</span> m · Path <span>${fmtMetres(pathM)}</span> m · ` +
+        `Speed <span>${fmtMetres(speedShow, 2)} m/s</span> · ` +
+        `Sats <span>${gps.satellites ?? '—'}</span>`;
+    }
+
+    document.getElementById('gpsClearTrack').addEventListener('click', () => {
+      fetch('/sub/api/gps/clear', { method: 'POST' });
+    });
+
+    window.addEventListener('resize', () => {
+      updateSonar(lastSonar);
+      updateGps(lastGps);
+    });
+
+    let serialFollow = true;
+    let serialLastKey = '';
+    let serialHighlightsKey = '';
+    const serialLogEl = document.getElementById('serialLog');
+    const serialHighlightsEl = document.getElementById('serialHighlights');
+    const serialHideTelEl = document.getElementById('serialHideTel');
+
+    function serialNearBottom(el, px = 48) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= px;
+    }
+
+    function serialHasSelection() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+      return serialLogEl.contains(sel.anchorNode);
+    }
+
+    serialLogEl.addEventListener('scroll', () => {
+      const wasFollowing = serialFollow;
+      serialFollow = serialNearBottom(serialLogEl);
+      serialLogEl.classList.toggle('paused', !serialFollow);
+      // Catch up as soon as the user returns to the bottom
+      if (!wasFollowing && serialFollow) serialLastKey = '';
+    });
+
+    function serialLineHtml(l) {
+      const t = new Date(l.ts * 1000).toLocaleTimeString();
+      const text = String(l.line ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return `<div class="serial-line ${l.dir}">[${t}] ${text}</div>`;
+    }
+
+    function serialFilterLine(line) {
+      if (!serialHideTelEl?.checked) return true;
+      const s = String(line ?? '');
+      if (s.startsWith('TEL ')) {
+        return s.startsWith('TEL esc ') || s.includes('OK ESC') || s.includes('ERR ESC');
+      }
+      return true;
+    }
+
+    function updateSerialHighlights(lines) {
+      if (!serialHighlightsEl || !lines) return;
+      const key = lines.map(l => `${l.ts}|${l.dir}|${l.line}`).join('\n');
+      if (key === serialHighlightsKey) return;
+      serialHighlightsKey = key;
+      serialHighlightsEl.innerHTML = lines.length
+        ? lines.map(serialLineHtml).join('')
+        : '<div class="serial-line sys">No ESC / S2 / thruster lines yet</div>';
+      serialHighlightsEl.scrollTop = serialHighlightsEl.scrollHeight;
+    }
+
+    function updateEscHud(tel, ctrl) {
+      const esc = tel.thruster?.esc || {};
+      const ready = !!esc.ready;
+      const neutral = esc.neutral_ms ?? 0;
+      const hold = esc.arm_hold_ms ?? 4000;
+      const msg = esc.message || '';
+      const piThr = ctrl?.xbox_mapped?.thrusterX ?? ctrl?.actuators?.thrusterX;
+      const tr = ctrl?.xbox?.triggers || {};
+      const lt = tr.lt ?? 0;
+      const rt = tr.rt ?? 0;
+      const espThr = tel.thruster?.value;
+
+      const badge = document.getElementById('badgeEsc');
+      if (badge) {
+        if (ready) {
+          setBadge(badge, 'ESC — READY', 'ok');
+        } else if (neutral > 0) {
+          const pct = Math.min(100, Math.round((neutral / hold) * 100));
+          setBadge(badge, `ESC — arming ${pct}%`, 'warn');
+        } else if (Math.abs(piThr ?? 0) > 0.02 || lt > 0.05 || rt > 0.05) {
+          setBadge(badge, 'ESC — blocked (release RT/LT)', 'alarm');
+        } else {
+          setBadge(badge, 'ESC — arming…', 'warn');
+        }
+      }
+
+      const el = document.getElementById('escStatus');
+      if (!el) return;
+      el.classList.remove('ready', 'arm', 'blocked');
+      if (ready) {
+        el.classList.add('ready');
+        el.textContent = 'ESC ready — RT/LT drive';
+      } else if (Math.abs(piThr ?? 0) > 0.02 || lt > 0.05 || rt > 0.05) {
+        el.classList.add('blocked');
+        el.textContent = `Release triggers (Pi ${fmt(piThr, 2)} · LT ${fmt(lt, 2)} RT ${fmt(rt, 2)})`;
+      } else if (neutral > 0) {
+        el.classList.add('arm');
+        const pus = esc.pulse_us;
+        const pulseHint = pus ? ` · ${pus} µs` : '';
+        el.textContent = `Arming ${(neutral / 1000).toFixed(1)}s / ${(hold / 1000).toFixed(1)}s${pulseHint}`;
+      } else {
+        el.classList.add('arm');
+        const pus = esc.pulse_us;
+        el.textContent = pus
+          ? `Arming — stop ${pus} µs (want ~1500)`
+          : 'Arming — 1500 µs stop (~5 s)';
+      }
+      if (msg && (msg.includes('ESC') || msg.includes('esc'))) {
+        el.title = msg;
+      }
+      if (espThr != null && !ready) {
+        el.title = (el.title ? el.title + ' · ' : '') + `ESP thr ${fmt(espThr, 3)}`;
+      }
+    }
+
+    function updateSerial(lines) {
+      const log = serialLogEl;
+      const filtered = (lines || []).filter(l => serialFilterLine(l.line));
+      // Freeze while reading/selecting so the view doesn't jump
+      if (!serialFollow || serialHasSelection()) {
+        log.classList.add('paused');
+        return;
+      }
+
+      const key = filtered.map(l => `${l.ts}|${l.dir}|${l.line}`).join('\n');
+      if (key === serialLastKey) return;
+      serialLastKey = key;
+
+      log.innerHTML = filtered.map(serialLineHtml).join('');
+      log.scrollTop = log.scrollHeight;
+      log.classList.remove('paused');
+    }
+
+    document.getElementById('serialJumpLatest')?.addEventListener('click', () => {
+      serialFollow = true;
+      serialLastKey = '';
+      serialLogEl.classList.remove('paused');
+      serialLogEl.scrollTop = serialLogEl.scrollHeight;
+    });
+    serialHideTelEl?.addEventListener('change', () => { serialLastKey = ''; });
+
+    function applyDashboardUpdate(data) {
+      const tel = data.telemetry;
+      const ctrl = data.control;
+      const serial = data.serial;
+      const pins = data.pins;
+      const diag = data.diagnostics;
+
+      setBadge(document.getElementById('badgeEsp'),
+        tel.esp_connected
+          ? `ESP — ${tel.esp_status || 'OK'}`
+          : 'ESP — offline',
+        tel.esp_connected ? 'ok' : 'off');
+      const pca = tel.pca9685 || {};
+      setBadge(document.getElementById('badgePca'),
+        pca.ok ? `PCA9685 — 0x${(pca.addr ?? 0).toString(16)}` : 'PCA9685 — missing',
+        pca.ok ? 'ok' : 'alarm');
+      setBadge(document.getElementById('badgeLeak'),
+        tel.esp_fault && tel.esp_fault !== 'NONE'
+          ? `Fault — ${tel.esp_fault}`
+          : (tel.leaks.triggered ? 'Leaks — ALARM' : 'Leaks — OK'),
+        tel.leaks.triggered || (tel.esp_fault && tel.esp_fault !== 'NONE') ? 'alarm' : 'ok');
+      setBadge(document.getElementById('badgeXbox'),
+        ctrl.xbox.connected ? `Xbox — ${ctrl.xbox.name || 'OK'}` : 'Xbox — none',
+        ctrl.xbox.connected ? 'ok' : 'off');
+      const linkedFlap = !!ctrl.linked_flap_enabled;
+      setBadge(
+        document.getElementById('badgeLinkedFlap'),
+        !ctrl.xbox.connected
+          ? 'Flap — n/a'
+          : linkedFlap
+            ? 'Flap — LINKED'
+            : 'Flap — FREE',
+        !ctrl.xbox.connected ? 'off' : linkedFlap ? 'ok' : 'warn'
+      );
+      const modeLabel = (ctrl.mode === 'auto' && ctrl.xbox_override_active)
+        ? 'auto (Xbox override)'
+        : localControlMode;
+      setBadge(document.getElementById('badgeMode'), `Mode — ${modeLabel}`, 'ok');
+
+      document.getElementById('batteryVal').textContent = fmt(tel.battery.voltage);
+      document.getElementById('depthVal').textContent = fmt(tel.depth.meters);
+      const batEl = document.getElementById('metricBattery');
+      batEl.classList.toggle('warn', tel.battery.voltage != null && tel.battery.voltage < 11.5);
+      batEl.classList.toggle('danger', tel.battery.voltage != null && tel.battery.voltage < 10.5);
+
+      updateGyro(tel.gyro);
+      updateHudBars(tel);
+      updateLeaks(tel.leaks, pins?.expected?.sub?.leaks?.zones || pins?.expected?.sub?.leaks?.labels);
+      if (tel.sonar) {
+        if (tel.sonar.points) {
+          lastSonar = tel.sonar;
+          updateSonar(lastSonar);
+        } else {
+          lastSonar = Object.assign({}, lastSonar, tel.sonar, { points: lastSonar.points });
+        }
+      }
+      if (tel.gps) {
+        if (tel.gps.track) {
+          lastGps = tel.gps;
+          updateGps(lastGps);
+        } else {
+          lastGps = Object.assign({}, lastGps, tel.gps, { track: lastGps.track });
+        }
+      }
+
+      setBadge(document.getElementById('badgeSonar'),
+        tel.sonar?.connected ? 'Sonar — live' : 'Sonar — offline',
+        tel.sonar?.connected ? 'ok' : 'off');
+      const gpsFix = tel.gps?.connected && tel.gps?.lat != null;
+      const gpsOnline = tel.gps?.device_online;
+      setBadge(document.getElementById('badgeGps'),
+        gpsFix && gpsOnline ? 'GPS — fix'
+          : gpsOnline ? `GPS — ${tel.gps?.satellites || 0} sats`
+          : 'GPS — scanning',
+        gpsFix && gpsOnline ? 'ok' : gpsOnline ? 'warn' : 'off');
+
+      const cams = tel.cameras || {};
+      const fovCam = cams.fov || {};
+      const leftCam = cams.left || {};
+      const rightCam = cams.right || {};
+      const fovOk = !!fovCam.connected;
+      const leftOk = !!leftCam.connected;
+      const rightOk = !!rightCam.connected;
+      const camLabel = fovOk
+        ? (cams.stereo_ok ? 'FOV + stereo' : 'FOV live')
+        : (leftCam.status === 'reconnecting' || fovCam.status === 'reconnecting')
+          ? 'Cam — reconnecting'
+          : 'Cam — offline';
+      setBadge(document.getElementById('badgeCam'), camLabel,
+        fovOk ? 'ok' : (leftOk || rightOk) ? 'warn' : 'off');
+      const camAlert = document.getElementById('camAlert');
+      const down = [];
+      if (!leftOk && (leftCam.status === 'reconnecting' || leftCam.error)) {
+        down.push(`Left ${leftCam.error || 'reconnecting'}`);
+      }
+      if (!rightOk && (rightCam.status === 'reconnecting' || rightCam.error)) {
+        down.push(`Right ${rightCam.error || 'reconnecting'}`);
+      }
+      if (camAlert) {
+        if (down.length) {
+          camAlert.hidden = false;
+          camAlert.textContent = down.join(' · ');
+        } else {
+          camAlert.hidden = true;
+        }
+      }
+      const fovDev = fovCam.device || leftCam.device || '—';
+      document.getElementById('camStatus').textContent =
+        fovOk
+          ? `live (${fovDev})` + (cams.stereo_ok ? ' · YOLO L+R' : '')
+          : down.length ? 'Reconnecting…' : 'offline';
+      const yoloLeftMeta = document.getElementById('yoloLeftMeta');
+      const yoloRightMeta = document.getElementById('yoloRightMeta');
+      if (yoloLeftMeta) {
+        yoloLeftMeta.textContent = leftOk
+          ? `left ${leftCam.device || ''} · ${leftCam.status || 'live'}`
+          : 'left offline';
+      }
+      if (yoloRightMeta) {
+        yoloRightMeta.textContent = rightOk
+          ? `right ${rightCam.device || ''} · ${rightCam.status || 'live'}`
+          : 'right offline';
+      }
+      const ballast = tel.ballast || {};
+      updateBallastTank('fore', ballast.fore);
+      updateBallastTank('aft', ballast.aft);
+
+      syncLocalModeFromServer(ctrl, data.models);
+      updateActuators(hudActuatorSource(ctrl, data.models), ctrl, data.models);
+      checkControlNotifications(ctrl, data.models);
+      updateSticks(ctrl.xbox);
+      updateEscHud(tel, ctrl);
+      if (serial) {
+        updateSerialHighlights(serial.highlights || []);
+        updateSerial(serial.lines);
+      }
+
+      syncModeUi();
+
+      if (data.models) {
+        renderModelTabs(data.models);
+      }
+
+      if (pins) {
+        renderExpectedPins(pins);
+        if (diag) renderEspPins(pins, diag);
+      }
+      if (diag && diag.last_diagnostic) {
+        document.getElementById('lastDiag').textContent =
+          'Last diagnostic: ' + diag.last_diagnostic;
+      }
+    }
+
+    function connectLiveStream() {
+      const src = new EventSource('/sub/api/stream');
+      src.addEventListener('update', (ev) => {
+        try {
+          applyDashboardUpdate(JSON.parse(ev.data));
+        } catch (e) {
+          console.warn('stream parse error', e);
+        }
+      });
+      src.onerror = () => {
+        setBadge(document.getElementById('badgeEsp'), 'Stream — reconnecting', 'off');
+      };
+      src.onopen = () => {
+        console.log('live stream connected');
+      };
+      return src;
+    }
+
+    function ballastPotPercent(b) {
+      if (!b) return null;
+      const adc = b.adc;
+      if (adc != null && adc >= 0 && b.cal_valid
+          && b.cal_top_adc != null && b.cal_bottom_adc != null) {
+        const span = b.cal_top_adc - b.cal_bottom_adc;
+        if (Math.abs(span) >= 50) {
+          const t = (adc - b.cal_bottom_adc) / span;
+          return Math.max(0, Math.min(1, t)) * 100;
+        }
+      }
+      if (b.level != null && b.level >= 0) return b.level * 100;
+      if (adc != null && adc >= 0) return (adc / 4095) * 100;
+      return null;
+    }
+
+    function ballastCalLabel(b) {
+      const top = b.cal_top_adc;
+      const bot = b.cal_bottom_adc;
+      if (b.cal_valid && top != null && bot != null) {
+        return `top=${top} bottom=${bot} ✓`;
+      }
+      if (top != null && bot != null && top >= 0 && bot >= 0) {
+        const span = Math.abs(top - bot);
+        if (span < 50) {
+          return `top=${top} bottom=${bot} (span ${span} < 50 — move tank further, recal)`;
+        }
+      }
+      if (top == null && bot == null) {
+        return 'not calibrated — run motor to limits, then Cal Top + Cal Bottom';
+      }
+      return `top=${top ?? '—'} bottom=${bot ?? '—'} (need both ends calibrated)`;
+    }
+
+    function updateBallastTank(tankName, b) {
+      const root = document.querySelector(`.ballast-tank[data-tank="${tankName}"]`);
+      if (!root || !b) return;
+      const hasAdc = b.adc != null && b.adc >= 0;
+      const pctCal = ballastPotPercent(b);
+      const wired = pctCal != null || hasAdc;
+      const hasMv = b.mv_milli != null && b.mv_milli >= 0;
+      const gpio = b.pot_gpio != null ? b.pot_gpio : '?';
+      const track = root.querySelector('.ballast-vtrack');
+      const vfill = root.querySelector('.ballast-vfill');
+      const lvlEl = root.querySelector('.ballast-level');
+      const adcEl = root.querySelector('.ballast-adc');
+      if (track) track.classList.toggle('unwired', !wired);
+      const pct = pctCal != null ? pctCal : 0;
+      if (pctCal != null) {
+        const calTag = b.cal_valid ? ' cal' : ' raw';
+        lvlEl.textContent = fmt(pct, 0) + '%' + calTag;
+        lvlEl.classList.remove('unwired');
+      } else if (hasAdc) {
+        lvlEl.textContent = fmt((b.adc / 4095) * 100, 0) + '% raw';
+        lvlEl.classList.remove('unwired');
+      } else {
+        lvlEl.textContent = 'no pot';
+        lvlEl.classList.add('unwired');
+      }
+      if (vfill) vfill.style.height = pct + '%';
+      if (adcEl) {
+        if (!hasAdc) {
+          adcEl.textContent = `GPIO ${gpio} · ADC —`;
+        } else {
+          const v = hasMv
+            ? (b.mv_milli / 1000).toFixed(2)
+            : (b.adc * 3.3 / 4095).toFixed(2);
+          let hint = `GPIO ${gpio} · ${v} V · ADC ${b.adc}`;
+          const cmd = b.command ?? 0;
+          if (Math.abs(cmd) > 0.02) {
+            hint += ` · pump cmd ${fmt(cmd)} (slider, not pot)`;
+          }
+          adcEl.textContent = hint;
+        }
+      }
+      const bdir = b.direction && b.direction !== 'STOP' ? b.direction : '';
+      const cmdEl = root.querySelector('.ballast-cmd');
+      if (cmdEl) {
+        cmdEl.textContent = 'cmd ' + fmt(b.command) + (bdir ? ' · ' + bdir : '');
+      }
+      const diag = document.querySelector(`.ballast-diag[data-tank="${tankName}"] .ballast-cal-info`);
+      if (diag) {
+        let text = 'Cal: ' + ballastCalLabel(b);
+        if (ballastCentreNote[tankName]) text += ' · ' + ballastCentreNote[tankName];
+        diag.textContent = text;
+      }
+      tickBallastCentre(tankName, b);
+    }
+
+    const ballastCentreJob = { fore: false, aft: false };
+    const ballastCentreCmd = { fore: null, aft: null };
+    const ballastCentreNote = { fore: '', aft: '' };
+
+    function setBallastCentreButton(tank, active) {
+      const btn = document.querySelector(`.cal-centre[data-tank="${tank}"]`);
+      if (btn) btn.textContent = active ? 'Centring…' : 'Centre';
+    }
+
+    function sendBallastAction(tank, action) {
+      const cmd = action === 'fill' ? 1 : action === 'drain' ? -1 : 0;
+      document.querySelectorAll('.ballast-tank').forEach(root => {
+        if (tank !== 'both' && root.dataset.tank !== tank) return;
+        setVfaderFromInput(root.querySelector('.ballast-slider'), cmd);
+      });
+      saveControlState();
+      fetch('/sub/api/control/ballast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, tank }),
+      });
+    }
+
+    function stopBallastCentre(tank, note) {
+      ballastCentreJob[tank] = false;
+      ballastCentreCmd[tank] = null;
+      if (note) ballastCentreNote[tank] = note;
+      setBallastCentreButton(tank, false);
+      sendBallastAction(tank, 'neutral');
+    }
+
+    function tickBallastCentre(tank, b) {
+      if (!ballastCentreJob[tank]) return;
+      if (!b || !b.cal_valid || b.level == null || b.level < 0) {
+        stopBallastCentre(tank, 'centre needs top and bottom cal');
+        return;
+      }
+      let action = 'neutral';
+      if (b.level < 0.47) action = 'fill';
+      else if (b.level > 0.53) action = 'drain';
+      if (action === 'neutral') {
+        stopBallastCentre(tank, 'at centre');
+        return;
+      }
+      if (ballastCentreCmd[tank] === action) return;
+      ballastCentreCmd[tank] = action;
+      ballastCentreNote[tank] = action === 'fill' ? 'centring — filling' : 'centring — draining';
+      sendBallastAction(tank, action);
+    }
+
+    function toggleBallastCentre(tank) {
+      if (ballastCentreJob[tank]) {
+        stopBallastCentre(tank, 'centre cancelled');
+        return;
+      }
+      ballastCentreNote[tank] = 'centring…';
+      ballastCentreCmd[tank] = null;
+      ballastCentreJob[tank] = true;
+      setBallastCentreButton(tank, true);
+    }
+
+    document.querySelectorAll('[data-ballast]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tank = btn.dataset.tank || 'both';
+        const action = btn.dataset.ballast;
+        if (tank === 'both') {
+          stopBallastCentre('fore');
+          stopBallastCentre('aft');
+        } else if (ballastCentreJob[tank]) {
+          ballastCentreJob[tank] = false;
+          ballastCentreCmd[tank] = null;
+          setBallastCentreButton(tank, false);
+        }
+        const cmd = action === 'fill' ? 1 : action === 'drain' ? -1 : 0;
+        document.querySelectorAll('.ballast-tank').forEach(root => {
+          if (tank !== 'both' && root.dataset.tank !== tank) return;
+          setVfaderFromInput(root.querySelector('.ballast-slider'), cmd);
+        });
+        saveControlState();
+        fetch('/sub/api/control/ballast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: btn.dataset.ballast, tank }),
+        });
+      });
+    });
+
+    async function calibrateBallast(tank, end) {
+      const els = tank === 'both'
+        ? [...document.querySelectorAll('.ballast-diag .ballast-cal-info')]
+        : [...document.querySelectorAll(`.ballast-diag[data-tank="${tank}"] .ballast-cal-info`)];
+      els.forEach((el) => { el.textContent = 'Cal: sending…'; });
+      try {
+        const r = await fetch('/sub/api/ballast/calibrate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tank, end }),
+        });
+        const data = await r.json();
+        const text = data.ok
+          ? (end === 'clear' ? `Cal: ESP cleared ${tank}` : `Cal: saved ${tank} ${end}`)
+          : (`Cal: ${data.error || 'send failed'}`);
+        els.forEach((el) => { el.textContent = text; });
+      } catch (e) {
+        els.forEach((el) => { el.textContent = 'Cal: error'; });
+      }
+    }
+    document.querySelectorAll('.cal-top').forEach(btn => {
+      btn.addEventListener('click', () => calibrateBallast(btn.dataset.tank, 'top'));
+    });
+    document.querySelectorAll('.cal-bottom').forEach(btn => {
+      btn.addEventListener('click', () => calibrateBallast(btn.dataset.tank, 'bottom'));
+    });
+    document.querySelectorAll('.cal-clear').forEach(btn => {
+      btn.addEventListener('click', () => calibrateBallast(btn.dataset.tank, 'clear'));
+    });
+    document.querySelectorAll('.cal-centre').forEach(btn => {
+      btn.addEventListener('click', () => toggleBallastCentre(btn.dataset.tank));
+    });
+
+    document.querySelectorAll('.ballast-slider').forEach(slider => {
+      let sliderTimer;
+      slider.addEventListener('input', () => {
+        const tank = slider.closest('.ballast-tank')?.dataset.tank || 'both';
+        const valEl = slider.closest('.ballast-tank')?.querySelector('.ballast-vfader-val');
+        if (valEl) valEl.textContent = fmt(+slider.value);
+        saveControlState();
+        clearTimeout(sliderTimer);
+        sliderTimer = setTimeout(() => {
+          fetch('/sub/api/control/ballast', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: +slider.value, tank }),
+          });
+        }, 80);
+      });
+    });
+
+    document.getElementById('modeSelect')?.addEventListener('change', (ev) => {
+      const prevMode = localControlMode;
+      localControlMode = ev.target.value;
+      syncModeUi();
+      saveControlState();
+      const labels = { xbox: 'Xbox', manual: 'Manual', auto: 'Auto (YOLO)' };
+      showHudToast('Control mode → ' + (labels[localControlMode] || localControlMode), 'info');
+      notifyState.mode = localControlMode;
+      fetch('/sub/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: localControlMode }),
+      });
+      if (prevMode === 'auto' && localControlMode !== 'auto') {
+        yoloRunning = false;
+        updateModelStatus({ state: 'idle' }, { running: false });
+      }
+      if (localControlMode === 'manual') pushControlStateToServer();
+      if (localControlMode === 'auto') startAutoModelIfNeeded();
+    });
+
+    document.getElementById('hudModelSelect')?.addEventListener('change', (ev) => {
+      const id = ev.target.value;
+      if (!id) return;
+      if (localControlMode !== 'auto') {
+        localControlMode = 'auto';
+        syncModeUi();
+        notifyState.mode = localControlMode;
+        fetch('/sub/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'auto' }),
+        });
+      }
+      localModelId = id;
+      modelUiDirty = true;
+      const model = catalogModels.find(m => m.id === id);
+      localBackend = pickBackendForModel(model, localBackend);
+      populateBackendSelect(model);
+      saveControlState();
+      if (!localBackend) {
+        updateModelStatus({ state: 'error', error: 'No backend available for ' + id });
+        showHudToast('No backend available for ' + id, 'warn');
+        return;
+      }
+      selectModel(id, localBackend);
+    });
+
+    document.querySelectorAll('.mode-tabs button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const prevMode = localControlMode;
+        localControlMode = btn.dataset.mode;
+        syncModeUi();
+        saveControlState();
+        const labels = { xbox: 'Xbox', manual: 'Manual', auto: 'Auto (YOLO)' };
+        showHudToast('Control mode → ' + (labels[localControlMode] || localControlMode), 'info');
+        notifyState.mode = localControlMode;
+        fetch('/sub/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: btn.dataset.mode }),
+        });
+        if (prevMode === 'auto' && localControlMode !== 'auto') {
+          yoloRunning = false;
+          updateModelStatus({ state: 'idle' }, { running: false });
+        }
+        if (localControlMode === 'manual') {
+          pushControlStateToServer();
+        }
+        if (localControlMode === 'auto') startAutoModelIfNeeded();
+      });
+    });
+
+    document.getElementById('serialSend').addEventListener('click', () => {
+      const input = document.getElementById('serialInput');
+      const line = input.value.trim();
+      if (!line) return;
+      fetch('/sub/api/serial', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line }),
+      }).then(() => { input.value = ''; });
+    });
+    document.getElementById('serialInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('serialSend').click();
+    });
+
+    function startSelectedModel() {
+      const id = document.getElementById('modelSelect')?.value;
+      let backend = document.getElementById('backendSelect')?.value;
+      if (!id) {
+        updateModelStatus({ state: 'error', error: 'Pick a model first' });
+        return;
+      }
+      const model = catalogModels.find(m => m.id === id);
+      if (!backend) backend = pickBackendForModel(model, localBackend);
+      if (!backend) {
+        updateModelStatus({ state: 'error', error: 'No backend available for this model' });
+        return;
+      }
+      localBackend = backend;
+      populateBackendSelect(model);
+      modelUiDirty = true;
+      selectModel(id, backend);
+    }
+
+    document.getElementById('modelSelect')?.addEventListener('change', () => {
+      const id = document.getElementById('modelSelect').value;
+      if (!id) return;
+      localModelId = id;
+      modelUiDirty = true;
+      const model = catalogModels.find(m => m.id === id);
+      localBackend = pickBackendForModel(model, localBackend);
+      populateBackendSelect(model);
+      saveControlState();
+      if (!localBackend) {
+        updateModelStatus({ state: 'error', error: 'No backend available for ' + id });
+        return;
+      }
+      if (localControlMode === 'auto') {
+        selectModel(id, localBackend);
+      }
+    });
+
+    document.getElementById('backendSelect')?.addEventListener('change', () => {
+      localBackend = document.getElementById('backendSelect').value;
+      modelUiDirty = true;
+      saveControlState();
+      if (localModelId && localBackend) selectModel(localModelId, localBackend);
+    });
+
+    document.getElementById('yoloStartBtn')?.addEventListener('click', () => {
+      startSelectedModel();
+    });
+
+    const hudThr = document.getElementById('hudThrustSlider');
+    if (hudThr) {
+      hudThr.addEventListener('input', () => {
+        const v = +hudThr.value;
+        manualValues.thrusterX = v;
+        document.getElementById('hudThrustVal').textContent = fmt(v);
+        const sl = manualSliders.querySelector('[data-slider="thrusterX"]');
+        if (sl) sl.value = v;
+        const lab = document.querySelector('[data-slider-val="thrusterX"]');
+        if (lab) lab.textContent = fmt(v);
+        localControlMode = 'manual';
+        syncModeUi();
+        saveControlState();
+        sendManualActuators();
+      });
+    }
+
+    document.getElementById('yoloStopBtn').addEventListener('click', () => stopYolo());
+
+    document.getElementById('diagnosticsScrollHint')?.addEventListener('click', () => {
+      document.getElementById('diagnostics')?.scrollIntoView({ behavior: 'smooth' });
+    });
+
+    restoreControlState();
+    connectLiveStream();
+  </script>
+</body>
+</html>

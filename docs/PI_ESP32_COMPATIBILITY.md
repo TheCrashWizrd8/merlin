@@ -103,8 +103,8 @@ Dashboard slider/mode state persists in browser **`sessionStorage`** across norm
 | Aft steer Y/Z, fins | PCA9685 @ 0x40 on I2C GPIO 29/30 |
 | IMU (pitch/roll) | MPU6050 GY-521 @ 0x68 on same I2C bus |
 | Thruster | L298N — GPIO 13 (IN1), 12 (IN2), 6 (PWM) |
-| Fore ballast | GPIO 16 DIR A, 15 PWM A, 10 pot ADC |
-| Aft ballast | GPIO 4 DIR B, 5 PWM B, 3 pot ADC |
+| Fore ballast | GPIO 16 DIR A, 15 PWM A, **14** pot ADC |
+| Aft ballast | GPIO 4 DIR B, 5 PWM B, **2** pot ADC |
 | Leak | GPIO 1 (IO1 / D1) — 4-zone leak board, combined active HIGH |
 | Battery | ADC GPIO 2 |
 | Depth | ADC GPIO 7 |

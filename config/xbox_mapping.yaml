@@ -14,11 +14,12 @@
 sticks:
 
   left:
-    # Aft steering / actuator movement
-    # Left/right = X movement
-    # Up/down    = Y movement
+    # Two aft servos, one stick direction at a time.
+    # Left/right → aft Y (ch3) only. Up/down → aft Z (ch2) only.
+    aft_y_stick_axis: x   # horizontal stick → aft Y (ch3)
+    aft_z_stick_axis: y   # vertical stick → aft Z (ch2)
+    # Legacy stick-axis names (optional; do not use aft_steer_y for Z — use aft_z_stick_axis):
     aft_steer_x: x
-    aft_steer_y: y
     invert_y: false
     invert_x: false
 
@@ -84,6 +85,7 @@ ballast:
 thruster:
   # RT → forward thrust
   # LT → reverse thrust
+  # RT overrides LT whenever both triggers are pulled
 
   forward_trigger: rt
   reverse_trigger: lt

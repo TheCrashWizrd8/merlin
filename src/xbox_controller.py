@@ -147,6 +147,40 @@ def _norm_trigger(v: float) -> float:
     return max(0.0, min(1.0, (v + 32767.0) / (2.0 * 32767.0)))
 
 
+def sdl_trigger_axis(raw: float) -> float:
+    """
+    SDL trigger axis: 0 released, 32767 fully pressed.
+
+    A negative rest (some joystick mappings) is off. Do not shift a released
+    0 up to 0.5, or forward thrust stays on and blocks reverse.
+    """
+    if raw > 1.1 or raw < -1.1:
+        raw = raw / 32767.0
+    if raw < 0.0:
+        raw = 0.0
+    return max(0.0, min(1.0, raw))
+
+
+def scale_trigger_axis(raw: float, rest: float | None = None) -> tuple[float, float]:
+    """
+    Joystick-axis fallback. Rest is the lowest value seen on this axis alone.
+    Returns (0 released .. 1 pressed, updated rest).
+    """
+    if raw < -1.1 or raw > 1.1:
+        raw = raw / 32767.0
+    if rest is None:
+        rest = raw if raw < 0.0 else 0.0
+    elif raw < rest:
+        rest = raw
+    span = 1.0 - rest
+    if span < 0.25:
+        span = 1.0
+    value = (raw - rest) / span
+    if value <= 0.05:
+        return 0.0, rest
+    return max(0.0, min(1.0, value)), rest
+
+
 class _GamepadBackend:
     def __init__(self, device_index: int | None) -> None:
         self._device_index = device_index
@@ -155,6 +189,7 @@ class _GamepadBackend:
         self._joystick = None
         self._use_controller_api = False
         self._name = ""
+        self._trigger_rest: dict[int, float] = {}
 
     @property
     def name(self) -> str:
@@ -237,13 +272,23 @@ class _GamepadBackend:
             return self._read_joystick(self._joystick)
         return XboxState(connected=False)
 
-    def _read_controller(self, pad) -> XboxState:
-        # pygame 2.6+: ControllerAxis removed; get_axis() returns raw int16.
-        # Reading via as_joystick() matches the Linux Xbox mapping we already handle.
+    def _sdl_trigger(self, pad, axis: int) -> float | None:
+        # SDL_GameControllerAxis: 4 = LT, 5 = RT. Rest is 0, full press is 32767.
         try:
-            return self._read_joystick(pad.as_joystick())
+            return sdl_trigger_axis(float(pad.get_axis(axis)))
         except Exception:
-            pass
+            return None
+
+    def _read_controller(self, pad) -> XboxState:
+        # Sticks come from the joystick mapping. Triggers come from the SDL
+        # controller axes so a released trigger is 0 and a half pull is half.
+        try:
+            base = self._read_joystick(pad.as_joystick())
+        except Exception:
+            base = None
+
+        lt = self._sdl_trigger(pad, 4)
+        rt = self._sdl_trigger(pad, 5)
 
         def axis(i: int) -> float:
             try:
@@ -251,20 +296,37 @@ class _GamepadBackend:
             except Exception:
                 return 0.0
 
-        # SDL_GameControllerAxis: 0=LX 1=LY 2=RX 3=RY 4=LT 5=RT
-        lt = _norm_trigger(axis(4))
-        rt = _norm_trigger(axis(5))
+        if base is None:
+            return XboxState(
+                connected=True,
+                name=self._name,
+                left_stick_x=axis(0),
+                left_stick_y=axis(1),
+                right_stick_x=axis(2),
+                right_stick_y=axis(3),
+                triggers={
+                    "lt": 0.0 if lt is None else lt,
+                    "rt": 0.0 if rt is None else rt,
+                },
+                buttons={},
+                last_update=time.time(),
+            )
 
+        triggers = dict(base.triggers)
+        if lt is not None:
+            triggers["lt"] = lt
+        if rt is not None:
+            triggers["rt"] = rt
         return XboxState(
             connected=True,
-            name=self._name,
-            left_stick_x=axis(0),
-            left_stick_y=axis(1),
-            right_stick_x=axis(2),
-            right_stick_y=axis(3),
-            triggers={"lt": lt, "rt": rt},
-            buttons={},
-            last_update=time.time(),
+            name=base.name or self._name,
+            left_stick_x=base.left_stick_x,
+            left_stick_y=base.left_stick_y,
+            right_stick_x=base.right_stick_x,
+            right_stick_y=base.right_stick_y,
+            triggers=triggers,
+            buttons=dict(base.buttons),
+            last_update=base.last_update,
         )
 
     def _read_joystick(self, joy) -> XboxState:
@@ -276,8 +338,8 @@ class _GamepadBackend:
 
         n = joy.get_numaxes()
         if n >= 6:
-            lt = _norm_trigger((joy.get_axis(2) + 1.0) / 2.0)
-            rt = _norm_trigger((joy.get_axis(5) + 1.0) / 2.0)
+            lt = self._read_trigger(joy, 2)
+            rt = self._read_trigger(joy, 5)
             rs_x, rs_y = axis(3), axis(4)
         elif n >= 4:
             lt = rt = 0.0
@@ -298,11 +360,22 @@ class _GamepadBackend:
             last_update=time.time(),
         )
 
+    def _read_trigger(self, joy, index: int) -> float:
+        try:
+            raw = float(joy.get_axis(index))
+        except Exception:
+            return 0.0
+        value, self._trigger_rest[index] = scale_trigger_axis(
+            raw, self._trigger_rest.get(index)
+        )
+        return value
+
     def close(self) -> None:
         self._controller = None
         self._joystick = None
         self._use_controller_api = False
         self._name = ""
+        self._trigger_rest = {}
 
 
 class XboxController:
@@ -371,8 +444,7 @@ class XboxController:
         ok = self._pad.open()
         if ok:
             print(f"[xbox] Connected: {self._pad.name}")
-            if self._state.get_control_mode() == "manual":
-                self._state.set_control_mode("xbox")
+            # Do not steal manual mode — user picks Xbox vs Manual on the dashboard.
         return ok
 
     def _on_disconnect(self) -> None:

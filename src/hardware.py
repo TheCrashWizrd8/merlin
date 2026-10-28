@@ -59,7 +59,6 @@ class StubOutput(HardwareOutput):
 
 def _apply_yolo_to_sub_state(output: ControlOutput) -> None:
     """Map YOLO ControlOutput → sub_state actuators (shared by sub + stub outputs)."""
-    from src.control_source import get_mode as yolo_mode, get_manual
     from src.sub_control import yolo_to_sub_motion
     from src.sub_state import get_sub_state
     from src.telemetry_context import TelemetryContext
@@ -80,25 +79,8 @@ def _apply_yolo_to_sub_state(output: ControlOutput) -> None:
         state.set_auto_actuators(motion.actuators)
         if mode == "auto" and not state.is_xbox_override_active():
             state.set_ballast_commands(motion.ballast_fore, motion.ballast_aft)
-    elif mode == "manual" and yolo_mode() == "manual":
-        manual = get_manual()
-        motion = yolo_to_sub_motion(
-            ControlOutput(
-                steering_servo=manual.s,
-                drive_motor=manual.d,
-                camera_tilt_servo=manual.t,
-                apple_detected=False,
-                target_x=0,
-                target_y=0,
-                error_x=0.0,
-                error_y=0.0,
-                confidence=0.0,
-                timestamp=output.timestamp,
-            ),
-            telemetry=telemetry,
-        )
-        state.set_manual_actuators(motion.actuators)
-    # xbox mode: xbox_controller thread updates xbox_actuators; manual sliders unchanged
+    # manual: dashboard /sub/api/control/actuators owns manual_actuators (not YOLO SDT)
+    # xbox: xbox_controller thread updates xbox_actuators
     state.recompute_effective()
 
 

@@ -14,12 +14,42 @@ import yaml
 
 from src.esp_bridge import get_esp_bridge
 from src.sub_control import clamp_actuators, parse_actuator_payload
+from src.servo_center import (
+    centers_snapshot,
+    format_center_command,
+    format_travel_save_command,
+    write_servo_center_tick,
+    write_servo_travel_tick,
+)
 from src.sub_state import get_sub_state
 
 _DASHBOARD_PATH = Path(__file__).parent / "sub_dashboard.html"
 _PINS_YAML = Path(__file__).parent.parent / "config" / "pins.yaml"
 _PINS_TTL_S = 30.0
 _pins_cache: tuple[float, dict] | None = None
+
+
+def ballast_tank_cal_cleared(tank_snap: dict) -> bool:
+    return (
+        not bool(tank_snap.get("cal_valid"))
+        and tank_snap.get("cal_top_adc") is None
+        and tank_snap.get("cal_bottom_adc") is None
+    )
+
+
+def wait_ballast_cal_cleared(state, tanks: list[str], timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        ballast = state.telemetry_snapshot()["ballast"]
+        if all(ballast_tank_cal_cleared(ballast[t]) for t in tanks):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _invalidate_pins_cache() -> None:
+    global _pins_cache
+    _pins_cache = None
 
 # Pin confirmation checklist (matches esp32/sub_rc/sub_rc.ino diagnostics)
 _PIN_CHECKLIST: list[tuple[str, str]] = [
@@ -58,6 +88,14 @@ def _expected_pins_snapshot() -> dict:
     return snap
 
 
+def _release_servo_cal_for_live_control(state, bridge) -> None:
+    """ESP ignores S2 while CAL S hold is active — exit cal when user drives manually."""
+    if state.is_servo_cal_active():
+        bridge.send_raw("CAL S DONE\n")
+        state.set_servo_cal_active(False)
+    bridge.set_diag_mode(False)
+
+
 def _recent_rx_contains(state, needle: str, since_ts: float) -> bool:
     for entry in reversed(state.get_serial_log(30)):
         if entry["dir"] != "rx":
@@ -69,26 +107,48 @@ def _recent_rx_contains(state, needle: str, since_ts: float) -> bool:
     return False
 
 
-def _stream_payload(state) -> dict:
-    """Combined dashboard snapshot for SSE push."""
+def _serial_highlights(lines: list[dict]) -> list[dict]:
+    """Recent ESC / OK / ERR / actuator lines for a small pinned log."""
+    keys = ("OK ESC", "ERR ESC", "OK TEST thruster", "S2 ", "OK S2", "ERR S2")
+    out: list[dict] = []
+    for entry in reversed(lines):
+        line = str(entry.get("line", ""))
+        if not any(k in line for k in keys):
+            continue
+        out.append(entry)
+        if len(out) >= 24:
+            break
+    out.reverse()
+    return out
+
+
+def _stream_payload(state, *, heavy: bool = True) -> dict:
+    """Dashboard snapshot for SSE. Fast ticks omit serial, pins, and map tracks."""
     from src.model_runtime import models_dashboard_snapshot
 
-    diag = state.diagnostics_snapshot()
-    return {
-        "telemetry": state.telemetry_snapshot(),
+    payload = {
+        "telemetry": state.telemetry_snapshot(include_tracks=heavy),
         "control": state.control_snapshot(),
-        "models": models_dashboard_snapshot(),
         "status": state.status_snapshot(),
-        "serial": {"lines": state.get_serial_log(40)},
-        "pins": {
-            "expected": _expected_pins_snapshot(),
-            "esp_pins_lines": diag["esp_pins_lines"],
-            "esp_pins_map": diag["esp_pins_map"],
-            "last_pong_ts": diag["last_pong_ts"],
-        },
-        "diagnostics": diag,
         "version": state.get_version(),
     }
+    if not heavy:
+        return payload
+
+    diag = state.diagnostics_snapshot()
+    payload["models"] = models_dashboard_snapshot()
+    payload["serial"] = {
+        "lines": state.get_serial_log(80),
+        "highlights": _serial_highlights(state.get_serial_log(120)),
+    }
+    payload["pins"] = {
+        "expected": _expected_pins_snapshot(),
+        "esp_pins_lines": diag["esp_pins_lines"],
+        "esp_pins_map": diag["esp_pins_map"],
+        "last_pong_ts": diag["last_pong_ts"],
+    }
+    payload["diagnostics"] = diag
+    return payload
 
 
 def _sse_event(event: str, payload: dict) -> str:
@@ -103,6 +163,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     from flask import Response, jsonify, request
 
     state = get_sub_state()
+    state.set_servo_cal_active(False)
 
     if start_services:
         bridge = get_esp_bridge(autostart=True)
@@ -113,6 +174,9 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         from src.gps_reader import connect_gps, is_gps_enabled
         if is_gps_enabled():
             connect_gps(esp_port=bridge.port)
+        from src.fault_indicator import connect_fault_indicator, is_fault_indicator_enabled
+        if is_fault_indicator_enabled():
+            connect_fault_indicator()
 
     # ------------------------------------------------------------------
     # Dashboard
@@ -147,14 +211,16 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     @app.route("/sub/api/stream")
     def sub_api_stream():
         """Server-Sent Events feed — pushes dashboard updates on state change."""
-        min_interval_s = 0.1  # 10 Hz is enough for gauges; YOLO FPS is separate
+        min_interval_s = 0.1  # gauges, including ballast pots
+        heavy_interval_s = 0.5  # serial log, pins, GPS track, sonar plot
         heartbeat_s = 15.0
 
         def generate():
             since = -1
             last_push = 0.0
+            last_heavy = 0.0
             last_heartbeat = time.monotonic()
-            pending = True  # send full snapshot immediately on connect
+            pending = True  # send a snapshot immediately on connect
 
             while True:
                 version = state.wait_for_change(since, timeout=0.25)
@@ -164,12 +230,17 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
                     pending = True
 
                 if pending and (now - last_push >= min_interval_s):
-                    payload = _stream_payload(state)
+                    heavy = (now - last_heavy) >= heavy_interval_s
+                    payload = _stream_payload(state, heavy=heavy)
                     yield _sse_event("update", payload)
                     since = payload["version"]
                     last_push = now
                     pending = False
                     last_heartbeat = now
+                    if heavy:
+                        last_heavy = now
+                elif pending:
+                    time.sleep(min_interval_s - (now - last_push))
                 elif now - last_heartbeat >= heartbeat_s:
                     yield ": heartbeat\n\n"
                     last_heartbeat = now
@@ -241,7 +312,11 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     def sub_api_serial():
         limit = request.args.get("limit", 100, type=int)
         limit = max(1, min(500, limit))
-        return jsonify({"lines": state.get_serial_log(limit)})
+        lines = state.get_serial_log(limit)
+        return jsonify({
+            "lines": lines,
+            "highlights": _serial_highlights(state.get_serial_log(max(limit, 300))),
+        })
 
     # ------------------------------------------------------------------
     # Control (read)
@@ -296,7 +371,13 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
             state.set_manual_actuators(act)
             state.set_control_mode("manual")
         state.recompute_effective()
-        get_esp_bridge().set_diag_mode(False)
+        bridge = get_esp_bridge()
+        if str(data.get("mode", state.get_control_mode())) == "manual" or any(
+            k in data for k in ("aftSteerY", "aft_steer_y", "thrusterX")
+        ):
+            _release_servo_cal_for_live_control(state, bridge)
+        else:
+            bridge.set_diag_mode(False)
         return jsonify(state.control_snapshot())
 
     @app.route("/sub/api/models", methods=["GET"])
@@ -366,14 +447,35 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         data = request.get_json(silent=True) or {}
         tank = str(data.get("tank", "fore")).lower()
         end = str(data.get("end", "")).lower()
-        if tank not in ("fore", "aft"):
-            return jsonify({"ok": False, "error": "tank must be fore or aft"}), 400
+        if tank not in ("fore", "aft", "both"):
+            return jsonify({"ok": False, "error": "tank must be fore, aft, or both"}), 400
         if end in ("clear", "reset"):
+            tanks = ["fore", "aft"] if tank == "both" else [tank]
+            cmd = "CAL B both clear" if tank == "both" else f"CAL B {tank} clear"
             bridge = get_esp_bridge()
-            ok = bridge.send_raw(f"CAL B {tank} clear")
-            if ok:
-                state.clear_ballast_cal(tank)
-            return jsonify({"ok": ok, "tank": tank, "end": "clear", "command": f"CAL B {tank} clear"})
+            ok = bridge.send_raw(cmd)
+            if not ok:
+                return jsonify({
+                    "ok": False,
+                    "tank": tank,
+                    "end": "clear",
+                    "command": cmd,
+                    "error": "serial write failed",
+                }), 503
+            if not wait_ballast_cal_cleared(state, tanks):
+                diag = state.diagnostics_snapshot().get("last_diagnostic") or ""
+                return jsonify({
+                    "ok": False,
+                    "tank": tank,
+                    "end": "clear",
+                    "command": cmd,
+                    "error": "ESP still has ballast calibration. Reflash sub_rc, then Clear Cal again.",
+                    "last_diagnostic": diag,
+                    "ballast": state.telemetry_snapshot()["ballast"],
+                }), 409
+            for name in tanks:
+                state.clear_ballast_cal(name)
+            return jsonify({"ok": True, "tank": tank, "end": "clear", "command": cmd})
         if end not in ("top", "bottom"):
             return jsonify({"ok": False, "error": "end must be top, bottom, or clear"}), 400
         bridge = get_esp_bridge()
@@ -384,6 +486,106 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
     def sub_api_ballast_calibrate_resume():
         return jsonify({"ok": True})
 
+    @app.route("/sub/api/servo/centers", methods=["GET"])
+    def sub_api_servo_centers_get():
+        snap = centers_snapshot()
+        snap["cal_active"] = state.is_servo_cal_active()
+        return jsonify(snap)
+
+    @app.route("/sub/api/servo/centers/tune", methods=["POST"])
+    def sub_api_servo_centers_tune():
+        data = request.get_json(silent=True) or {}
+        try:
+            ch = int(data["channel"])
+            tick = int(data.get("centre_tick", data.get("tick", 0)))
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "channel and centre_tick required"}), 400
+        bridge = get_esp_bridge()
+        ok = bridge.tune_servo_center(ch, tick)
+        if ok:
+            state.set_servo_cal_active(True)
+        else:
+            state.set_servo_cal_active(False)
+        return jsonify({
+            "ok": ok,
+            "channel": ch,
+            "centre_tick": tick,
+            "cal_active": state.is_servo_cal_active(),
+            "error": None if ok else "ESP serial send failed — is ~/sub running? Reflash sub_rc for CAL S TUNE / TEST P.",
+        })
+
+    @app.route("/sub/api/servo/centers/done", methods=["POST"])
+    def sub_api_servo_centers_done():
+        state.set_servo_cal_active(False)
+        ok = get_esp_bridge().send_raw("CAL S DONE")
+        return jsonify({"ok": ok, "cal_active": False})
+
+    @app.route("/sub/api/servo/centers/save", methods=["POST"])
+    def sub_api_servo_centers_save():
+        data = request.get_json(silent=True) or {}
+        try:
+            ch = int(data["channel"])
+            tick = int(data.get("centre_tick", data.get("tick", 0)))
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "channel and centre_tick required"}), 400
+        try:
+            saved = write_servo_center_tick(ch, tick)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        _invalidate_pins_cache()
+        ok = get_esp_bridge().send_raw(format_center_command(ch, int(saved["centre_tick"])))
+        return jsonify({"ok": ok, **saved})
+
+    @app.route("/sub/api/servo/limits/tune", methods=["POST"])
+    def sub_api_servo_limits_tune():
+        data = request.get_json(silent=True) or {}
+        try:
+            ch = int(data["channel"])
+            end = str(data.get("end", data.get("side", ""))).lower()
+            tick = int(data.get("tick", data.get("travel_tick", 0)))
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "channel, end (min|max), and tick required"}), 400
+        if end not in ("min", "max"):
+            return jsonify({"ok": False, "error": "end must be min or max"}), 400
+        bridge = get_esp_bridge()
+        ok = bridge.tune_servo_travel(ch, end, tick)
+        if ok:
+            state.set_servo_cal_active(True)
+        else:
+            state.set_servo_cal_active(False)
+        return jsonify({
+            "ok": ok,
+            "channel": ch,
+            "end": end,
+            "tick": tick,
+            "cal_active": state.is_servo_cal_active(),
+            "error": None if ok else "ESP serial send failed — reflash sub_rc for CAL S TUNE MIN|MAX.",
+        })
+
+    @app.route("/sub/api/servo/limits/save", methods=["POST"])
+    def sub_api_servo_limits_save():
+        data = request.get_json(silent=True) or {}
+        try:
+            ch = int(data["channel"])
+            end = str(data.get("end", data.get("side", ""))).lower()
+            tick = int(data.get("tick", data.get("travel_tick", 0)))
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "channel, end (min|max), and tick required"}), 400
+        try:
+            saved = write_servo_travel_tick(ch, end, tick)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        _invalidate_pins_cache()
+        bridge = get_esp_bridge()
+        ok = bridge.send_raw(
+            format_travel_save_command(ch, str(saved["end"]), int(saved["tick"]))
+        )
+        # Push both endpoints so ESP max/min stay in sync with centre.
+        t_min, t_max = int(saved["min_tick"]), int(saved["max_tick"])
+        ok = bridge.send_raw(format_travel_save_command(ch, "min", t_min)) and ok
+        ok = bridge.send_raw(format_travel_save_command(ch, "max", t_max)) and ok
+        return jsonify({"ok": ok, **saved})
+
     @app.route("/sub/api/control/actuators", methods=["POST"])
     def sub_api_actuators_post():
         data = request.get_json(silent=True) or {}
@@ -391,7 +593,7 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         state.set_manual_actuators(act)
         state.set_control_mode("manual")
         state.recompute_effective()
-        get_esp_bridge().set_diag_mode(False)
+        _release_servo_cal_for_live_control(state, get_esp_bridge())
         return jsonify(state.control_snapshot())
 
     @app.route("/sub/api/serial", methods=["POST"])

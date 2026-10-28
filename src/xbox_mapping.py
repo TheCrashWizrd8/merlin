@@ -132,6 +132,33 @@ def _angle_diff(a: float, b: float) -> float:
     return (a - b + 180.0) % 360.0 - 180.0
 
 
+def _resolve_left_aft_stick_axes(left: dict[str, Any]) -> tuple[str, str]:
+    """
+    Map left stick axes to S2 aftY (ch3) and aftZ (ch2).
+
+    Prefer explicit aft_y_stick_axis / aft_z_stick_axis. Legacy keys aft_steer_x and
+    aft_steer_y named stick axes (not actuators) — do not cross-fallback or both
+    servos can track the same stick component.
+    """
+    y_axis = str(
+        left.get("aft_y_stick_axis")
+        or left.get("aft_steer_x")
+        or "x"
+    ).lower()
+    z_axis = str(
+        left.get("aft_z_stick_axis")
+        or left.get("aft_steer_z")
+        or "y"
+    ).lower()
+    if y_axis not in ("x", "y"):
+        y_axis = "x"
+    if z_axis not in ("x", "y"):
+        z_axis = "y"
+    if y_axis == z_axis:
+        z_axis = "y" if y_axis == "x" else "x"
+    return y_axis, z_axis
+
+
 def _stick_component(x: float, y: float, axis: str) -> float:
     axis = (axis or "x").lower()
     if axis == "y":
@@ -139,6 +166,19 @@ def _stick_component(x: float, y: float, axis: str) -> float:
     if axis == "x":
         return x
     return 0.0
+
+
+def _isolate_dominant_axis(x: float, y: float) -> tuple[float, float]:
+    """
+    One stick direction drives one aft servo.
+
+    A left/right push keeps only the horizontal component. An up/down push
+    keeps only the vertical component. The smaller axis is zeroed so the
+    two rear servos do not move together.
+    """
+    if abs(x) >= abs(y):
+        return x, 0.0
+    return 0.0, y
 
 
 def _clamp(v: float) -> float:
@@ -256,7 +296,8 @@ def _map_thruster(
     else:
         rev = rev_mag if _btn(xbox, rev_key, btn_idx) else 0.0
 
-    if fwd > 0.05 and fwd >= rev:
+    # RT overrides LT even when the reverse trigger is pulled further.
+    if fwd > 0.05:
         return _clamp(fwd)
     if rev > 0.05:
         return _clamp(-rev)
@@ -405,14 +446,20 @@ def map_xbox_to_actuators(
     left_dz = _stick_deadzone(left, deadzone)
     right_dz = _stick_deadzone(right, deadzone)
 
-    ls_x, ls_y = _apply_circular_deadzone(xbox.left_stick_x, xbox.left_stick_y, left_dz)
+    # Per-axis deadzone, then keep only the stronger stick direction so a
+    # left push moves aft Y (ch3) and leaves aft Z (ch2) at rest.
+    ls_x_raw = float(xbox.left_stick_x)
+    ls_y_raw = float(xbox.left_stick_y)
     if left.get("invert_y", False):
-        ls_y = -ls_y
+        ls_y_raw = -ls_y_raw
     if left.get("invert_x", False):
-        ls_x = -ls_x
-
-    aft_y = _stick_component(ls_x, ls_y, left.get("aft_steer_x", left.get("aft_steer_y", "x")))
-    aft_z = _stick_component(ls_x, ls_y, left.get("aft_steer_y", left.get("aft_steer_z", "y")))
+        ls_x_raw = -ls_x_raw
+    ls_x = _apply_deadzone(ls_x_raw, left_dz)
+    ls_y = _apply_deadzone(ls_y_raw, left_dz)
+    ls_x, ls_y = _isolate_dominant_axis(ls_x, ls_y)
+    y_axis, z_axis = _resolve_left_aft_stick_axes(left)
+    aft_y = _stick_component(ls_x, ls_y, y_axis)
+    aft_z = _stick_component(ls_x, ls_y, z_axis)
 
     thruster = _map_thruster(
         xbox, thr_cfg, btn_idx, trigger_deadzone=trigger_deadzone

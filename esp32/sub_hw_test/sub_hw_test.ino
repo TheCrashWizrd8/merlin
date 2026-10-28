@@ -27,9 +27,9 @@
 #define PIN_LEAK_1 13
 #define PIN_LEAK_2 14
 #define PIN_LEAK_3 15
-#define SERVO_MIN 205
-#define SERVO_MAX 410
-#define SERVO_CENTER 307
+#define SERVO_MIN 150
+#define SERVO_MAX 600
+#define SERVO_CENTER_TICK 391
 #define MOTOR_MAX 255
 #define MOTOR_MIN_START 90
 
@@ -43,7 +43,15 @@ static float clampf(float v) {
 
 static uint16_t servoTick(float v) {
   v = clampf(v);
-  return (uint16_t)(SERVO_CENTER + v * (SERVO_MAX - SERVO_MIN) / 2.0f);
+  float pulse;
+  if (v >= 0.0f) {
+    pulse = (float)SERVO_CENTER_TICK + v * (float)(SERVO_MAX - SERVO_CENTER_TICK);
+  } else {
+    pulse = (float)SERVO_CENTER_TICK + v * (float)(SERVO_CENTER_TICK - SERVO_MIN);
+  }
+  if (pulse < (float)SERVO_MIN) pulse = (float)SERVO_MIN;
+  if (pulse > (float)SERVO_MAX) pulse = (float)SERVO_MAX;
+  return (uint16_t)(pulse + 0.5f);
 }
 
 static void setServo(int ch, float v) {

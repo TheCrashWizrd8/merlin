@@ -172,22 +172,21 @@
       align-items: flex-end;
     }
     .hud-scroll-hint {
-      position: absolute;
-      bottom: calc(var(--hud-u) * 0.35);
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 4;
-      font-size: calc(var(--hud-u) * 0.78);
+      display: block;
+      width: 100%;
+      margin: 0;
+      font-size: 0.85rem;
       color: rgba(230, 237, 245, 0.85);
       text-decoration: none;
-      padding: calc(var(--hud-u) * 0.22) calc(var(--hud-u) * 0.55);
-      border-radius: 999px;
-      background: rgba(11, 17, 23, 0.75);
-      border: 1px solid rgba(36, 48, 68, 0.7);
-      pointer-events: auto;
+      padding: 0.55rem 1rem;
+      background: #101820;
+      border: none;
+      border-top: 1px solid rgba(36, 48, 68, 0.9);
+      border-bottom: 1px solid rgba(36, 48, 68, 0.9);
       font: inherit;
       font-family: inherit;
       cursor: pointer;
+      text-align: center;
     }
     .hud-scroll-hint:hover { color: #fff; background: rgba(20, 28, 39, 0.9); }
     .hud-label {
@@ -376,7 +375,12 @@
       word-break: break-word;
       min-height: 1.2em;
     }
-    .ballast-adc { display: none; }
+    .ballast-adc {
+      display: block;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.15rem;
+    }
     .ballast-cmd { display: none; }
     .vfader-val {
       font-size: 0.88em;
@@ -613,7 +617,7 @@
       inset: -2%;
       border-radius: 50%;
       background: repeating-conic-gradient(
-        from -90deg,
+        from 0deg,
         rgba(255, 255, 255, 0.55) 0deg 1.2deg,
         transparent 1.2deg 9deg
       );
@@ -1090,6 +1094,49 @@
     .serial-line.rx { color: #86efac; }
     .serial-line.tx { color: #93c5fd; }
     .serial-line.sys { color: var(--warn); }
+    .serial-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.5rem;
+      font-size: 0.8rem;
+    }
+    .serial-toolbar button {
+      padding: 0.25rem 0.55rem;
+      font-size: 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #e2e8f0;
+      cursor: pointer;
+    }
+    .serial-toolbar button:hover { background: #334155; }
+    .serial-toolbar label { display: flex; align-items: center; gap: 0.35rem; cursor: pointer; color: var(--muted); }
+    .serial-highlights {
+      max-height: 7.5rem;
+      overflow-y: auto;
+      padding: 0.35rem 0.5rem;
+      margin-bottom: 0.5rem;
+      border-radius: 6px;
+      background: #0a1018;
+      border: 1px solid #1e293b;
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem;
+      line-height: 1.35;
+    }
+    .serial-highlights .serial-line { opacity: 0.95; }
+    .esc-status {
+      margin-top: 0.35rem;
+      font-size: 0.72rem;
+      line-height: 1.35;
+      text-align: center;
+      color: var(--muted);
+      max-width: 6.5rem;
+    }
+    .esc-status.ready { color: var(--ok); }
+    .esc-status.arm { color: var(--warn); }
+    .esc-status.blocked { color: #f87171; }
     .serial-input {
       display: flex;
       gap: 0.4rem;
@@ -1358,6 +1405,21 @@
       font-size: 0.78rem;
       pointer-events: none;
     }
+  
+    .servo-bar { position: relative; height: 1.1rem; max-width: 32rem; margin: 0.35rem 0 0.15rem;
+      border: 1px solid var(--border); border-radius: 3px; background: var(--panel); }
+    .servo-bar .nogo { position: absolute; top: 0; bottom: 0;
+      background: repeating-linear-gradient(135deg, var(--danger) 0 1px, transparent 1px 5px);
+      background-color: rgba(239,68,68,0.12); }
+    .servo-bar .nogo.lo { left: 0; border-right: 1px solid var(--danger); }
+    .servo-bar .nogo.hi { right: 0; border-left: 1px solid var(--danger); }
+    .servo-bar .centre { position: absolute; top: -0.25rem; bottom: -0.25rem; width: 0;
+      border-left: 1px solid var(--muted); }
+    .servo-bar .pos { position: absolute; top: -0.15rem; bottom: -0.15rem; width: 3px; margin-left: -1px;
+      background: var(--accent); border-radius: 1px; }
+    .servo-bar .pos.bad { background: var(--danger); }
+    .servo-bar-legend { font-size: 0.64rem; color: var(--muted); max-width: 32rem; display: flex;
+      justify-content: space-between; }
   </style>
 </head>
 <body>
@@ -1401,6 +1463,7 @@
             <span class="badge off" id="badgeGps">GPS — …</span>
             <span class="badge off" id="badgeCam">Cam — …</span>
             <span class="badge off" id="badgeMode">Mode — …</span>
+            <span class="badge off" id="badgeEsc" title="Thruster ESC arming (ESP)">ESC — …</span>
           </div>
         </div>
       </div>
@@ -1417,7 +1480,7 @@
             <div class="vbar-val"><span id="depthVal">—</span> m</div>
           </div>
           <div class="vbar-wrap hud-chip">
-            <div class="hud-label">Accel</div>
+            <div class="hud-label">Tilt</div>
             <div class="vbar-track"><div class="vbar-fill accel" id="accelBarFill"></div></div>
             <div class="vbar-val" id="accelVal">—</div>
           </div>
@@ -1429,7 +1492,7 @@
           <div class="hud-label hud-ballast-title">Ballast</div>
           <div class="hud-ballast-row">
             <div class="ballast-tank hud-ballast-col" data-tank="fore">
-              <div class="hud-ballast-num">1</div>
+              <div class="hud-ballast-num">FORE</div>
               <div class="ballast-vtrack">
                 <span class="ballast-vmark top">100%</span>
                 <span class="ballast-vmark mid">N</span>
@@ -1449,7 +1512,7 @@
               <span class="ballast-cmd">cmd —</span>
             </div>
             <div class="ballast-tank hud-ballast-col" data-tank="aft">
-              <div class="hud-ballast-num">2</div>
+              <div class="hud-ballast-num">AFT</div>
               <div class="ballast-vtrack">
                 <span class="ballast-vmark top">100%</span>
                 <span class="ballast-vmark mid">N</span>
@@ -1485,6 +1548,7 @@
               <input type="hidden" id="hudThrustSlider" value="0">
             </div>
             <div class="vbar-val" id="hudThrustVal">0.00</div>
+            <div class="esc-status arm" id="escStatus">ESC — waiting for telemetry</div>
           </div>
         </div>
       </div>
@@ -1492,14 +1556,19 @@
       <div class="hud-cell hud-bl">
         <div class="hud-overlay hud-bottom-left">
           <div class="hud-chip aft-steer-panel">
-            <div class="hud-label">Aft steer</div>
+            <div class="hud-label">Aft steer · 2 servos</div>
             <div class="dual-axis-viz">
               <div class="dual-axis-cross"></div>
               <div class="dual-axis-dot" id="aftSteerDot"></div>
             </div>
             <div class="dual-axis-readouts">
-              Y <span id="aftSteerYVal">0.00</span><br>
-              Z <span id="aftSteerZVal">0.00</span>
+              Y <span class="muted" style="font-size:0.65rem;">ch3</span>
+              <span id="aftSteerYVal">0.00</span><br>
+              Z <span class="muted" style="font-size:0.65rem;">ch2</span>
+              <span id="aftSteerZVal">0.00</span>
+            </div>
+            <div style="font-size:0.62rem;color:var(--muted);margin-top:0.25rem;line-height:1.35;">
+              Left → Y only. Up/down → Z only.
             </div>
           </div>
         </div>
@@ -1565,8 +1634,9 @@
     </div>
 
     <div class="hud-toast-stack" id="hudToastStack" aria-live="polite"></div>
-    <button type="button" class="hud-scroll-hint" id="diagnosticsScrollHint">↓ diagnostics</button>
   </section>
+
+  <button type="button" class="hud-scroll-hint" id="diagnosticsScrollHint">↓ diagnostics</button>
 
   <div id="diagnostics" class="diagnostics">
     <div class="diag-head"><h2>Diagnostics &amp; setup</h2></div>
@@ -1593,6 +1663,11 @@
       <section class="panel">
         <div class="panel-head">ESP Serial</div>
         <div class="panel-body">
+          <div class="serial-toolbar">
+            <button type="button" id="serialJumpLatest" class="btn-sm">Jump to latest</button>
+            <label><input type="checkbox" id="serialHideTel" checked> Hide TEL spam</label>
+          </div>
+          <div class="serial-highlights" id="serialHighlights" aria-label="ESC and command highlights"></div>
           <div class="serial-log" id="serialLog"></div>
           <div class="serial-input">
             <input type="text" id="serialInput" placeholder="Send raw line to ESP…">
@@ -1618,8 +1693,8 @@
             <button data-cmd="PING">PING</button>
             <button data-cmd="PINS">PINS</button>
             <button data-cmd="TEST S 1 1.0">Sonar</button>
-            <button data-cmd="TEST S 2 1.0">Aft X</button>
-            <button data-cmd="TEST S 3 1.0">Aft Y</button>
+            <button data-cmd="TEST S 2 1.0">Aft Z · ch2</button>
+            <button data-cmd="TEST S 3 1.0">Aft Y · ch3</button>
             <button data-cmd="TEST S 4 1.0">Fin L</button>
             <button data-cmd="TEST S 5 1.0">Fin R</button>
             <button data-cmd="TEST T 0.5">Thr Fwd</button>
@@ -1658,10 +1733,36 @@
     </div>
 
     <section class="panel">
-      <div class="panel-head">Ballast calibration</div>
+      <div class="panel-head">Servo centre &amp; travel (per channel)</div>
+      <div class="panel-body">
+        <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.65rem;">
+          <strong>Centre</strong> — command&nbsp;0 at neutral. <strong>Min / max travel</strong> — PCA ticks at
+          full stick (−1 / +1) from that centre. Saved to <code>config/pins.yaml</code> and ESP32 NVS (channels 2–5).
+          Reflash <code>sub_rc</code> if limit tune commands are not recognized.
+          Limits apply to <strong>all</strong> control modes (linked flap, free fins, manual, auto) on the ESP;
+          fin&nbsp;R invert + travel matching runs on the Pi for every S2 send.
+        </div>
+        <div id="servoCenterRows"></div>
+        <div class="btn-row" style="margin-top:0.5rem;">
+          <button type="button" id="servoCenterDoneBtn">Done adjusting</button>
+          <span id="servoCenterCalHint" style="font-size:0.72rem;color:var(--muted);">
+            Move a slider to jog that servo (raw PCA tick). Click <strong>Done adjusting</strong> when finished so Xbox/S2 control works again.
+          </span>
+        </div>
+        <div id="servoCenterCalBanner" style="display:none;margin-top:0.5rem;padding:0.4rem 0.6rem;font-size:0.72rem;background:rgba(255,180,0,0.15);border-radius:4px;">
+          Calibration mode — normal fin commands paused on ESP. Click <strong>Done adjusting</strong>.
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        Ballast calibration
+        <button class="cal-clear" data-tank="both">Clear both</button>
+      </div>
       <div class="panel-body" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
         <div class="ballast-diag" data-tank="fore">
-          <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.35rem;">Fore (pot GPIO 10)</div>
+          <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.35rem;">Fore pot → ESP GPIO 6 (ADC1)</div>
           <div class="btn-row">
             <button class="danger" data-ballast="drain" data-tank="fore">Drain</button>
             <button data-ballast="neutral" data-tank="fore">Hold</button>
@@ -1670,12 +1771,13 @@
           <div class="btn-row" style="margin-top:0.35rem;">
             <button class="cal-top" data-tank="fore">Cal Top</button>
             <button class="cal-bottom" data-tank="fore">Cal Bottom</button>
+            <button class="cal-centre" data-tank="fore">Centre</button>
             <button class="cal-clear" data-tank="fore">Clear Cal</button>
           </div>
           <div class="ballast-cal-info" style="margin-top:0.35rem;font-size:0.68rem;color:var(--muted);">Cal: —</div>
         </div>
         <div class="ballast-diag" data-tank="aft">
-          <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.35rem;">Aft (pot GPIO 3)</div>
+          <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.35rem;">Aft pot → ESP GPIO 2 (ADC1)</div>
           <div class="btn-row">
             <button class="danger" data-ballast="drain" data-tank="aft">Drain</button>
             <button data-ballast="neutral" data-tank="aft">Hold</button>
@@ -1684,6 +1786,7 @@
           <div class="btn-row" style="margin-top:0.35rem;">
             <button class="cal-top" data-tank="aft">Cal Top</button>
             <button class="cal-bottom" data-tank="aft">Cal Bottom</button>
+            <button class="cal-centre" data-tank="aft">Centre</button>
             <button class="cal-clear" data-tank="aft">Clear Cal</button>
           </div>
           <div class="ballast-cal-info" style="margin-top:0.35rem;font-size:0.68rem;color:var(--muted);">Cal: —</div>
@@ -1849,11 +1952,11 @@
     );
 
     const ACTUATORS = [
-      { key: 'aftSteerY', label: 'Aft Y' },
-      { key: 'aftSteerZ', label: 'Aft Z' },
+      { key: 'aftSteerY', label: 'Aft Y (ch3)' },
+      { key: 'aftSteerZ', label: 'Aft Z (ch2)' },
       { key: 'thrusterX', label: 'Thruster' },
-      { key: 'finLeft', label: 'Fin L' },
-      { key: 'finRight', label: 'Fin R' },
+      { key: 'finLeft', label: 'Fin L (ch4)' },
+      { key: 'finRight', label: 'Fin R (ch5)' },
     ];
 
     const actuatorBars = document.getElementById('actuatorBars');
@@ -1930,12 +2033,6 @@
       const yoloUp = !!(models && models.running);
       if (yoloUp && ctrl.mode === 'auto' && localControlMode !== 'auto') {
         localControlMode = 'auto';
-        syncModeUi();
-        saveControlState();
-        return;
-      }
-      if (ctrl.xbox?.connected && ctrl.mode === 'xbox' && localControlMode !== 'xbox') {
-        localControlMode = 'xbox';
         syncModeUi();
         saveControlState();
       }
@@ -2312,6 +2409,263 @@
       }
     }
 
+
+    const servoBarPos = {};
+    function refreshServoBars() {
+      document.querySelectorAll('[data-servo-bar]').forEach((bar) => {
+        const ch = bar.dataset.servoBar;
+        const num = (sel) => { const e = document.querySelector(sel); return e ? parseFloat(e.textContent) : NaN; };
+        const lo = parseFloat((document.querySelector(`input[data-tune-min="${ch}"]`) || {}).min) || 150;
+        const hi = parseFloat((document.querySelector(`input[data-tune-max="${ch}"]`) || {}).max) || 600;
+        const centre = num(`[data-live-tick="${ch}"]`);
+        const tMin = num(`[data-live-min="${ch}"]`);
+        const tMax = num(`[data-live-max="${ch}"]`);
+        if ([centre, tMin, tMax].some(Number.isNaN)) return;
+        const pct = (t) => Math.max(0, Math.min(100, (t - lo) / (hi - lo) * 100));
+        bar.querySelector('.nogo.lo').style.width = pct(tMin) + '%';
+        bar.querySelector('.nogo.hi').style.width = (100 - pct(tMax)) + '%';
+        bar.querySelector('.centre').style.left = pct(centre) + '%';
+        const cur = servoBarPos[ch] != null ? servoBarPos[ch] : centre;
+        const pos = bar.querySelector('.pos');
+        pos.style.left = pct(cur) + '%';
+        pos.classList.toggle('bad', cur < tMin || cur > tMax);
+      });
+    }
+    document.addEventListener('input', (e) => {
+      const d = e.target && e.target.dataset;
+      if (!d) return;
+      const ch = d.tune || d.tuneMin || d.tuneMax;
+      if (ch != null) servoBarPos[ch] = parseInt(e.target.value, 10);
+      setTimeout(refreshServoBars, 0);
+    }, true);
+    setInterval(refreshServoBars, 400);
+    function setServoBarPos(ch, tick) {
+      servoBarPos[String(ch)] = tick;
+      refreshServoBars();
+    }
+
+    const servoCenterTuneTimers = {};
+    const servoLimitTuneTimers = {};
+
+    function renderServoCenterRows(channels) {
+      const root = document.getElementById('servoCenterRows');
+      if (!root) return;
+      root.innerHTML = '';
+      (channels || []).forEach((ch) => {
+        const tMin = ch.travel_min_tick != null ? ch.travel_min_tick : ch.tick_min;
+        const tMax = ch.travel_max_tick != null ? ch.travel_max_tick : ch.tick_max;
+        const centre = ch.centre_tick;
+        const loCap = Math.max(ch.tick_min, Math.min(centre - 1, ch.tick_max));
+        const hiCap = Math.min(ch.tick_max, Math.max(centre + 1, ch.tick_min));
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:0.85rem;padding-bottom:0.65rem;border-bottom:1px solid var(--border);';
+        row.innerHTML = `
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin-bottom:0.35rem;">
+            <strong style="font-size:0.78rem;">Ch ${ch.channel} · ${ch.label}</strong>
+            <span style="font-size:0.72rem;color:var(--muted);">saved zero: tick <span data-saved-tick="${ch.channel}">${ch.centre_tick}</span>
+              (~${ch.centre_deg}°)</span>
+            <span style="font-size:0.72rem;color:var(--muted);">limits:
+              <span data-saved-min="${ch.channel}">${tMin}</span> … <span data-saved-max="${ch.channel}">${tMax}</span></span>
+            <span data-status="${ch.channel}" style="font-size:0.68rem;color:var(--muted);margin-left:auto;"></span>
+          </div>
+          <div class="servo-bar" data-servo-bar="${ch.channel}"><div class="nogo lo"></div><div class="nogo hi"></div><div class="centre"></div><div class="pos"></div></div>
+          <div class="servo-bar-legend"><span>${ch.tick_min}</span><span>hatched = no-go · line = centre · blue = current position</span><span>${ch.tick_max}</span></div>
+          <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.2rem;">Centre (zero)</div>
+          <input type="range" data-tune="${ch.channel}" min="${ch.tick_min}" max="${ch.tick_max}" step="1"
+            value="${ch.centre_tick}" style="width:100%;max-width:32rem;" />
+          <div style="font-size:0.72rem;margin-top:0.25rem;">Centre tick: <strong data-live-tick="${ch.channel}">${ch.centre_tick}</strong></div>
+          <div class="btn-row" style="margin-top:0.35rem;">
+            <button type="button" class="primary" data-save-center="${ch.channel}">Set as zero</button>
+          </div>
+          <div style="font-size:0.7rem;color:var(--muted);margin:0.55rem 0 0.2rem;">Min travel (full −1, tick ≤ centre)</div>
+          <input type="range" data-tune-min="${ch.channel}" min="${ch.tick_min}" max="${loCap}" step="1"
+            value="${Math.min(tMin, loCap)}" style="width:100%;max-width:32rem;" />
+          <div style="font-size:0.72rem;margin-top:0.2rem;">Min tick: <strong data-live-min="${ch.channel}">${tMin}</strong>
+            ${ch.travel_min_deg != null ? `(~${ch.travel_min_deg}°)` : ''}</div>
+          <div class="btn-row" style="margin-top:0.3rem;">
+            <button type="button" data-save-limit-min="${ch.channel}">Set min limit</button>
+          </div>
+          <div style="font-size:0.7rem;color:var(--muted);margin:0.55rem 0 0.2rem;">Max travel (full +1, tick ≥ centre)</div>
+          <input type="range" data-tune-max="${ch.channel}" min="${hiCap}" max="${ch.tick_max}" step="1"
+            value="${Math.max(tMax, hiCap)}" style="width:100%;max-width:32rem;" />
+          <div style="font-size:0.72rem;margin-top:0.2rem;">Max tick: <strong data-live-max="${ch.channel}">${tMax}</strong>
+            ${ch.travel_max_deg != null ? `(~${ch.travel_max_deg}°)` : ''}</div>
+          <div class="btn-row" style="margin-top:0.3rem;">
+            <button type="button" data-save-limit-max="${ch.channel}">Set max limit</button>
+          </div>`;
+        root.appendChild(row);
+      });
+
+      root.querySelectorAll('input[data-tune]').forEach((slider) => {
+        slider.addEventListener('input', (e) => {
+          const ch = parseInt(e.target.dataset.tune, 10);
+          const tick = parseInt(e.target.value, 10);
+          setServoBarPos(ch, tick);
+          const live = root.querySelector(`[data-live-tick="${ch}"]`);
+          if (live) live.textContent = String(tick);
+          clearTimeout(servoCenterTuneTimers[ch]);
+          servoCenterTuneTimers[ch] = setTimeout(() => tuneServoCenter(ch, tick), 80);
+        });
+      });
+      root.querySelectorAll('input[data-tune-min]').forEach((slider) => {
+        slider.addEventListener('input', (e) => {
+          const ch = parseInt(e.target.dataset.tuneMin, 10);
+          const tick = parseInt(e.target.value, 10);
+          setServoBarPos(ch, tick);
+          const live = root.querySelector(`[data-live-min="${ch}"]`);
+          if (live) live.textContent = String(tick);
+          const key = `${ch}-min`;
+          clearTimeout(servoLimitTuneTimers[key]);
+          servoLimitTuneTimers[key] = setTimeout(() => tuneServoLimit(ch, 'min', tick), 80);
+        });
+      });
+      root.querySelectorAll('input[data-tune-max]').forEach((slider) => {
+        slider.addEventListener('input', (e) => {
+          const ch = parseInt(e.target.dataset.tuneMax, 10);
+          const tick = parseInt(e.target.value, 10);
+          setServoBarPos(ch, tick);
+          const live = root.querySelector(`[data-live-max="${ch}"]`);
+          if (live) live.textContent = String(tick);
+          const key = `${ch}-max`;
+          clearTimeout(servoLimitTuneTimers[key]);
+          servoLimitTuneTimers[key] = setTimeout(() => tuneServoLimit(ch, 'max', tick), 80);
+        });
+      });
+      root.querySelectorAll('[data-save-center]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const ch = parseInt(btn.dataset.saveCenter, 10);
+          const slider = root.querySelector(`input[data-tune="${ch}"]`);
+          const tick = slider ? parseInt(slider.value, 10) : 0;
+          saveServoCenter(ch, tick);
+        });
+      });
+      root.querySelectorAll('[data-save-limit-min]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const ch = parseInt(btn.dataset.saveLimitMin, 10);
+          const slider = root.querySelector(`input[data-tune-min="${ch}"]`);
+          const tick = slider ? parseInt(slider.value, 10) : 0;
+          saveServoLimit(ch, 'min', tick);
+        });
+      });
+      root.querySelectorAll('[data-save-limit-max]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const ch = parseInt(btn.dataset.saveLimitMax, 10);
+          const slider = root.querySelector(`input[data-tune-max="${ch}"]`);
+          const tick = slider ? parseInt(slider.value, 10) : 0;
+          saveServoLimit(ch, 'max', tick);
+        });
+      });
+    }
+
+    function setServoCalBanner(active) {
+      const el = document.getElementById('servoCenterCalBanner');
+      if (el) el.style.display = active ? 'block' : 'none';
+    }
+
+    async function loadServoCentersUi() {
+      const root = document.getElementById('servoCenterRows');
+      try {
+        const r = await fetch('/sub/api/servo/centers', { cache: 'no-store' });
+        const j = await r.json();
+        if (!j.channels || !j.channels.length) {
+          if (root) root.innerHTML = '<p style="font-size:0.72rem;color:var(--muted);">No channel config.</p>';
+          return;
+        }
+        renderServoCenterRows(j.channels);
+        setServoCalBanner(!!j.cal_active);
+      } catch (e) {
+        if (root) {
+          root.innerHTML = '<p style="font-size:0.72rem;color:var(--danger,#f66);">Could not load servo centres — restart ~/sub</p>';
+        }
+      }
+    }
+
+    async function tuneServoCenter(channel, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      try {
+        const r = await fetch('/sub/api/servo/centers/tune', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, centre_tick: tick }),
+        });
+        const j = await r.json();
+        if (status) {
+          status.textContent = j.ok ? 'moving…' : (j.error || 'Send failed');
+          status.style.color = j.ok ? '' : 'var(--danger, #f66)';
+        }
+        setServoCalBanner(!!j.cal_active);
+      } catch (_) {
+        if (status) status.textContent = 'tune failed';
+      }
+    }
+
+    async function saveServoCenter(channel, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      if (status) status.textContent = 'Saving…';
+      try {
+        const r = await fetch('/sub/api/servo/centers/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, centre_tick: tick }),
+        });
+        const j = await r.json();
+        if (status) status.textContent = j.ok ? 'Saved as zero' : 'Saved on Pi; ESP sync failed';
+        const saved = document.querySelector(`[data-saved-tick="${channel}"]`);
+        if (saved && j.centre_tick != null) saved.textContent = String(j.centre_tick);
+      } catch (_) {
+        if (status) status.textContent = 'Save failed';
+      }
+    }
+
+    async function tuneServoLimit(channel, end, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      try {
+        const r = await fetch('/sub/api/servo/limits/tune', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, end, tick }),
+        });
+        const j = await r.json();
+        if (status) {
+          status.textContent = j.ok ? `limit ${end}…` : (j.error || 'Send failed');
+          status.style.color = j.ok ? '' : 'var(--danger, #f66)';
+        }
+        setServoCalBanner(!!j.cal_active);
+      } catch (_) {
+        if (status) status.textContent = 'limit tune failed';
+      }
+    }
+
+    async function saveServoLimit(channel, end, tick) {
+      const status = document.querySelector(`[data-status="${channel}"]`);
+      if (status) status.textContent = `Saving ${end}…`;
+      try {
+        const r = await fetch('/sub/api/servo/limits/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, end, tick }),
+        });
+        const j = await r.json();
+        if (status) status.textContent = j.ok ? `Saved ${end} limit` : (j.error || 'Save failed');
+        const selMin = document.querySelector(`[data-saved-min="${channel}"]`);
+        const selMax = document.querySelector(`[data-saved-max="${channel}"]`);
+        if (selMin && j.min_tick != null) selMin.textContent = String(j.min_tick);
+        if (selMax && j.max_tick != null) selMax.textContent = String(j.max_tick);
+      } catch (_) {
+        if (status) status.textContent = 'Save failed';
+      }
+    }
+
+    loadServoCentersUi();
+
+    document.getElementById('servoCenterDoneBtn')?.addEventListener('click', async () => {
+      try {
+        const r = await fetch('/sub/api/servo/centers/done', { method: 'POST' });
+        const j = await r.json();
+        setServoCalBanner(!!j.cal_active);
+      } catch (_) { /* ignore */ }
+    });
+
     async function restoreControlState() {
       const saved = readControlState();
       localModelId = saved?.modelId || '';
@@ -2368,8 +2722,13 @@
     let manualTimer;
     function sendManualActuators() {
       clearTimeout(manualTimer);
-      manualTimer = setTimeout(() => {
-        fetch('/sub/api/control/actuators', {
+      manualTimer = setTimeout(async () => {
+        await fetch('/sub/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'manual' }),
+        });
+        await fetch('/sub/api/control/actuators', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(manualValues),
@@ -2395,9 +2754,9 @@
       const thr = pins.expected?.l298n?.thruster || {};
       const lines = [
         `I2C SDA=${pins.expected?.esp32?.i2c?.sda_gpio ?? '?'} SCL=${pins.expected?.esp32?.i2c?.scl_gpio ?? '?'}`,
-        `Servos: ch1=sonar ch2=aftX=${pca.aft_steer_z?.channel ?? pca.aft_steer_x?.channel ?? '?'} ch3=aftY=${pca.aft_steer_y?.channel ?? '?'}`,
+        `Servos: ch0=thruster ESC · ch1=sonar · ch2=aftZ · ch3=aftY · ch4=finL · ch5=finR`,
         `        ch4=finL=${pca.fin_left?.channel ?? '?'} ch5=finR=${pca.fin_right?.channel ?? '?'}`,
-        `Thruster: IN1=${thr.in1_gpio ?? '?'} IN2=${thr.in2_gpio ?? '?'} PWM=${thr.pwm_gpio ?? '?'}`,
+        `Thruster ESC: PCA ch${pca.thruster_esc?.channel ?? thr.channel ?? 0} · RT forward, LT reverse`,
         `Fore ballast DIR=${sub.ballast?.fore?.dir_gpio ?? '?'} PWM=${sub.ballast?.fore?.pwm_gpio ?? '?'} pot=${sub.ballast?.fore?.pot_adc_gpio ?? '?'}`,
         `Aft ballast DIR=${sub.ballast?.aft?.dir_gpio ?? '?'} PWM=${sub.ballast?.aft?.pwm_gpio ?? '?'} pot=${sub.ballast?.aft?.pot_adc_gpio ?? '?'}`,
         `Leak board GPIO ${sub.leaks?.signal_gpio ?? sub.leaks?.gpios?.[0] ?? '?'} (${(sub.leaks?.zones || sub.leaks?.labels || []).length || 4} zones)`,
@@ -2522,7 +2881,7 @@
       const tilt = Math.min(90, Math.hypot(g.pitch || 0, g.roll || 0));
       const accelFill = document.getElementById('accelBarFill');
       const accelVal = document.getElementById('accelVal');
-      if (accelFill) accelFill.style.height = Math.min(100, (tilt / 45) * 100) + '%';
+      if (accelFill) accelFill.style.height = Math.min(100, (tilt / 90) * 100) + '%';
       if (accelVal) accelVal.textContent = fmt(tilt, 0) + '°';
     }
 
@@ -2901,7 +3260,10 @@
 
     let serialFollow = true;
     let serialLastKey = '';
+    let serialHighlightsKey = '';
     const serialLogEl = document.getElementById('serialLog');
+    const serialHighlightsEl = document.getElementById('serialHighlights');
+    const serialHideTelEl = document.getElementById('serialHideTel');
 
     function serialNearBottom(el, px = 48) {
       return el.scrollHeight - el.scrollTop - el.clientHeight <= px;
@@ -2921,29 +3283,115 @@
       if (!wasFollowing && serialFollow) serialLastKey = '';
     });
 
+    function serialLineHtml(l) {
+      const t = new Date(l.ts * 1000).toLocaleTimeString();
+      const text = String(l.line ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return `<div class="serial-line ${l.dir}">[${t}] ${text}</div>`;
+    }
+
+    function serialFilterLine(line) {
+      if (!serialHideTelEl?.checked) return true;
+      const s = String(line ?? '');
+      if (s.startsWith('TEL ')) {
+        return s.startsWith('TEL esc ') || s.includes('OK ESC') || s.includes('ERR ESC');
+      }
+      return true;
+    }
+
+    function updateSerialHighlights(lines) {
+      if (!serialHighlightsEl || !lines) return;
+      const key = lines.map(l => `${l.ts}|${l.dir}|${l.line}`).join('\n');
+      if (key === serialHighlightsKey) return;
+      serialHighlightsKey = key;
+      serialHighlightsEl.innerHTML = lines.length
+        ? lines.map(serialLineHtml).join('')
+        : '<div class="serial-line sys">No ESC / S2 / thruster lines yet</div>';
+      serialHighlightsEl.scrollTop = serialHighlightsEl.scrollHeight;
+    }
+
+    function updateEscHud(tel, ctrl) {
+      const esc = tel.thruster?.esc || {};
+      const ready = !!esc.ready;
+      const neutral = esc.neutral_ms ?? 0;
+      const hold = esc.arm_hold_ms ?? 4000;
+      const msg = esc.message || '';
+      const piThr = ctrl?.xbox_mapped?.thrusterX ?? ctrl?.actuators?.thrusterX;
+      const tr = ctrl?.xbox?.triggers || {};
+      const lt = tr.lt ?? 0;
+      const rt = tr.rt ?? 0;
+      const espThr = tel.thruster?.value;
+
+      const badge = document.getElementById('badgeEsc');
+      if (badge) {
+        if (ready) {
+          setBadge(badge, 'ESC — READY', 'ok');
+        } else if (neutral > 0) {
+          const pct = Math.min(100, Math.round((neutral / hold) * 100));
+          setBadge(badge, `ESC — arming ${pct}%`, 'warn');
+        } else if (Math.abs(piThr ?? 0) > 0.02 || lt > 0.05 || rt > 0.05) {
+          setBadge(badge, 'ESC — blocked (release RT/LT)', 'alarm');
+        } else {
+          setBadge(badge, 'ESC — arming…', 'warn');
+        }
+      }
+
+      const el = document.getElementById('escStatus');
+      if (!el) return;
+      el.classList.remove('ready', 'arm', 'blocked');
+      if (ready) {
+        el.classList.add('ready');
+        el.textContent = 'ESC ready — RT/LT drive';
+      } else if (Math.abs(piThr ?? 0) > 0.02 || lt > 0.05 || rt > 0.05) {
+        el.classList.add('blocked');
+        el.textContent = `Release triggers (Pi ${fmt(piThr, 2)} · LT ${fmt(lt, 2)} RT ${fmt(rt, 2)})`;
+      } else if (neutral > 0) {
+        el.classList.add('arm');
+        const pus = esc.pulse_us;
+        const pulseHint = pus ? ` · ${pus} µs` : '';
+        el.textContent = `Arming ${(neutral / 1000).toFixed(1)}s / ${(hold / 1000).toFixed(1)}s${pulseHint}`;
+      } else {
+        el.classList.add('arm');
+        const pus = esc.pulse_us;
+        el.textContent = pus
+          ? `Arming — stop ${pus} µs (want ~1500)`
+          : 'Arming — 1500 µs stop (~5 s)';
+      }
+      if (msg && (msg.includes('ESC') || msg.includes('esc'))) {
+        el.title = msg;
+      }
+      if (espThr != null && !ready) {
+        el.title = (el.title ? el.title + ' · ' : '') + `ESP thr ${fmt(espThr, 3)}`;
+      }
+    }
+
     function updateSerial(lines) {
       const log = serialLogEl;
+      const filtered = (lines || []).filter(l => serialFilterLine(l.line));
       // Freeze while reading/selecting so the view doesn't jump
       if (!serialFollow || serialHasSelection()) {
         log.classList.add('paused');
         return;
       }
 
-      const key = lines.map(l => `${l.ts}|${l.dir}|${l.line}`).join('\n');
+      const key = filtered.map(l => `${l.ts}|${l.dir}|${l.line}`).join('\n');
       if (key === serialLastKey) return;
       serialLastKey = key;
 
-      log.innerHTML = lines.map(l => {
-        const t = new Date(l.ts * 1000).toLocaleTimeString();
-        const text = String(l.line ?? '')
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;');
-        return `<div class="serial-line ${l.dir}">[${t}] ${text}</div>`;
-      }).join('');
+      log.innerHTML = filtered.map(serialLineHtml).join('');
       log.scrollTop = log.scrollHeight;
       log.classList.remove('paused');
     }
+
+    document.getElementById('serialJumpLatest')?.addEventListener('click', () => {
+      serialFollow = true;
+      serialLastKey = '';
+      serialLogEl.classList.remove('paused');
+      serialLogEl.scrollTop = serialLogEl.scrollHeight;
+    });
+    serialHideTelEl?.addEventListener('change', () => { serialLastKey = ''; });
 
     function applyDashboardUpdate(data) {
       const tel = data.telemetry;
@@ -2992,11 +3440,23 @@
 
       updateGyro(tel.gyro);
       updateHudBars(tel);
-      updateLeaks(tel.leaks, pins.expected?.sub?.leaks?.zones || pins.expected?.sub?.leaks?.labels);
-      lastSonar = tel.sonar || {};
-      lastGps = tel.gps || {};
-      updateSonar(lastSonar);
-      updateGps(lastGps);
+      updateLeaks(tel.leaks, pins?.expected?.sub?.leaks?.zones || pins?.expected?.sub?.leaks?.labels);
+      if (tel.sonar) {
+        if (tel.sonar.points) {
+          lastSonar = tel.sonar;
+          updateSonar(lastSonar);
+        } else {
+          lastSonar = Object.assign({}, lastSonar, tel.sonar, { points: lastSonar.points });
+        }
+      }
+      if (tel.gps) {
+        if (tel.gps.track) {
+          lastGps = tel.gps;
+          updateGps(lastGps);
+        } else {
+          lastGps = Object.assign({}, lastGps, tel.gps, { track: lastGps.track });
+        }
+      }
 
       setBadge(document.getElementById('badgeSonar'),
         tel.sonar?.connected ? 'Sonar — live' : 'Sonar — offline',
@@ -3056,14 +3516,19 @@
           ? `right ${rightCam.device || ''} · ${rightCam.status || 'live'}`
           : 'right offline';
       }
-      updateBallastTank('fore', tel.ballast.fore);
-      updateBallastTank('aft', tel.ballast.aft);
+      const ballast = tel.ballast || {};
+      updateBallastTank('fore', ballast.fore);
+      updateBallastTank('aft', ballast.aft);
 
       syncLocalModeFromServer(ctrl, data.models);
       updateActuators(hudActuatorSource(ctrl, data.models), ctrl, data.models);
       checkControlNotifications(ctrl, data.models);
       updateSticks(ctrl.xbox);
-      updateSerial(serial.lines);
+      updateEscHud(tel, ctrl);
+      if (serial) {
+        updateSerialHighlights(serial.highlights || []);
+        updateSerial(serial.lines);
+      }
 
       syncModeUi();
 
@@ -3071,15 +3536,11 @@
         renderModelTabs(data.models);
       }
 
-      // When a pad connects, follow server xbox mode — don't overwrite with stale manual.
-      if (controlRestored && ctrl.xbox.connected && ctrl.mode === 'xbox' && localControlMode !== 'xbox') {
-        localControlMode = 'xbox';
-        saveControlState();
+      if (pins) {
+        renderExpectedPins(pins);
+        if (diag) renderEspPins(pins, diag);
       }
-
-      renderExpectedPins(pins);
-      renderEspPins(pins, diag);
-      if (diag.last_diagnostic) {
+      if (diag && diag.last_diagnostic) {
         document.getElementById('lastDiag').textContent =
           'Last diagnostic: ' + diag.last_diagnostic;
       }
@@ -3101,6 +3562,22 @@
         console.log('live stream connected');
       };
       return src;
+    }
+
+    function ballastPotPercent(b) {
+      if (!b) return null;
+      const adc = b.adc;
+      if (adc != null && adc >= 0 && b.cal_valid
+          && b.cal_top_adc != null && b.cal_bottom_adc != null) {
+        const span = b.cal_top_adc - b.cal_bottom_adc;
+        if (Math.abs(span) >= 50) {
+          const t = (adc - b.cal_bottom_adc) / span;
+          return Math.max(0, Math.min(1, t)) * 100;
+        }
+      }
+      if (b.level != null && b.level >= 0) return b.level * 100;
+      if (adc != null && adc >= 0) return (adc / 4095) * 100;
+      return null;
     }
 
     function ballastCalLabel(b) {
@@ -3125,22 +3602,22 @@
       const root = document.querySelector(`.ballast-tank[data-tank="${tankName}"]`);
       if (!root || !b) return;
       const hasAdc = b.adc != null && b.adc >= 0;
-      const hasLevel = b.level != null && b.level >= 0;
-      const wired = hasAdc || hasLevel;
+      const pctCal = ballastPotPercent(b);
+      const wired = pctCal != null || hasAdc;
+      const hasMv = b.mv_milli != null && b.mv_milli >= 0;
+      const gpio = b.pot_gpio != null ? b.pot_gpio : '?';
       const track = root.querySelector('.ballast-vtrack');
       const vfill = root.querySelector('.ballast-vfill');
       const lvlEl = root.querySelector('.ballast-level');
       const adcEl = root.querySelector('.ballast-adc');
       if (track) track.classList.toggle('unwired', !wired);
-      let pct = 0;
-      if (wired && hasLevel) {
-        pct = b.level * 100;
-        const rawTag = b.cal_valid ? '' : ' raw';
-        lvlEl.textContent = fmt(pct, 0) + '%' + rawTag;
+      const pct = pctCal != null ? pctCal : 0;
+      if (pctCal != null) {
+        const calTag = b.cal_valid ? ' cal' : ' raw';
+        lvlEl.textContent = fmt(pct, 0) + '%' + calTag;
         lvlEl.classList.remove('unwired');
       } else if (hasAdc) {
-        pct = (b.adc / 4095) * 100;
-        lvlEl.textContent = fmt(pct, 0) + '% raw';
+        lvlEl.textContent = fmt((b.adc / 4095) * 100, 0) + '% raw';
         lvlEl.classList.remove('unwired');
       } else {
         lvlEl.textContent = 'no pot';
@@ -3148,9 +3625,19 @@
       }
       if (vfill) vfill.style.height = pct + '%';
       if (adcEl) {
-        adcEl.textContent = hasAdc
-          ? `ADC ${b.adc} · ${(b.adc * 3.3 / 4095).toFixed(2)} V`
-          : 'ADC —';
+        if (!hasAdc) {
+          adcEl.textContent = `GPIO ${gpio} · ADC —`;
+        } else {
+          const v = hasMv
+            ? (b.mv_milli / 1000).toFixed(2)
+            : (b.adc * 3.3 / 4095).toFixed(2);
+          let hint = `GPIO ${gpio} · ${v} V · ADC ${b.adc}`;
+          const cmd = b.command ?? 0;
+          if (Math.abs(cmd) > 0.02) {
+            hint += ` · pump cmd ${fmt(cmd)} (slider, not pot)`;
+          }
+          adcEl.textContent = hint;
+        }
       }
       const bdir = b.direction && b.direction !== 'STOP' ? b.direction : '';
       const cmdEl = root.querySelector('.ballast-cmd');
@@ -3158,13 +3645,87 @@
         cmdEl.textContent = 'cmd ' + fmt(b.command) + (bdir ? ' · ' + bdir : '');
       }
       const diag = document.querySelector(`.ballast-diag[data-tank="${tankName}"] .ballast-cal-info`);
-      if (diag) diag.textContent = 'Cal: ' + ballastCalLabel(b);
+      if (diag) {
+        let text = 'Cal: ' + ballastCalLabel(b);
+        if (ballastCentreNote[tankName]) text += ' · ' + ballastCentreNote[tankName];
+        diag.textContent = text;
+      }
+      tickBallastCentre(tankName, b);
+    }
+
+    const ballastCentreJob = { fore: false, aft: false };
+    const ballastCentreCmd = { fore: null, aft: null };
+    const ballastCentreNote = { fore: '', aft: '' };
+
+    function setBallastCentreButton(tank, active) {
+      const btn = document.querySelector(`.cal-centre[data-tank="${tank}"]`);
+      if (btn) btn.textContent = active ? 'Centring…' : 'Centre';
+    }
+
+    function sendBallastAction(tank, action) {
+      const cmd = action === 'fill' ? 1 : action === 'drain' ? -1 : 0;
+      document.querySelectorAll('.ballast-tank').forEach(root => {
+        if (tank !== 'both' && root.dataset.tank !== tank) return;
+        setVfaderFromInput(root.querySelector('.ballast-slider'), cmd);
+      });
+      saveControlState();
+      fetch('/sub/api/control/ballast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, tank }),
+      });
+    }
+
+    function stopBallastCentre(tank, note) {
+      ballastCentreJob[tank] = false;
+      ballastCentreCmd[tank] = null;
+      if (note) ballastCentreNote[tank] = note;
+      setBallastCentreButton(tank, false);
+      sendBallastAction(tank, 'neutral');
+    }
+
+    function tickBallastCentre(tank, b) {
+      if (!ballastCentreJob[tank]) return;
+      if (!b || !b.cal_valid || b.level == null || b.level < 0) {
+        stopBallastCentre(tank, 'centre needs top and bottom cal');
+        return;
+      }
+      let action = 'neutral';
+      if (b.level < 0.47) action = 'fill';
+      else if (b.level > 0.53) action = 'drain';
+      if (action === 'neutral') {
+        stopBallastCentre(tank, 'at centre');
+        return;
+      }
+      if (ballastCentreCmd[tank] === action) return;
+      ballastCentreCmd[tank] = action;
+      ballastCentreNote[tank] = action === 'fill' ? 'centring — filling' : 'centring — draining';
+      sendBallastAction(tank, action);
+    }
+
+    function toggleBallastCentre(tank) {
+      if (ballastCentreJob[tank]) {
+        stopBallastCentre(tank, 'centre cancelled');
+        return;
+      }
+      ballastCentreNote[tank] = 'centring…';
+      ballastCentreCmd[tank] = null;
+      ballastCentreJob[tank] = true;
+      setBallastCentreButton(tank, true);
     }
 
     document.querySelectorAll('[data-ballast]').forEach(btn => {
       btn.addEventListener('click', () => {
         const tank = btn.dataset.tank || 'both';
         const action = btn.dataset.ballast;
+        if (tank === 'both') {
+          stopBallastCentre('fore');
+          stopBallastCentre('aft');
+        } else if (ballastCentreJob[tank]) {
+          ballastCentreJob[tank] = false;
+          ballastCentreCmd[tank] = null;
+          setBallastCentreButton(tank, false);
+        }
         const cmd = action === 'fill' ? 1 : action === 'drain' ? -1 : 0;
         document.querySelectorAll('.ballast-tank').forEach(root => {
           if (tank !== 'both' && root.dataset.tank !== tank) return;
@@ -3180,8 +3741,10 @@
     });
 
     async function calibrateBallast(tank, end) {
-      const el = document.querySelector(`.ballast-diag[data-tank="${tank}"] .ballast-cal-info`);
-      if (el) el.textContent = 'Cal: sending…';
+      const els = tank === 'both'
+        ? [...document.querySelectorAll('.ballast-diag .ballast-cal-info')]
+        : [...document.querySelectorAll(`.ballast-diag[data-tank="${tank}"] .ballast-cal-info`)];
+      els.forEach((el) => { el.textContent = 'Cal: sending…'; });
       try {
         const r = await fetch('/sub/api/ballast/calibrate', {
           method: 'POST',
@@ -3189,11 +3752,12 @@
           body: JSON.stringify({ tank, end }),
         });
         const data = await r.json();
-        if (el) el.textContent = data.ok
-          ? (end === 'clear' ? `Cal: cleared ${tank}` : `Cal: saved ${tank} ${end}`)
-          : 'Cal: send failed';
+        const text = data.ok
+          ? (end === 'clear' ? `Cal: ESP cleared ${tank}` : `Cal: saved ${tank} ${end}`)
+          : (`Cal: ${data.error || 'send failed'}`);
+        els.forEach((el) => { el.textContent = text; });
       } catch (e) {
-        if (el) el.textContent = 'Cal: error';
+        els.forEach((el) => { el.textContent = 'Cal: error'; });
       }
     }
     document.querySelectorAll('.cal-top').forEach(btn => {
@@ -3204,6 +3768,9 @@
     });
     document.querySelectorAll('.cal-clear').forEach(btn => {
       btn.addEventListener('click', () => calibrateBallast(btn.dataset.tank, 'clear'));
+    });
+    document.querySelectorAll('.cal-centre').forEach(btn => {
+      btn.addEventListener('click', () => toggleBallastCentre(btn.dataset.tank));
     });
 
     document.querySelectorAll('.ballast-slider').forEach(slider => {

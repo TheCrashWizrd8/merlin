@@ -47,6 +47,21 @@ def _latlon_to_local_m(
     return east_m, north_m
 
 
+def _load_ballast_pot_gpios() -> tuple[int | None, int | None]:
+    try:
+        with open(_PINS_YAML) as f:
+            cfg = yaml.safe_load(f) or {}
+    except OSError:
+        cfg = {}
+    ballast = (cfg.get("sub") or {}).get("ballast") or {}
+    fore = (ballast.get("fore") or {}).get("pot_adc_gpio")
+    aft = (ballast.get("aft") or {}).get("pot_adc_gpio")
+    return (
+        int(fore) if fore is not None else None,
+        int(aft) if aft is not None else None,
+    )
+
+
 def _load_leak_meta() -> tuple[list[int], list[str], bool]:
     try:
         with open(_PINS_YAML) as f:
@@ -61,21 +76,51 @@ def _load_leak_meta() -> tuple[list[int], list[str], bool]:
     return gpios, labels, combined
 
 
+def _ballast_level_from_adc(
+    adc: int | None,
+    bottom_adc: int | None,
+    top_adc: int | None,
+    cal_valid: bool,
+) -> float | None:
+    if not cal_valid or adc is None or adc < 0:
+        return None
+    if bottom_adc is None or top_adc is None:
+        return None
+    span = float(top_adc - bottom_adc)
+    if abs(span) < 50.0:
+        return None
+    return max(0.0, min(1.0, (adc - bottom_adc) / span))
+
+
+def _recompute_ballast_level(t: BallastTankState) -> None:
+    level = _ballast_level_from_adc(
+        t.adc, t.cal_bottom_adc, t.cal_top_adc, t.cal_valid
+    )
+    if level is not None:
+        t.level = level
+
+
 @dataclass
 class BallastTankState:
     level: float | None = None
     adc: int | None = None
+    mv_milli: int | None = None
     moving: bool = False
     direction: str = "STOP"
     command: float = 0.0
     cal_top_adc: int | None = None
     cal_bottom_adc: int | None = None
     cal_valid: bool = False
+    pot_gpio: int | None = None
+    tel_ts: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "level": self.level,
             "adc": self.adc,
+            "mv_milli": self.mv_milli,
+            "pot_gpio": self.pot_gpio,
+            "tel_ts": self.tel_ts,
             "moving": self.moving,
             "direction": self.direction,
             "command": self.command,
@@ -156,6 +201,7 @@ class SubState:
         self._change_cond = threading.Condition()
         self._version = 0
         self._serial_log: deque[dict[str, Any]] = deque(maxlen=serial_log_size)
+        self._serial_notify_at = 0.0
 
         # Connection flags
         self.esp_connected: bool = False
@@ -172,10 +218,16 @@ class SubState:
         self.leak_gpios: list[int] = leak_gpios
         self.leak_labels: list[str] = leak_labels
         self.leak_combined: bool = leak_combined
-        self.ballast_fore = BallastTankState()
-        self.ballast_aft = BallastTankState()
+        fore_pot, aft_pot = _load_ballast_pot_gpios()
+        self.ballast_fore = BallastTankState(pot_gpio=fore_pot)
+        self.ballast_aft = BallastTankState(pot_gpio=aft_pot)
         self.thruster_value: float | None = None
         self.thruster_pwm: int | None = None
+        self.esc_ready: bool = False
+        self.esc_neutral_ms: int = 0
+        self.esc_arm_hold_ms: int = 5000
+        self.esc_pulse_us: int = 0
+        self.esc_last_message: str = ""
         self.pca9685_ok: bool = False
         self.pca9685_addr: int | None = None
         self.pca9685_sda: int | None = None
@@ -202,6 +254,9 @@ class SubState:
         self.gps_track: deque[dict[str, float]] = deque(maxlen=1000)
         self.gps_track_origin: tuple[float, float] | None = None
         self.gps_last_ts: float = 0.0
+
+        # Servo centre calibration: pause S2 so TUNE sliders hold position
+        self.servo_cal_active: bool = False
         self.gps_settling: bool = False
         self._gps_min_move_m, self._gps_settle_n, self._gps_smooth_alpha = _load_gps_track_cfg()
         self._gps_settle: list[tuple[float, float]] = []
@@ -278,13 +333,19 @@ class SubState:
     # ------------------------------------------------------------------
 
     def append_serial(self, direction: str, line: str) -> None:
+        notify = False
         with self._lock:
             self._serial_log.append({
                 "ts": time.time(),
                 "dir": direction,
                 "line": line,
             })
-        self._notify()
+            now = time.monotonic()
+            if now - self._serial_notify_at >= 0.5:
+                self._serial_notify_at = now
+                notify = True
+        if notify:
+            self._notify()
 
     def get_serial_log(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
@@ -342,22 +403,28 @@ class SubState:
         tank: str,
         level: float | None,
         adc: int | None = None,
+        mv_milli: int | None = None,
         moving: bool | None = None,
         direction: str | None = None,
     ) -> None:
+        now = time.time()
         with self._lock:
             t = self._ballast_tank(tank)
             if level is None or level < 0:
                 t.level = None
             else:
-                t.level = max(0.0, min(1.0, level))
+                t.level = max(0.0, min(1.0, float(level)))
             if adc is not None:
                 t.adc = int(adc)
+            if mv_milli is not None:
+                t.mv_milli = int(mv_milli) if int(mv_milli) >= 0 else None
+            _recompute_ballast_level(t)
             if moving is not None:
                 t.moving = bool(moving)
             if direction is not None:
                 t.direction = str(direction)
-            self.telemetry_timestamp = time.time()
+            t.tel_ts = now
+            self.telemetry_timestamp = now
             self.esp_connected = True
         self._notify()
 
@@ -389,6 +456,7 @@ class SubState:
             elif t.cal_top_adc is not None and t.cal_bottom_adc is not None:
                 span = abs(t.cal_top_adc - t.cal_bottom_adc)
                 t.cal_valid = span >= 50
+            _recompute_ballast_level(t)
             self.telemetry_timestamp = time.time()
             self.esp_connected = True
         self._notify()
@@ -399,6 +467,8 @@ class SubState:
             t.cal_top_adc = None
             t.cal_bottom_adc = None
             t.cal_valid = False
+            if t.adc is not None and t.adc >= 0:
+                t.level = max(0.0, min(1.0, t.adc / 4095.0))
             self.telemetry_timestamp = time.time()
             self.esp_connected = True
         self._notify()
@@ -407,6 +477,40 @@ class SubState:
         with self._lock:
             self.thruster_value = float(value)
             self.thruster_pwm = int(pwm)
+            self.telemetry_timestamp = time.time()
+            self.esp_connected = True
+        self._notify()
+
+    def update_esc(
+        self,
+        ready: bool,
+        neutral_ms: int,
+        *,
+        message: str | None = None,
+        arm_hold_ms: int | None = None,
+        pulse_us: int | None = None,
+    ) -> None:
+        with self._lock:
+            self.esc_ready = bool(ready)
+            self.esc_neutral_ms = max(0, int(neutral_ms))
+            if arm_hold_ms is not None:
+                self.esc_arm_hold_ms = max(1, int(arm_hold_ms))
+            if pulse_us is not None:
+                self.esc_pulse_us = max(0, int(pulse_us))
+            if message is not None:
+                self.esc_last_message = str(message).strip()
+            self.telemetry_timestamp = time.time()
+            self.esp_connected = True
+        self._notify()
+
+    def note_esc_line(self, text: str) -> None:
+        with self._lock:
+            self.esc_last_message = str(text).strip()
+            lower = self.esc_last_message.lower()
+            if "ok esc ready" in lower:
+                self.esc_ready = True
+            elif "ok esc arming" in lower:
+                self.esc_ready = False
             self.telemetry_timestamp = time.time()
             self.esp_connected = True
         self._notify()
@@ -719,6 +823,15 @@ class SubState:
         with self._lock:
             return self.ballast_fore.command, self.ballast_aft.command
 
+    def set_servo_cal_active(self, active: bool) -> None:
+        with self._lock:
+            self.servo_cal_active = bool(active)
+        self._notify()
+
+    def is_servo_cal_active(self) -> bool:
+        with self._lock:
+            return self.servo_cal_active
+
     def get_ballast_command(self) -> float:
         """Legacy: returns fore command."""
         with self._lock:
@@ -838,7 +951,7 @@ class SubState:
     # API snapshots
     # ------------------------------------------------------------------
 
-    def telemetry_snapshot(self) -> dict[str, Any]:
+    def telemetry_snapshot(self, *, include_tracks: bool = True) -> dict[str, Any]:
         with self._lock:
             age = (
                 time.time() - self.telemetry_timestamp
@@ -883,6 +996,13 @@ class SubState:
                     "value": self.thruster_value,
                     "pwm": self.thruster_pwm,
                     "connected": self.thruster_pwm is not None,
+                    "esc": {
+                        "ready": self.esc_ready,
+                        "neutral_ms": self.esc_neutral_ms,
+                        "arm_hold_ms": self.esc_arm_hold_ms,
+                        "pulse_us": self.esc_pulse_us,
+                        "message": self.esc_last_message,
+                    },
                 },
                 "pca9685": {
                     "ok": self.pca9685_ok,
@@ -908,10 +1028,14 @@ class SubState:
                     "max_range_m": self.sonar_max_range_m,
                     "servo_deg": self.sonar_servo_deg,
                     "last_ts": self.sonar_last_ts,
-                    "points": [
-                        {"angle_deg": a, "range_m": r}
-                        for a, r in sorted(self.sonar_points.items())
-                    ],
+                    "points": (
+                        [
+                            {"angle_deg": a, "range_m": r}
+                            for a, r in sorted(self.sonar_points.items())
+                        ]
+                        if include_tracks
+                        else None
+                    ),
                 },
                 "gps": {
                     "connected": self.gps_connected,
@@ -928,7 +1052,7 @@ class SubState:
                     "hdop": self.gps.hdop,
                     "settling": self.gps_settling,
                     "min_move_m": self._gps_min_move_m,
-                    "track": list(self.gps_track),
+                    "track": list(self.gps_track) if include_tracks else None,
                     "origin": (
                         {"lat": self.gps_track_origin[0], "lon": self.gps_track_origin[1]}
                         if self.gps_track_origin
