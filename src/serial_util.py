@@ -79,7 +79,6 @@ def open_serial_port(
 
     usb = is_usb_serial_port(port)
     kwargs = dict(
-        port=port,
         baudrate=baud_rate,
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
@@ -90,10 +89,13 @@ def open_serial_port(
         dsrdtr=False,
         xonxoff=False,
     )
-    if usb:
-        kwargs["rts"] = False
-        kwargs["dtr"] = False
+    # pyserial's constructor has no dtr/rts kwargs: build closed, hold both low, then open.
     ser = serial.Serial(**kwargs)
+    ser.port = port
+    if usb:
+        ser.dtr = False
+        ser.rts = False
+    ser.open()
 
     if usb:
         try:

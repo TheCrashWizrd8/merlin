@@ -42,12 +42,25 @@ import yaml
 from src.serial_util import (
     is_esp_usb_device,
     is_gps_usb_device,
+    is_gpio_uart_port,
     is_usb_serial_port,
     open_serial_port,
+)
+from src.servo_center import (
+    centers_snapshot,
+    format_center_command,
+    format_tune_command,
+    format_tune_pwm_command,
+    format_travel_tune_command,
+    sync_all_servo_cal_commands,
+    wire_s2_actuators,
+    write_servo_center_tick,
 )
 from src.sub_state import SubActuators, get_sub_state
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "hardware.yaml"
+PINS_PATH = Path(__file__).parent.parent / "config" / "pins.yaml"
+_fin_right_invert: bool | None = None
 _TEL_PREFIX = re.compile(r"^TEL\s+", re.IGNORECASE)
 _STALE_TELEMETRY_S = 3.0
 _BOOT_GRACE_S = 4.0          # ESP32-S3 USB CDC needs time after open/reset
@@ -86,9 +99,68 @@ def _resolve_serial_port(configured: str) -> str:
         seen.add(real)
         if is_gps_usb_device(path):
             continue
-        if is_esp_usb_device(path) or path == configured:
+        if is_esp_usb_device(path):
             return path
+        if is_gpio_uart_port(path) and path == configured:
+            return path
+        if path == configured and is_usb_serial_port(path):
+            # Configured ACM/USB path exists but is not Espressif by-id — still try
+            # (some boards omit by-id); GPS-like devices are skipped above.
+            return path
+    if configured and Path(configured).exists() and not is_gps_usb_device(configured):
+        return configured
     return configured
+
+
+_ballast_swap_motors: bool | None = None
+
+
+def ballast_swap_motor_commands_enabled() -> bool:
+    global _ballast_swap_motors
+    if _ballast_swap_motors is not None:
+        return _ballast_swap_motors
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f) or {}
+    except OSError:
+        cfg = {}
+    ballast = cfg.get("ballast") or {}
+    _ballast_swap_motors = bool(ballast.get("swap_motor_commands", False))
+    return _ballast_swap_motors
+
+
+def wire_ballast_commands_for_esp(fore: float, aft: float) -> tuple[float, float]:
+    """Map Pi/dashboard tank names to ESP B-line fore/aft motor channels."""
+    f = float(fore)
+    a = float(aft)
+    if ballast_swap_motor_commands_enabled():
+        return a, f
+    return f, a
+
+
+def transform_ballast_motor_line(line: str) -> str:
+    """Swap fore/aft in B / TEST B motor lines when swap_motor_commands is set."""
+    if not ballast_swap_motor_commands_enabled():
+        return line
+    text = line.strip()
+    parts = text.split()
+    if len(parts) >= 3 and parts[0] == "B":
+        try:
+            fore = float(parts[1])
+            aft = float(parts[2])
+        except ValueError:
+            return line
+        w_fore, w_aft = wire_ballast_commands_for_esp(fore, aft)
+        return f"B {w_fore:.3f} {w_aft:.3f}"
+    if len(parts) >= 4 and parts[0] == "TEST" and parts[1] == "B":
+        tank = parts[2].lower()
+        if tank in ("fore", "aft"):
+            parts[2] = "aft" if tank == "fore" else "fore"
+            return " ".join(parts)
+    if len(parts) == 3 and parts[0] == "TEST" and parts[1] == "B":
+        # TEST B fill|drain|stop → both tanks
+        return line
+    return line
 
 
 def _load_serial_config() -> dict:
@@ -135,6 +207,10 @@ def parse_diagnostic_line(line: str, state=None) -> bool:
             state.end_pins_capture()
         state.set_last_pong()
         return True
+    if text.startswith("OK ESC") or text.startswith("ERR ESC"):
+        state.note_esc_line(text)
+        state.set_last_diagnostic(text)
+        return True
     if text.startswith(("OK TEST", "OK HELP", "OK S2", "OK B", "ERR TEST", "OK CAL", "ERR CAL")):
         state.set_last_diagnostic(text)
         if text.startswith("OK CAL B "):
@@ -179,6 +255,13 @@ def parse_diagnostic_line(line: str, state=None) -> bool:
     return False
 
 
+def _update_gyro(state, pitch: float, roll: float, yaw: float) -> None:
+    from src.imu_attitude import map_reported_attitude
+
+    pitch, roll = map_reported_attitude(pitch, roll)
+    state.update_gyro(pitch, roll, yaw)
+
+
 def parse_telemetry_line(line: str, state=None) -> bool:
     """Parse one ESP telemetry line. Returns True if recognised."""
     if state is None:
@@ -208,7 +291,7 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             state.update_battery(float(parts[2]))
             return True
         if kind == "gyro" and len(parts) >= 5:
-            state.update_gyro(float(parts[2]), float(parts[3]), float(parts[4]))
+            _update_gyro(state, float(parts[2]), float(parts[3]), float(parts[4]))
             return True
         if kind == "depth":
             state.update_depth(float(parts[2]))
@@ -216,6 +299,9 @@ def parse_telemetry_line(line: str, state=None) -> bool:
         if kind == "leak" and len(parts) >= 6:
             sensors = [bool(int(x)) for x in parts[2:6]]
             state.update_leaks(sensors)
+            from src.fault_indicator import notify_tel_leak
+
+            notify_tel_leak(sensors)
             return True
         if kind == "ballastcal" and len(parts) >= 6:
             bottom = int(parts[3])
@@ -234,17 +320,27 @@ def parse_telemetry_line(line: str, state=None) -> bool:
         if kind == "ballast" and len(parts) >= 7 and parts[2] in ("fore", "aft"):
             raw_level = float(parts[3])
             adc = int(parts[4])
-            # -1 level with adc >= 0 means unwired sentinel; otherwise use raw/cal level
-            level = None if (raw_level < 0 and adc < 0) else max(0.0, raw_level)
+            # ESP sends level -1 when pot GPIO unwired; ignore stale ADC on that path.
+            level = None if raw_level < 0 else max(0.0, min(1.0, raw_level))
+            mv_milli: int | None = None
+            moving_idx = 5
+            direction_idx = 6
+            if len(parts) >= 8:
+                mv_milli = int(parts[5])
+                moving_idx = 6
+                direction_idx = 7
             state.update_ballast_tank(
                 parts[2],
                 level,
-                adc=int(parts[4]),
-                moving=bool(int(parts[5])),
-                direction=parts[6],
+                adc=adc,
+                mv_milli=mv_milli,
+                moving=bool(int(parts[moving_idx])),
+                direction=parts[direction_idx],
             )
             return True
         if kind == "ballast" and len(parts) >= 3:
+            if parts[2] in ("fore", "aft"):
+                return False
             level = float(parts[2])
             adc = int(parts[3]) if len(parts) >= 4 else None
             moving = bool(int(parts[4])) if len(parts) >= 5 else None
@@ -255,6 +351,15 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             return True
         if kind == "thruster" and len(parts) >= 4:
             state.update_thruster(float(parts[2]), int(parts[3]))
+            return True
+        if kind == "esc" and len(parts) >= 4:
+            ready = bool(int(parts[2]))
+            neutral_ms = int(parts[3])
+            hold_ms = int(parts[4]) if len(parts) >= 5 else None
+            pulse_us = int(parts[5]) if len(parts) >= 6 else None
+            state.update_esc(
+                ready, neutral_ms, arm_hold_ms=hold_ms, pulse_us=pulse_us
+            )
             return True
         if kind == "pca9685" and len(parts) >= 6:
             state.update_pca9685(
@@ -268,7 +373,11 @@ def parse_telemetry_line(line: str, state=None) -> bool:
             state.update_esp_status(" ".join(parts[2:]))
             return True
         if kind == "fault":
-            state.update_esp_fault(" ".join(parts[2:]))
+            fault = " ".join(parts[2:])
+            state.update_esp_fault(fault)
+            from src.fault_indicator import notify_tel_fault
+
+            notify_tel_fault(fault)
             return True
         if kind == "heartbeat":
             state.update_heartbeat(int(parts[2]))
@@ -297,7 +406,7 @@ def _parse_json_telemetry(obj: dict, state) -> bool:
             state.update_battery(float(obj["v"]))
             return True
         if t == "gyro":
-            state.update_gyro(float(obj["pitch"]), float(obj["roll"]), float(obj["yaw"]))
+            _update_gyro(state, float(obj["pitch"]), float(obj["roll"]), float(obj["yaw"]))
             return True
         if t == "depth":
             state.update_depth(float(obj["m"]))
@@ -305,6 +414,9 @@ def _parse_json_telemetry(obj: dict, state) -> bool:
         if t == "leak":
             sensors = [bool(x) for x in obj.get("sensors", [])]
             state.update_leaks(sensors)
+            from src.fault_indicator import notify_tel_leak
+
+            notify_tel_leak(sensors)
             return True
         if t == "ballast":
             state.update_ballast(float(obj["level"]))
@@ -315,17 +427,73 @@ def _parse_json_telemetry(obj: dict, state) -> bool:
 
 
 def format_ballast_command(fore: float, aft: float) -> str:
-    f = max(-1.0, min(1.0, float(fore)))
-    a = max(-1.0, min(1.0, float(aft)))
+    f, a = wire_ballast_commands_for_esp(fore, aft)
+    f = max(-1.0, min(1.0, f))
+    a = max(-1.0, min(1.0, a))
     return f"B {f:.3f} {a:.3f}\n"
 
 
+def fin_right_invert_enabled() -> bool:
+    global _fin_right_invert
+    if _fin_right_invert is not None:
+        return _fin_right_invert
+    try:
+        with open(PINS_PATH) as f:
+            data = yaml.safe_load(f) or {}
+        fin5 = ((data.get("pca9685") or {}).get("channels") or {}).get("fin_5") or {}
+        _fin_right_invert = bool(fin5.get("invert_command", False))
+    except OSError:
+        _fin_right_invert = False
+    return _fin_right_invert
+
+
+_THRUSTER_TX_DEADBAND = 0.08
+_SERVO_TX_DEADBAND = 0.02
+
+
+def _snap_thruster_for_tx(value: float) -> float:
+    v = float(value)
+    if abs(v) < _THRUSTER_TX_DEADBAND:
+        return 0.0
+    return max(-1.0, min(1.0, v))
+
+
+def _snap_servo_for_tx(value: float) -> float:
+    """Collapse near-zero fin/steer commands so the ESP holds one centre pulse."""
+    v = float(value)
+    if abs(v) < _SERVO_TX_DEADBAND:
+        return 0.0
+    return max(-1.0, min(1.0, v))
+
+
 def format_actuator_command(act: SubActuators) -> str:
-    return (
-        f"S2 {act.aft_steer_y:.3f} {act.aft_steer_z:.3f} "
-        f"F {act.fin_left:.3f} {act.fin_right:.3f} "
-        f"X {act.thruster_x:.3f}\n"
+    rested = SubActuators(
+        aft_steer_y=_snap_servo_for_tx(act.aft_steer_y),
+        aft_steer_z=_snap_servo_for_tx(act.aft_steer_z),
+        thruster_x=act.thruster_x,
+        fin_left=_snap_servo_for_tx(act.fin_left),
+        fin_right=_snap_servo_for_tx(act.fin_right),
     )
+    wire = wire_s2_actuators(rested, invert_fin_r=fin_right_invert_enabled())
+    thr = _snap_thruster_for_tx(wire.thruster_x)
+    return (
+        f"S2 {_snap_servo_for_tx(wire.aft_steer_y):.3f} {_snap_servo_for_tx(wire.aft_steer_z):.3f} "
+        f"F {_snap_servo_for_tx(wire.fin_left):.3f} {_snap_servo_for_tx(wire.fin_right):.3f} "
+        f"X {thr:.3f}\n"
+    )
+
+
+def sonar_sweep_enabled() -> bool:
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f) or {}
+    except OSError:
+        return False
+    return bool((cfg.get("sonar") or {}).get("sweep_enabled", False))
+
+
+def format_sonar_command(enabled: bool) -> str:
+    return f"SONAR {1 if enabled else 0}\n"
 
 
 class EspBridge:
@@ -359,6 +527,8 @@ class EspBridge:
         self._last_tx_s2 = ""
         self._last_tx_b = ""
         self._last_tx_any = 0.0
+        self._center_sync_pending = True
+        self._clear_servo_cal_pending = True
 
     def set_diag_mode(self, enabled: bool, resume_after_s: float | None = None) -> None:
         if self._diag_timer is not None:
@@ -404,6 +574,8 @@ class EspBridge:
                     else self.port
                 )
                 self._state.append_serial("sys", f"Opened {link} @ {self.baud_rate}")
+                self._center_sync_pending = True
+                self._clear_servo_cal_pending = True
                 return True
             except Exception as exc:
                 self._serial = None
@@ -477,6 +649,34 @@ class EspBridge:
             if not self._ready_for_write():
                 time.sleep(0.25)
                 continue
+            if self._center_sync_pending:
+                try:
+                    with self._ser_lock:
+                        ser = self._serial
+                        if ser is not None and ser.is_open:
+                            for cmd in sync_all_servo_cal_commands():
+                                line = cmd + "\n"
+                                ser.write(line.encode("ascii"))
+                            ser.write(format_sonar_command(sonar_sweep_enabled()).encode("ascii"))
+                            ser.flush()
+                    self._last_tx_any = time.time()
+                    self._center_sync_pending = False
+                    for cmd in sync_all_servo_cal_commands():
+                        self._state.append_serial("tx", cmd)
+                except Exception as exc:
+                    self._state.append_serial("sys", f"Servo center sync failed: {exc}")
+            if self._clear_servo_cal_pending:
+                try:
+                    with self._ser_lock:
+                        ser = self._serial
+                        if ser is not None and ser.is_open:
+                            ser.write(b"CAL S DONE\n")
+                            ser.flush()
+                    self._clear_servo_cal_pending = False
+                    self._state.set_servo_cal_active(False)
+                    self._state.append_serial("tx", "CAL S DONE")
+                except Exception as exc:
+                    self._state.append_serial("sys", f"Servo cal clear failed: {exc}")
             act = self._state.recompute_effective()
             fore_cmd, aft_cmd = self._state.get_ballast_commands()
             ballast_line = format_ballast_command(fore_cmd, aft_cmd)
@@ -542,6 +742,7 @@ class EspBridge:
     def start(self) -> None:
         if self._reader and self._reader.is_alive():
             return
+        self._state.set_servo_cal_active(False)
         self._stop.clear()
         self._reader = threading.Thread(target=self._reader_loop, daemon=True, name="esp-rx")
         self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="esp-tx")
@@ -558,8 +759,12 @@ class EspBridge:
         """Send a raw line to ESP (for manual serial monitor POST)."""
         if not self._open():
             return False
+        line = transform_ballast_motor_line(line)
         if not line.endswith("\n"):
             line += "\n"
+        deadline = time.time() + 8.0
+        while not self._ready_for_write() and time.time() < deadline:
+            time.sleep(0.05)
         try:
             with self._ser_lock:
                 ser = self._serial
@@ -573,6 +778,27 @@ class EspBridge:
             self._state.append_serial("sys", f"Raw send failed: {exc}")
             self._close_serial()
             return False
+
+    def sync_servo_center(self) -> bool:
+        ok = True
+        for cmd in sync_all_servo_cal_commands():
+            if not self.send_raw(cmd):
+                ok = False
+        return ok
+
+    def tune_servo_center(self, channel: int, tick: int) -> bool:
+        if self.send_raw(format_tune_command(channel, tick)):
+            return True
+        return self.send_raw(format_tune_pwm_command(channel, tick))
+
+    def tune_servo_travel(self, channel: int, end: str, tick: int) -> bool:
+        try:
+            cmd = format_travel_tune_command(channel, end, tick)
+        except ValueError:
+            return False
+        if self.send_raw(cmd):
+            return True
+        return self.send_raw(format_tune_pwm_command(channel, tick))
 
 
 _bridge: EspBridge | None = None
