@@ -168,14 +168,71 @@ def _stick_component(x: float, y: float, axis: str) -> float:
     return 0.0
 
 
-def _isolate_dominant_axis(x: float, y: float) -> tuple[float, float]:
+# Half-width (°) of the hold zone around each diagonal. 22.5 = full eight-way gate,
+# 0 = off (up/down/left/right only).
+DIAGONAL_HOLD_DEGREES = 15.0
+
+# Direction holds (up/down/left/right and the diagonals) only apply at the rim. Inside
+# ``EDGE_HOLD_START`` the stick moves both axes freely for micro adjustments; the hold
+# fades in smoothly until it is complete at ``EDGE_HOLD_FULL`` (stick radius, 0–1).
+EDGE_HOLD_START = 0.85
+EDGE_HOLD_FULL = 0.95
+
+
+def _edge_hold_weight(radius: float, start: float, full: float) -> float:
+    """0 inside the free range, 1 at the rim, smoothstep in between. start <= 0 = always hold."""
+    if start <= 0.0:
+        return 1.0
+    if full <= start:
+        return 1.0 if radius >= start else 0.0
+    t = max(0.0, min(1.0, (radius - start) / (full - start)))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _diagonal_hold(
+    x: float,
+    y: float,
+    half_degrees: float,
+    raw: tuple[float, float] | None = None,
+) -> tuple[float, float] | None:
     """
-    One stick direction drives one aft servo.
+    Hold point at the four diagonals.
+
+    Within ``half_degrees`` of 45° / 135° / 225° / 315° both axes lock to the stick's
+    full deflection, so a diagonal push drives both servos together and stays put
+    even if the thumb wobbles a little. Returns None outside the zone.
+
+    ``x``/``y`` set the magnitude. ``raw`` (the stick before a per-axis deadzone, which
+    bends angles toward the axes) sets the angle and signs when given.
+    """
+    half = max(0.0, min(22.5, float(half_degrees)))
+    mag = min(1.0, math.hypot(x, y))
+    if half <= 0.0 or mag <= 0.0:
+        return None
+    ax, ay = raw if raw is not None else (x, y)
+    off_diagonal = abs(math.degrees(math.atan2(abs(ay), abs(ax))) - 45.0)
+    if off_diagonal > half:
+        return None
+    return math.copysign(mag, ax), math.copysign(mag, ay)
+
+
+def _isolate_dominant_axis(
+    x: float,
+    y: float,
+    diagonal_hold_degrees: float = 0.0,
+    raw: tuple[float, float] | None = None,
+) -> tuple[float, float]:
+    """
+    One stick direction drives one aft servo, except at the diagonal hold points.
 
     A left/right push keeps only the horizontal component. An up/down push
     keeps only the vertical component. The smaller axis is zeroed so the
-    two rear servos do not move together.
+    two rear servos do not move together. Near a diagonal both axes are held
+    (see ``_diagonal_hold``).
     """
+    held = _diagonal_hold(x, y, diagonal_hold_degrees, raw)
+    if held is not None:
+        return held
     if abs(x) >= abs(y):
         return x, 0.0
     return 0.0, y
@@ -244,11 +301,17 @@ def _map_flaps_stick(
     rs_y: float,
     deadzone: float,
     flap_cfg: dict[str, Any],
+    diagonal_hold_degrees: float = DIAGONAL_HOLD_DEGREES,
+    edge_hold_start: float = EDGE_HOLD_START,
+    edge_hold_full: float = EDGE_HOLD_FULL,
 ) -> tuple[float, float]:
     """
     Right-stick flap mode:
       up/down → both fins same direction
       left/right → differential roll
+
+    Inside the rim the two combine freely (micro adjustments). Pushed to the rim the
+    stick holds one direction, or both at a diagonal.
     """
     invert_y = bool(flap_cfg.get("invert_y", False))
     invert_x = bool(flap_cfg.get("invert_x", False))
@@ -257,21 +320,34 @@ def _map_flaps_stick(
     if invert_x:
         rs_x = -rs_x
 
+    radius = math.hypot(rs_x, rs_y)
     rs_x, rs_y = _apply_circular_deadzone(rs_x, rs_y, deadzone)
     ax, ay = abs(rs_x), abs(rs_y)
     if ax < 0.05 and ay < 0.05:
         return 0.0, 0.0
 
-    if ay >= ax:
-        mag = min(1.0, ay)
-        if rs_y < 0.0:
-            return mag, mag
-        return -mag, -mag
+    free = (_clamp(-rs_y - rs_x), _clamp(-rs_y + rs_x))
+    hold = _edge_hold_weight(radius, edge_hold_start, edge_hold_full)
+    if hold <= 0.0:
+        return free
 
-    mag = min(1.0, ax)
-    if rs_x < 0.0:
-        return mag, -mag
-    return -mag, mag
+    held = _diagonal_hold(rs_x, rs_y, diagonal_hold_degrees)
+    if held is not None:
+        # Both flaps together plus roll: up+right → (0, 1), up+left → (1, 0), like polar_fins.
+        mag = abs(held[0])
+        vert = mag if rs_y < 0.0 else -mag
+        roll = mag if rs_x < 0.0 else -mag
+        snapped = (_clamp(vert + roll), _clamp(vert - roll))
+    elif ay >= ax:
+        mag = min(1.0, ay)
+        snapped = (mag, mag) if rs_y < 0.0 else (-mag, -mag)
+    else:
+        mag = min(1.0, ax)
+        snapped = (mag, -mag) if rs_x < 0.0 else (-mag, mag)
+    return (
+        free[0] + hold * (snapped[0] - free[0]),
+        free[1] + hold * (snapped[1] - free[1]),
+    )
 
 
 def _map_thruster(
@@ -456,7 +532,22 @@ def map_xbox_to_actuators(
         ls_x_raw = -ls_x_raw
     ls_x = _apply_deadzone(ls_x_raw, left_dz)
     ls_y = _apply_deadzone(ls_y_raw, left_dz)
-    ls_x, ls_y = _isolate_dominant_axis(ls_x, ls_y)
+    held_x, held_y = _isolate_dominant_axis(
+        ls_x,
+        ls_y,
+        diagonal_hold_degrees=float(
+            left.get("diagonal_hold_degrees", DIAGONAL_HOLD_DEGREES)
+        ),
+        raw=(ls_x_raw, ls_y_raw),
+    )
+    hold = _edge_hold_weight(
+        math.hypot(ls_x_raw, ls_y_raw),
+        float(left.get("edge_hold_start", EDGE_HOLD_START)),
+        float(left.get("edge_hold_full", EDGE_HOLD_FULL)),
+    )
+    # Free micro adjustments inside the rim, direction hold only when pushed to the edge.
+    ls_x += hold * (held_x - ls_x)
+    ls_y += hold * (held_y - ls_y)
     y_axis, z_axis = _resolve_left_aft_stick_axes(left)
     aft_y = _stick_component(ls_x, ls_y, y_axis)
     aft_z = _stick_component(ls_x, ls_y, z_axis)
@@ -474,7 +565,17 @@ def map_xbox_to_actuators(
     else:
         right_mode = (right.get("mode") or flap_cfg.get("mode") or "flaps").lower()
         if right_mode in ("flaps", "normal"):
-            fin_left, fin_right = _map_flaps_stick(rs_x, rs_y, right_dz, flap_cfg)
+            fin_left, fin_right = _map_flaps_stick(
+                rs_x,
+                rs_y,
+                right_dz,
+                flap_cfg,
+                diagonal_hold_degrees=float(
+                    right.get("diagonal_hold_degrees", DIAGONAL_HOLD_DEGREES)
+                ),
+                edge_hold_start=float(right.get("edge_hold_start", EDGE_HOLD_START)),
+                edge_hold_full=float(right.get("edge_hold_full", EDGE_HOLD_FULL)),
+            )
         elif right_mode == "polar_fins":
             snap = float(right.get("snap_degrees", 5.0))
             fin_left, fin_right = _map_polar_fins(rs_x, rs_y, right_dz, snap_degrees=snap)

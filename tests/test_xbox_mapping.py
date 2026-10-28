@@ -1,5 +1,10 @@
 """Tests for config/xbox_mapping.yaml → actuator mapping."""
 
+import copy
+import math
+
+import pytest
+
 from src.sub_state import XboxState
 from src.xbox_controller import scale_trigger_axis, sdl_trigger_axis
 from src.xbox_mapping import (
@@ -215,7 +220,7 @@ def test_deliberate_stick_counts_as_active():
 
 def test_left_stick_aft_steer_axes():
     # Horizontal wins when both components are present: only aft Y moves.
-    xbox = _xbox(left_stick_x=0.8, left_stick_y=-0.5)
+    xbox = _xbox(left_stick_x=0.9, left_stick_y=-0.3)
     act = map_xbox_to_actuators(xbox, deadzone=0.05, linked_flap_enabled=False)
     assert act.aft_steer_y > 0.7
     assert abs(act.aft_steer_z) < 0.05
@@ -301,3 +306,130 @@ def test_emergency_stop_button_does_not_trigger_override():
     xbox = _xbox(buttons={"b": True}, triggers={"lt": 0.0, "rt": 0.0})
     act = map_xbox_to_actuators(xbox, deadzone=0.18, linked_flap_enabled=True)
     assert not xbox_input_active(xbox, act, actuator_threshold=0.12)
+
+
+def _polar(angle_deg: float, radius: float = 1.0) -> tuple[float, float]:
+    """Stick (x, y) at the rim (radius 1) for an angle from +x toward 'down' (y grows downward)."""
+    a = math.radians(angle_deg)
+    return radius * math.cos(a), radius * math.sin(a)
+
+
+def _left(x: float, y: float, cfg=None):
+    return map_xbox_to_actuators(
+        _xbox(left_stick_x=x, left_stick_y=y), 0.05, cfg, linked_flap_enabled=False
+    )
+
+
+def test_left_stick_holds_at_all_four_diagonals():
+    for sx in (1.0, -1.0):
+        for sy in (1.0, -1.0):
+            act = _left(sx * 0.7, sy * 0.7)
+            assert math.copysign(1.0, act.aft_steer_y) == sx
+            assert math.copysign(1.0, act.aft_steer_z) == sy
+            assert abs(act.aft_steer_y) > 0.9 and abs(act.aft_steer_z) > 0.9
+
+
+def test_left_stick_diagonal_hold_survives_thumb_wobble():
+    for angle in (33.0, 40.0, 45.0, 50.0, 57.0):
+        x, y = _polar(angle)
+        act = _left(x, y)
+        assert act.aft_steer_y > 0.8
+        assert act.aft_steer_z > 0.8
+        assert abs(act.aft_steer_y - act.aft_steer_z) < 1e-9
+
+
+def test_left_stick_outside_diagonal_zone_still_one_direction():
+    x, y = _polar(25.0)  # mostly horizontal
+    act = _left(x, y)
+    assert act.aft_steer_y > 0.7 and abs(act.aft_steer_z) < 0.05
+    x, y = _polar(65.0)  # mostly vertical
+    act = _left(x, y)
+    assert act.aft_steer_z > 0.7 and abs(act.aft_steer_y) < 0.05
+
+
+def test_left_stick_cardinals_unchanged():
+    assert _left(0.9, 0.0).aft_steer_y > 0.8 and abs(_left(0.9, 0.0).aft_steer_z) < 0.05
+    assert _left(0.0, -0.9).aft_steer_z < -0.8 and abs(_left(0.0, -0.9).aft_steer_y) < 0.05
+
+
+def test_diagonal_hold_can_be_turned_off_or_widened():
+    cfg = copy.deepcopy(load_mapping_config())
+    cfg["sticks"]["left"]["diagonal_hold_degrees"] = 0
+    off = _left(0.7, 0.7, cfg)
+    assert off.aft_steer_y > 0.6 and abs(off.aft_steer_z) < 0.05  # old four-way behaviour
+    cfg["sticks"]["left"]["diagonal_hold_degrees"] = 22.5  # full eight-way gate
+    x, y = _polar(25.0)
+    wide = _left(x, y, cfg)
+    assert wide.aft_steer_y > 0.8 and wide.aft_steer_z > 0.8
+
+
+def test_right_flaps_stick_holds_at_diagonals():
+    def fins(x, y):
+        act = map_xbox_to_actuators(
+            _xbox(right_stick_x=x, right_stick_y=y), 0.05, linked_flap_enabled=False
+        )
+        return act.fin_left, act.fin_right
+
+    fl, fr = fins(0.7, -0.7)  # up + right → right flap only
+    assert abs(fl) < 0.05 and fr > 0.9
+    fl, fr = fins(-0.7, -0.7)  # up + left → left flap only
+    assert fl > 0.9 and abs(fr) < 0.05
+    fl, fr = fins(0.0, -0.9)  # straight up unchanged: both flaps together
+    assert fl > 0.8 and fr > 0.8
+
+
+def test_diagonal_hold_zone_is_30_degrees_wide_at_the_rim():
+    # The per-axis deadzone must not shrink the zone.
+    for radius in (0.97, 1.0):
+        for angle in (31.0, 45.0, 59.0):
+            x, y = _polar(angle, radius)
+            act = _left(x, y)
+            assert act.aft_steer_y > 0 and act.aft_steer_z > 0, (radius, angle)
+        for angle in (28.0, 62.0):
+            x, y = _polar(angle, radius)
+            act = _left(x, y)
+            assert (act.aft_steer_y == 0.0) != (act.aft_steer_z == 0.0), (radius, angle)
+
+
+def test_inside_the_rim_the_stick_moves_both_axes_freely():
+    # Micro adjustments: no snapping to a direction at partial deflection.
+    dz = 0.05
+    for angle in (10.0, 20.0, 30.0, 45.0, 70.0):
+        x, y = _polar(angle, 0.5)
+        act = _left(x, y)
+        assert act.aft_steer_y == pytest.approx((x - dz) / (1 - dz))
+        assert act.aft_steer_z == pytest.approx((y - dz) / (1 - dz))
+
+
+def test_direction_hold_fades_in_smoothly_toward_the_rim():
+    angle = 20.0  # would snap to horizontal at the rim
+    zs = []
+    for i in range(50, 101):
+        x, y = _polar(angle, i / 100.0)
+        zs.append(_left(x, y).aft_steer_z)
+    assert zs[0] > 0.1  # free at half deflection
+    assert zs[-1] == 0.0  # held (vertical killed) at the rim
+    assert max(abs(b - a) for a, b in zip(zs, zs[1:])) < 0.1  # no jump on the way
+
+
+def test_edge_hold_start_zero_restores_always_hold():
+    cfg = copy.deepcopy(load_mapping_config())
+    cfg["sticks"]["left"]["edge_hold_start"] = 0
+    x, y = _polar(20.0, 0.5)
+    act = _left(x, y, cfg)
+    assert act.aft_steer_y > 0.1 and act.aft_steer_z == 0.0
+
+
+def test_right_flaps_stick_is_free_inside_the_rim_and_holds_at_it():
+    def fins(x, y):
+        act = map_xbox_to_actuators(
+            _xbox(right_stick_x=x, right_stick_y=y), 0.05, linked_flap_enabled=False
+        )
+        return act.fin_left, act.fin_right
+
+    fl, fr = fins(0.2, -0.5)  # mostly up, a little right: both move, right more
+    assert 0.0 < fl < fr
+    fl, fr = fins(0.0, -0.5)  # straight up inside the rim: both flaps together
+    assert fl == pytest.approx(fr) and fl > 0.3
+    fl, fr = fins(0.35, -1.0)  # at the rim, mostly up: held straight up
+    assert fl == pytest.approx(fr) and fl > 0.9

@@ -13,4 +13,4 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
-exec .venv/bin/python run.py "$@"
+exec .venv/bin/python -u run.py "$@"  # -u: unbuffered, so [xbox]/[camera] lines reach the journal

@@ -16,6 +16,15 @@ sticks:
   left:
     # Two aft servos, one stick direction at a time.
     # Left/right → aft Y (ch3) only. Up/down → aft Z (ch2) only.
+    # Diagonals are a hold point: within this many degrees of 45° both servos lock
+    # together at full stick deflection. 22.5 = full eight-way gate, 0 = off.
+    diagonal_hold_degrees: 15
+    # Direction holds (up/down/left/right and the diagonals) only apply when the stick is
+    # pushed to the rim. Inside edge_hold_start the stick moves freely for micro
+    # adjustments; the hold fades in until complete at edge_hold_full (stick radius 0-1).
+    # edge_hold_start: 0 = always hold (old behaviour).
+    edge_hold_start: 0.85
+    edge_hold_full: 0.95
     aft_y_stick_axis: x   # horizontal stick → aft Y (ch3)
     aft_z_stick_axis: y   # vertical stick → aft Z (ch2)
     # Legacy stick-axis names (optional; do not use aft_steer_y for Z — use aft_z_stick_axis):
@@ -33,6 +42,10 @@ sticks:
     #
     # Neutral → flaps neutral
     mode: flaps
+    # Diagonal hold (same idea as the left stick): up+right → right flap only, etc.
+    diagonal_hold_degrees: 15
+    edge_hold_start: 0.85
+    edge_hold_full: 0.95
 
     up: both_flaps_up
     down: both_flaps_down

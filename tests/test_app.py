@@ -17,7 +17,7 @@ class AppLauncherTests(unittest.TestCase):
 
     def test_parse_args_defaults(self):
         args = parse_args([])
-        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.host, "::")
         self.assertEqual(args.port, 8080)
         self.assertFalse(args.yolo)
         self.assertFalse(args.no_sub)

@@ -2028,11 +2028,23 @@
       return ctrl.effective || {};
     }
 
+    let lastServerMode = null;
     function syncLocalModeFromServer(ctrl, models) {
       if (!controlRestored || !ctrl) return;
+      const serverChanged = lastServerMode !== null && ctrl.mode !== lastServerMode;
+      lastServerMode = ctrl.mode;
       const yoloUp = !!(models && models.running);
       if (yoloUp && ctrl.mode === 'auto' && localControlMode !== 'auto') {
         localControlMode = 'auto';
+        syncModeUi();
+        saveControlState();
+        return;
+      }
+      // Server-side switch (pad connected -> xbox, pad lost -> manual): follow it. Only
+      // edges count, so a click on a mode tab is not undone before its POST lands.
+      if (serverChanged && (ctrl.mode === 'xbox' || ctrl.mode === 'manual')
+          && localControlMode !== ctrl.mode) {
+        localControlMode = ctrl.mode;
         syncModeUi();
         saveControlState();
       }

@@ -443,9 +443,20 @@ class XboxController:
     def _try_connect(self) -> bool:
         ok = self._pad.open()
         if ok:
-            print(f"[xbox] Connected: {self._pad.name}")
-            # Do not steal manual mode — user picks Xbox vs Manual on the dashboard.
+            print(f"[xbox] Connected: {self._pad.name}", flush=True)
+            self._take_default_control()
         return ok
+
+    def _take_default_control(self) -> None:
+        """A connected pad is the default control source: it takes over from manual.
+
+        YOLO auto mode is left alone (deliberate pad input already overrides it), and so
+        is servo calibration, which needs the manual bench path.
+        """
+        if self._state.get_control_mode() != "manual" or self._state.is_servo_cal_active():
+            return
+        self._state.set_control_mode("xbox")
+        self._state.recompute_effective()
 
     def _on_disconnect(self) -> None:
         self._stick_filter.reset()
@@ -585,7 +596,7 @@ class XboxController:
                     self._try_connect()
             elif event.type == pygame.JOYDEVICEREMOVED:
                 if self._pad.connected:
-                    print("[xbox] Controller disconnected")
+                    print("[xbox] Controller disconnected (device removed)", flush=True)
                     self._pad.close()
                     self._on_disconnect()
                 changed = True
@@ -596,13 +607,14 @@ class XboxController:
             try:
                 self._poll_once()
             except Exception as exc:
-                print(f"[xbox] Poll error: {exc}")
+                print(f"[xbox] Poll error: {exc}", flush=True)
                 try:
                     self._pad.close()
                 except Exception:
                     pass
                 self._on_disconnect()
-                self._stop.wait(1.0)
+                self._last_scan = 0.0  # retry at once; a glitch should not cost seconds
+                self._stop.wait(0.25)
 
     def _poll_once(self) -> None:
         self._drain_hotplug_events()
@@ -619,16 +631,19 @@ class XboxController:
         try:
             xbox = self._pad.read()
         except Exception as exc:
-            print(f"[xbox] Read error: {exc}")
+            print(f"[xbox] Read error: {exc} — reconnecting", flush=True)
             self._pad.close()
             self._on_disconnect()
-            self._stop.wait(1.0)
+            self._last_scan = 0.0
+            self._stop.wait(0.25)
             return
 
         if not xbox.connected:
+            print("[xbox] Pad stopped reporting — reconnecting", flush=True)
             self._pad.close()
             self._on_disconnect()
-            self._stop.wait(1.0)
+            self._last_scan = 0.0
+            self._stop.wait(0.25)
             return
 
         self._state.update_xbox(xbox)
