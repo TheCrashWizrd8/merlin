@@ -37,10 +37,10 @@ pca9685:
     min_us_approx: 1000
     max_us_approx: 2000
   servo_center_ticks:
-    '2': 318
-    '3': 370
-    '4': 352
-    '5': 305
+    '2': 411
+    '3': 362
+    '4': 358
+    '5': 308
   channels:
     fin_2:
       channel: 2
@@ -89,17 +89,17 @@ pca9685:
       step_deg: 5
   servo_travel_ticks:
     '2':
-      min: 207
-      max: 399
+      min: 313
+      max: 520
     '5':
-      min: 247
-      max: 396
+      min: 166
+      max: 383
     '4':
       min: 311
       max: 409
     '3':
-      min: 222
-      max: 448
+      min: 254
+      max: 492
 l298n:
   motor:
     in1_gpio: 13

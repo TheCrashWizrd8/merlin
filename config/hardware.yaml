@@ -58,15 +58,21 @@ sonar:
   sweep_enabled: false   # true = ESP sweeps the ch1 sonar servo ±180° whenever the fins are idle
   max_range_m: 6.0
 
-# Pi GPIO → relay module IN/RCIN (Omron G5LE-14 via driver). See docs/RELAY_G5LE.md
+# Pi GPIO → Pololu RC switch (#2804) signal / relay module IN/RCIN (Omron G5LE-14 via driver). See docs/RELAY_G5LE.md
 fault_indicator:
   enabled: true
   gpio: 18
-  backend: pinctrl           # Pi OS: use pinctrl (gpioset often no-ops on Pi 5 header)
+  backend: rc_pwm            # Pololu RC switch (#2804) wants a 50 Hz servo pulse; pinctrl/gpioset = plain high/low
+  rc_pwm:                    # Pi 5 hardware PWM0 ch2 (needs dtoverlay=pwm,pin=18,func=3); falls back to lgpio software pulses
+    period_us: 20000
+    active_us: 2000          # relay on  (switch default threshold ~1700 us, active above it)
+    inactive_us: 1000        # relay off
+    safe_start_s: 0.6        # inactive pulses first so the switch's safe-start lets it activate
   gpio_chip: auto            # only used if backend=gpioset
-  # NC LEDs off only when coil is energized (confirmed: idle=1 on gpiochip4 line 18)
-  idle_rcin_level: 1         # no leak — coil on — LEDs off
-  fault_rcin_level: 0        # TEL leak/fault — coil off — LEDs on
+  # Lamps light when the relay is energised (leak) and stay off at idle, so the coil is only on during a leak
+  idle_rcin_level: 0         # no leak: relay off, LEDs off
+  fault_rcin_level: 1        # TEL leak/fault: relay on, LEDs on
+  flash_hz: 2                # leak/fault: flash the lamps at this rate (0 = steady on)
   hold_refresh_s: 0.05       # lgpio fallback only; gpioset holds until state changes
   sources:
     leak: true               # TEL leak …

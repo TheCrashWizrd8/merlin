@@ -286,6 +286,16 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         state.clear_gps_track()
         return jsonify({"ok": True})
 
+    @app.route("/sub/api/leak/simulate", methods=["POST"])
+    def sub_api_leak_simulate():
+        from src.fault_indicator import set_simulated_leak
+
+        data = request.get_json(silent=True) or {}
+        active = bool(data.get("active", True))
+        state.set_leak_simulated(active)
+        set_simulated_leak(active)
+        return jsonify({"ok": True, "active": active})
+
     @app.route("/sub/api/telemetry/leaks")
     def sub_api_leaks():
         snap = state.telemetry_snapshot()

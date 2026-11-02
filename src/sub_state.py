@@ -214,6 +214,7 @@ class SubState:
         self.depth_m: float | None = None
         self.leak_sensors: list[bool] = []
         self.leak_triggered: bool = False
+        self.leak_simulated: bool = False
         leak_gpios, leak_labels, leak_combined = _load_leak_meta()
         self.leak_gpios: list[int] = leak_gpios
         self.leak_labels: list[str] = leak_labels
@@ -375,6 +376,11 @@ class SubState:
             self.depth_m = depth_m
             self.telemetry_timestamp = time.time()
             self.esp_connected = True
+        self._notify()
+
+    def set_leak_simulated(self, active: bool) -> None:
+        with self._lock:
+            self.leak_simulated = bool(active)
         self._notify()
 
     def update_leaks(self, sensors: list[bool]) -> None:
@@ -981,9 +987,14 @@ class SubState:
                     "connected": self.depth_m is not None,
                 },
                 "leaks": {
-                    "sensors": list(self.leak_sensors),
-                    "triggered": self.leak_triggered,
-                    "connected": len(self.leak_sensors) > 0,
+                    "sensors": (
+                        [True] * max(1, len(self.leak_sensors))
+                        if self.leak_simulated
+                        else list(self.leak_sensors)
+                    ),
+                    "triggered": self.leak_triggered or self.leak_simulated,
+                    "simulated": self.leak_simulated,
+                    "connected": len(self.leak_sensors) > 0 or self.leak_simulated,
                     "gpios": self.leak_gpios,
                     "labels": self.leak_labels,
                     "combined": self.leak_combined,

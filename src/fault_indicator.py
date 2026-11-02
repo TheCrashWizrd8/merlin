@@ -8,6 +8,7 @@ Updates on ``TEL leak`` / ``TEL fault`` only. Holds RCIN with ``gpioset`` or lgp
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -113,6 +114,9 @@ class FaultIndicator:
         self._hold_s = max(0.02, float(cfg.get("hold_refresh_s", 0.05)))
         self._sources = dict(cfg.get("sources") or {})
         self._leak = False
+        self._sim_leak = False
+        self._flash_hz = max(0.0, float(cfg.get("flash_hz", 0) or 0))
+        self._flash_stop: threading.Event | None = None
         self._esp_fault = "NONE"
         self._fault_active = False
         self._held_level: int | None = None
@@ -123,9 +127,20 @@ class FaultIndicator:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         backend = str(cfg.get("backend") or "auto").strip().lower()
+        rc = dict(cfg.get("rc_pwm") or {})
+        self._use_rc_pwm = backend == "rc_pwm"
+        self._pwm_period_ns = int(float(rc.get("period_us", 20000)) * 1000)
+        self._pwm_active_ns = int(float(rc.get("active_us", 2000)) * 1000)
+        self._pwm_inactive_ns = int(float(rc.get("inactive_us", 1000)) * 1000)
+        self._pwm_safe_start_s = float(rc.get("safe_start_s", 0.6))
+        self._pwm_ok = False
+        self._hw_chip: Path | None = None
         has_pinctrl = shutil.which("pinctrl") is not None
         has_gpioset = shutil.which("gpioset") is not None
-        if backend == "pinctrl":
+        if self._use_rc_pwm:
+            self._use_pinctrl = False
+            self._use_gpioset = False
+        elif backend == "pinctrl":
             self._use_pinctrl = has_pinctrl
             self._use_gpioset = False
         elif backend == "gpioset":
@@ -157,13 +172,15 @@ class FaultIndicator:
             self._esp_fault = "NONE"
             idle_level = self._rcin_level_for_fault(False)
             self._apply_level(idle_level, log_change=False)
-            if not self._use_pinctrl and (
+            if not self._use_rc_pwm and not self._use_pinctrl and (
                 not self._use_gpioset or self._gpioset_gave_up
             ):
                 self._start_lgpio_thread_if_needed()
         self._log_boot_once()
 
     def stop(self) -> None:
+        self._stop_flash()
+        self._release_rc_pwm()
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2.0)
@@ -186,6 +203,15 @@ class FaultIndicator:
             self._leak = any(sensors)
             self._sync_output()
 
+    def set_simulated_leak(self, active: bool) -> None:
+        """Dashboard test button: behave as if a leak sensor tripped."""
+        if not self._enabled:
+            return
+        self._ensure_initialized()
+        with self._lock:
+            self._sim_leak = bool(active)
+            self._sync_output()
+
     def apply_tel_fault(self, fault: str) -> None:
         if not self._enabled:
             return
@@ -201,7 +227,7 @@ class FaultIndicator:
     def _sync_output(self, *, log_change: bool = True) -> None:
         prev_fault = self._fault_active
         self._fault_active = fault_active_from_tel(
-            leak=self._leak,
+            leak=self._leak or self._sim_leak,
             esp_fault=self._esp_fault,
             sources=self._sources,
         )
@@ -214,8 +240,36 @@ class FaultIndicator:
             self._fault_reason_logged = True
         elif not self._fault_active and prev_fault:
             print("[fault_indicator] fault cleared — idle RCIN", flush=True)
+        if self._fault_active and self._flash_hz > 0:
+            self._start_flash()
+            return
+        self._stop_flash()
         level = self._rcin_level_for_fault(self._fault_active)
         self._apply_level(level, log_change=log_change)
+
+    def _start_flash(self) -> None:
+        if self._flash_stop is not None and not self._flash_stop.is_set():
+            return
+        stop = threading.Event()
+        self._flash_stop = stop
+        threading.Thread(
+            target=self._flash_loop, args=(stop,), daemon=True, name="fault_flash"
+        ).start()
+
+    def _stop_flash(self) -> None:
+        if self._flash_stop is not None:
+            self._flash_stop.set()
+            self._flash_stop = None
+
+    def _flash_loop(self, stop: threading.Event) -> None:
+        on = True
+        while not stop.is_set():
+            with self._lock:
+                if stop.is_set():
+                    return
+                self._apply_level(self._rcin_level_for_fault(on), log_change=False)
+            on = not on
+            stop.wait(0.5 / self._flash_hz)
 
     def _rcin_level_for_fault(self, fault_active: bool) -> int:
         if self._idle_rcin is not None and self._fault_rcin is not None:
@@ -227,7 +281,9 @@ class FaultIndicator:
             return
         prev = self._held_level
         self._held_level = level
-        if self._use_pinctrl:
+        if self._use_rc_pwm:
+            self._hold_with_rc_pwm(level)
+        elif self._use_pinctrl:
             self._hold_with_pinctrl(level)
         elif self._use_gpioset and not self._gpioset_gave_up:
             self._hold_with_gpioset(level)
@@ -237,7 +293,9 @@ class FaultIndicator:
             self._write_lgpio(level)
             self._start_lgpio_thread_if_needed()
         if log_change and prev is not None and prev != level:
-            if self._use_pinctrl:
+            if self._use_rc_pwm:
+                where = f"BCM{self._bcm} rc_pwm"
+            elif self._use_pinctrl:
                 where = f"BCM{self._bcm} pinctrl"
             else:
                 where = f"{self._chip_name} line {self._line_offset}"
@@ -248,6 +306,8 @@ class FaultIndicator:
             )
 
     def _output_alive(self) -> bool:
+        if self._use_rc_pwm:
+            return self._pwm_ok
         if self._use_pinctrl:
             return self._pinctrl_ok
         if self._use_gpioset and not self._gpioset_gave_up:
@@ -255,6 +315,103 @@ class FaultIndicator:
                 return True
             return self._gpioset_proc is not None and self._gpioset_proc.poll() is None
         return self._lgpio_handle is not None
+
+    def _find_hw_pwm(self) -> Path | None:
+        """Pi 5 PWM0 (reaches BCM18 as channel 2) once ``dtoverlay=pwm,pin=18,func=3`` is set."""
+        for chip in sorted(Path("/sys/class/pwm").glob("pwmchip*")):
+            try:
+                if "1f00098000" in str((chip / "device").resolve()):
+                    return chip
+            except OSError:
+                pass
+        return None
+
+    def _hold_with_hw_pwm(self, level: int) -> bool:
+        chip = self._hw_chip or self._find_hw_pwm()
+        if chip is None:
+            return False
+        chan = chip / "pwm2"
+        width = self._pwm_active_ns if level else self._pwm_inactive_ns
+        try:
+            if self._hw_chip is None:
+                if not chan.exists():
+                    (chip / "export").write_text("2")
+                # udev hands the new channel to the gpio group a moment after export
+                for _ in range(150):
+                    if (chan / "enable").exists() and os.access(chan / "enable", os.W_OK):
+                        break
+                    time.sleep(0.02)
+                if shutil.which("pinctrl"):
+                    # BCM18 -> PWM0_CHAN2 is alt function a3; other users of the pin can undo the overlay's mux
+                    subprocess.run(
+                        ["pinctrl", "set", str(self._bcm), "a3"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                (chan / "enable").write_text("0")
+                (chan / "duty_cycle").write_text("0")
+                (chan / "period").write_text(str(self._pwm_period_ns))
+                # Safe-start: the switch needs to see an inactive pulse before it will activate.
+                (chan / "duty_cycle").write_text(str(self._pwm_inactive_ns))
+                (chan / "enable").write_text("1")
+                if level and self._pwm_safe_start_s > 0:
+                    time.sleep(self._pwm_safe_start_s)
+                self._hw_chip = chip
+                self._pwm_ok = True
+            (chan / "duty_cycle").write_text(str(width))
+            return True
+        except OSError as exc:
+            print(f"[fault_indicator] hardware pwm failed: {exc}", flush=True)
+            self._hw_chip = None
+            return False
+
+    def _hold_with_rc_pwm(self, level: int) -> None:
+        """Servo-style pulse train for an RC switch: long pulse = active, short = inactive.
+
+        Pi 5 hardware PWM0 (the controller that reaches BCM18) is off in the stock
+        device tree, so the pulses come from lgpio's tx_servo instead. The train
+        stops when the process exits, which leaves the switch off (fault LEDs on).
+        """
+        if self._hold_with_hw_pwm(level):
+            return
+        width = int(round((self._pwm_active_ns if level else self._pwm_inactive_ns) / 1000))
+        freq = max(1, int(round(1e9 / self._pwm_period_ns)))
+        try:
+            import lgpio
+
+            if not self._pwm_ok:
+                self._lgpio_handle = lgpio.gpiochip_open(self._lgpio_chip_idx)
+                lgpio.gpio_claim_output(self._lgpio_handle, self._line_offset, 0)
+                # Safe-start: the switch needs to see an inactive pulse before it will activate.
+                lgpio.tx_servo(
+                    self._lgpio_handle,
+                    self._line_offset,
+                    int(round(self._pwm_inactive_ns / 1000)),
+                    freq,
+                )
+                if level and self._pwm_safe_start_s > 0:
+                    time.sleep(self._pwm_safe_start_s)
+                self._pwm_ok = True
+            lgpio.tx_servo(self._lgpio_handle, self._line_offset, width, freq)
+        except Exception as exc:
+            self._pwm_ok = False
+            print(f"[fault_indicator] rc_pwm failed: {exc}", flush=True)
+
+    def _release_rc_pwm(self) -> None:
+        if not self._use_rc_pwm or not self._pwm_ok:
+            return
+        try:
+            if self._hw_chip is not None:
+                (self._hw_chip / "pwm2" / "enable").write_text("0")
+                (self._hw_chip / "unexport").write_text("2")
+                self._hw_chip = None
+            else:
+                import lgpio
+
+                lgpio.tx_servo(self._lgpio_handle, self._line_offset, 0)
+        except Exception:
+            pass
+        self._pwm_ok = False
 
     def _hold_with_pinctrl(self, level: int) -> None:
         drive = "dh" if level else "dl"
@@ -419,7 +576,9 @@ class FaultIndicator:
         if self._boot_logged:
             return
         self._boot_logged = True
-        if self._use_pinctrl:
+        if self._use_rc_pwm:
+            mode = "rc_pwm"
+        elif self._use_pinctrl:
             mode = "pinctrl"
         elif self._use_gpioset and not self._gpioset_gave_up:
             mode = "gpioset"
@@ -460,6 +619,12 @@ def connect_fault_indicator(*, autostart: bool = True) -> FaultIndicator:
 
 def is_fault_indicator_enabled() -> bool:
     return bool(_load_config().get("enabled", False))
+
+
+def set_simulated_leak(active: bool) -> None:
+    if not is_fault_indicator_enabled():
+        return
+    get_fault_indicator(autostart=True).set_simulated_leak(active)
 
 
 def notify_tel_leak(sensors: list[bool]) -> None:
