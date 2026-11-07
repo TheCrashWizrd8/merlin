@@ -1413,6 +1413,53 @@
     .servo-bar .pos.bad { background: var(--danger); }
     .servo-bar-legend { font-size: 0.64rem; color: var(--muted); max-width: 32rem; display: flex;
       justify-content: space-between; }
+    /* --- Phones: stop pinning HUD panels to screen corners; let them flow in a grid --- */
+    @media (max-width: 700px), (max-height: 720px) {
+      .hud-viewport {
+        --gauge-h: 150px;
+        height: auto;
+        max-height: none;
+        min-height: 100dvh;
+      }
+      .hud-frame {
+        position: relative;
+        height: auto;
+        max-height: none;
+        min-height: 100dvh;
+        overflow: visible;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-rows: none;
+        grid-auto-rows: auto;
+        grid-template-areas:
+          "tl tl"
+          "tc tc"
+          "tr tr"
+          "ml mr"
+          "bl br"
+          "bc bc";
+        align-content: start;
+      }
+      .hud-tl { grid-area: tl; justify-self: start; }
+      .hud-tc { grid-area: tc; justify-self: stretch; }
+      .hud-tr { grid-area: tr; justify-self: stretch; flex-wrap: wrap; }
+      .hud-ml { grid-area: ml; justify-self: stretch; align-self: start; }
+      .hud-mr { grid-area: mr; justify-self: stretch; align-self: start; }
+      .hud-bl { grid-area: bl; justify-self: stretch; align-self: start; }
+      .hud-bc { grid-area: bc; justify-self: center; align-self: start; }
+      .hud-br { grid-area: br; justify-self: stretch; align-self: start; flex-wrap: wrap; }
+      .hud-cell > .hud-overlay,
+      .hud-cell .hud-chip { max-width: 100%; }
+      .hud-cell .hud-chip { box-sizing: border-box; }
+    }
+    @media (min-width: 701px) and (max-height: 720px) {
+      .hud-frame {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-areas:
+          "tl tc tr"
+          "ml mr br"
+          "bl bc bc";
+      }
+    }
   </style>
 </head>
 <body>

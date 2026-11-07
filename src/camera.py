@@ -189,6 +189,10 @@ def resolve_fov_capture_size(
 
     ``width`` or ``height`` <= 0 selects the largest MJPEG mode from v4l2.
     """
+    from src.linkback_camera import FRAME_H, FRAME_W, is_linkback_spec
+
+    if is_linkback_spec(device):
+        return FRAME_W, FRAME_H
     if width > 0 and height > 0:
         return width, height
     max_w, max_h = probe_max_mjpeg_size(device)
@@ -347,6 +351,10 @@ def assign_camera_device(
     Returns ``(path, warning_or_None)``. Prefers ``/dev/v4l/by-path/...``
     from config; falls back to the first unused USB capture node.
     """
+    from src.linkback_camera import is_linkback_spec
+
+    if is_linkback_spec(device):
+        return str(device).strip(), None
     capture = usb_capture_nodes()
     resolved, resolve_note = resolve_camera_device(device)
 
@@ -380,9 +388,12 @@ def assign_camera_device(
 
 def format_usb_camera_report() -> str:
     """Human-readable USB camera list for logs / errors."""
+    from src.linkback_camera import format_linkback_report, list_linkback_devices
+
     cams = list_usb_cameras()
     stable = list_stable_usb_paths()
-    if not cams and not stable:
+    linkback = list_linkback_devices()
+    if not cams and not stable and not linkback:
         return (
             "No USB cameras found by v4l2-ctl "
             "(install v4l-utils, or the second camera is not enumerating)."
@@ -399,7 +410,10 @@ def format_usb_camera_report() -> str:
         )
         for row in stable:
             lines.append(f"  {row['video']}  ←  {row['by_path']}")
-    if len(cams) < 2:
+    if linkback:
+        lines.append("")
+        lines.append(format_linkback_report())
+    if len(cams) + len(linkback) < 2:
         lines.append(
             "  Only one USB camera enumerated — the other is unplugged, "
             "unpowered, or not talking to USB (often a dead cable/camera)."
@@ -409,6 +423,15 @@ def format_usb_camera_report() -> str:
 
 class CameraError(RuntimeError):
     """Raised when the camera cannot be opened or a frame cannot be read."""
+
+
+def make_camera(device: int | str, width: int = 640, height: int = 480, **kwargs):
+    """Camera for a configured device: ``linkback[:port]`` or a V4L2 node/index."""
+    from src.linkback_camera import LinkbackCamera, is_linkback_spec
+
+    if is_linkback_spec(device):
+        return LinkbackCamera(device=device, width=width, height=height, **kwargs)
+    return Camera(device=device, width=width, height=height, **kwargs)
 
 
 class Camera:
@@ -772,6 +795,10 @@ class FrameGrabber:
             print(f"[camera] {self._name} live on {self._camera.device}")
 
     def _remap_if_needed(self) -> None:
+        remap = getattr(self._camera, "remap_device", None)
+        if callable(remap):
+            remap(self._exclude_now())
+            return
         path = _v4l_device_path(self._camera.device)
         if path and os.path.exists(path):
             return

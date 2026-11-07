@@ -266,8 +266,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     if not args.no_camera:
         from src.camera import format_usb_camera_report, usb_capture_nodes
+        from src.linkback_camera import list_linkback_devices
 
         nodes = usb_capture_nodes()
+        if not nodes and list_linkback_devices():
+            nodes = ["linkback"]
         if not nodes:
             print("[run] No USB cameras detected — skipping camera preview.")
             print(format_usb_camera_report())

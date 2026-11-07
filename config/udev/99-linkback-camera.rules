@@ -1,0 +1,3 @@
+# LinkBack "lem01camera" USB camera (3456:4321): let the plugdev group (user "subs") open it.
+# Install: sudo cp config/udev/99-linkback-camera.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=usb
+SUBSYSTEM=="usb", ATTR{idVendor}=="3456", ATTR{idProduct}=="4321", MODE="0660", GROUP="plugdev"

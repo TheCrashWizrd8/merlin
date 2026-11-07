@@ -216,6 +216,7 @@ class _CameraRig:
             Camera,
             CameraError,
             FrameGrabber,
+            make_camera,
             assign_camera_device,
             format_usb_camera_report,
             resolve_fov_capture_size,
@@ -266,12 +267,12 @@ class _CameraRig:
                 for note in (n1, n2):
                     if note:
                         print(f"[yolo] {note}")
-                cam = Camera(device=left_dev, width=self.width, height=self.height)
+                cam = make_camera(device=left_dev, width=self.width, height=self.height)
                 try:
                     cam.open()
                 except CameraError as exc:
                     print(f"[yolo] Left camera failed ({exc}); will retry")
-                cam_right = Camera(device=right_dev, width=self.width, height=self.height)
+                cam_right = make_camera(device=right_dev, width=self.width, height=self.height)
                 try:
                     cam_right.open()
                 except CameraError as exc:
@@ -289,7 +290,7 @@ class _CameraRig:
                     left_dev, self.fov_width, self.fov_height
                 )
                 print(f"[yolo] FOV capture {self.fov_width}x{self.fov_height}")
-                cam = Camera(
+                cam = make_camera(
                     device=left_dev,
                     width=self.fov_width,
                     height=self.fov_height,
@@ -320,7 +321,7 @@ class _CameraRig:
                     fov_dev, self.fov_width, self.fov_height
                 )
                 print(f"[yolo] FOV capture {self.fov_width}x{self.fov_height}")
-                cam_fov = Camera(
+                cam_fov = make_camera(
                     device=fov_dev,
                     width=self.fov_width,
                     height=self.fov_height,

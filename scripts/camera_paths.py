@@ -11,12 +11,25 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.camera import format_usb_camera_report, list_stable_usb_paths
+from src.linkback_camera import list_linkback_devices
 
 
 def main() -> int:
     print(format_usb_camera_report())
     stable = list_stable_usb_paths()
+    linkback = list_linkback_devices()
+    if linkback:
+        print("\n# LinkBack cameras (no /dev/video node) — pin each to its USB port:")
+        for row in linkback:
+            print(f"#   linkback:{row['port_path']}")
+        print("cameras:")
+        for role, row in zip(("left_device", "right_device"), linkback):
+            print(f"  {role}: linkback:{row['port_path']}")
+        if len(linkback) < 2:
+            print("  # plug in the second LinkBack camera, then run this again")
     if not stable:
+        if linkback:
+            return 0
         print("\nNo USB by-path nodes found under /dev/v4l/by-path/")
         return 1
     print("\n# Paste into config/hardware.yaml (assign roles to physical USB ports):")

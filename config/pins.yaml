@@ -39,8 +39,8 @@ pca9685:
   servo_center_ticks:
     '2': 411
     '3': 362
-    '4': 358
-    '5': 308
+    '4': 282
+    '5': 245
   channels:
     fin_2:
       channel: 2
@@ -92,11 +92,11 @@ pca9685:
       min: 313
       max: 520
     '5':
-      min: 166
-      max: 383
+      min: 223
+      max: 370
     '4':
-      min: 311
-      max: 409
+      min: 268
+      max: 359
     '3':
       min: 254
       max: 492
