@@ -17,12 +17,14 @@ cameras:
   fov_device: /dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0
   fov_width: 0            # 0 = auto (largest MJPEG mode from v4l2)
   fov_height: 0
-  # LinkBack cameras are dark. Software auto-exposure: lifts shadows with a gamma curve (brightness only):
+  # LinkBack cameras are dark and flat. Software correction (brightness/colour bytes only):
   linkback_exposure:
     enabled: true
-    target_luma: 100      # average brightness to aim for (0-255); raise for a brighter picture
-    min_gamma: 0.55       # strongest shadow lift (1.0 = none); lower = brighter but flatter/noisier
-    adapt: 0.08           # how fast it follows lighting changes (0-1); lower = steadier
+    contrast_stretch: true  # darkest ~1% -> black, brightest -> white (removes the grey veil)
+    target_luma: 100        # average brightness to aim for (0-255); raise for a brighter picture
+    min_gamma: 0.55         # strongest shadow lift (1.0 = none); lower = brighter but flatter/noisier
+    saturation: 1.5         # colour strength (1.0 = as the camera sends it)
+    adapt: 0.08             # how fast it follows lighting changes (0-1); lower = steadier
   baseline_cm: 16.0       # centre-to-centre spacing of the two lenses
   fov_h_deg: 67.0         # camera spec FOV (degrees) — LinkBack lens FOV is unknown: measure it and set it here
   fov_is_diagonal: true   # USB specs are almost always diagonal, not horizontal

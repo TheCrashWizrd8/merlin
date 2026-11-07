@@ -166,53 +166,150 @@ def yuy2_to_bgr(frame: bytes, width: int = FRAME_W, height: int = FRAME_H) -> np
     return cv2.cvtColor(raw, cv2.COLOR_YUV2BGR_YUY2)
 
 
+_EXPOSURE_FILE = Path(__file__).resolve().parent.parent / "config" / "linkback_exposure.yaml"
+
+EXPOSURE_DEFAULTS = {
+    "enabled": True,
+    "contrast_stretch": True,
+    "target_luma": 100.0,
+    "min_gamma": 0.55,
+    "saturation": 1.5,
+    "adapt": 0.08,
+}
+# (min, max) for each numeric setting.
+EXPOSURE_LIMITS = {
+    "target_luma": (40.0, 200.0),
+    "min_gamma": (0.2, 1.0),
+    "saturation": (0.0, 3.0),
+    "adapt": (0.01, 1.0),
+}
+
+_MAX_GAMMA = 2.2  # strongest darkening the exposure control may apply
+
+_exposure_settings: Optional[dict] = None
+
+
+def _clean_exposure(raw: dict) -> dict:
+    out = dict(EXPOSURE_DEFAULTS)
+    for key in ("enabled", "contrast_stretch"):
+        if key in raw:
+            out[key] = bool(raw[key])
+    for key, (lo, hi) in EXPOSURE_LIMITS.items():
+        if key in raw:
+            try:
+                out[key] = min(hi, max(lo, float(raw[key])))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def load_exposure_config(path: Path = _HARDWARE_PATH) -> dict:
-    """``cameras.linkback_exposure`` from hardware.yaml (software brightness settings)."""
-    try:
-        with open(path) as f:
-            cfg = yaml.safe_load(f) or {}
-    except OSError:
-        cfg = {}
-    return dict((cfg.get("cameras") or {}).get("linkback_exposure") or {})
+    """Exposure settings: defaults < ``cameras.linkback_exposure`` < dashboard-saved file."""
+    merged: dict = {}
+    for source, section in ((path, True), (_EXPOSURE_FILE, False)):
+        try:
+            with open(source) as f:
+                cfg = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if section:
+            cfg = (cfg.get("cameras") or {}).get("linkback_exposure") or {}
+        if isinstance(cfg, dict):
+            merged.update(cfg)
+    return _clean_exposure(merged)
+
+
+def get_exposure_settings() -> dict:
+    """Current settings, shared by every LinkBack camera (replaced, never edited in place)."""
+    global _exposure_settings
+    if _exposure_settings is None:
+        _exposure_settings = load_exposure_config()
+    return _exposure_settings
+
+
+def set_exposure_settings(update: dict, *, save: bool = False) -> dict:
+    """Apply a partial update live to all cameras; ``save`` keeps it across restarts."""
+    global _exposure_settings
+    merged = dict(get_exposure_settings())
+    merged.update({k: v for k, v in update.items() if k in EXPOSURE_DEFAULTS})
+    _exposure_settings = _clean_exposure(merged)
+    if save:
+        with open(_EXPOSURE_FILE, "w") as f:
+            yaml.safe_dump(_exposure_settings, f, sort_keys=True)
+    return dict(_exposure_settings)
+
+
+def reset_exposure_settings(*, save: bool = True) -> dict:
+    """Back to the hardware.yaml values (removes the saved override)."""
+    global _exposure_settings
+    if save:
+        try:
+            _EXPOSURE_FILE.unlink()
+        except OSError:
+            pass
+    _exposure_settings = None
+    return dict(get_exposure_settings())
 
 
 class AutoExposure:
-    """Software exposure for the camera's dark picture.
+    """Software exposure for the camera's dark, flat picture.
 
     The sensor's own exposure is set through the vendor protocol, which is not
-    known, so shadows are lifted in software instead. A slowly adapting gamma
-    curve (aiming for ``target_luma`` average brightness, never darker than
-    ``min_gamma``) is applied to the Y (brightness) bytes only: dark areas come
-    up, bright areas are not clipped, and colour is kept. Linear gain is avoided
-    on purpose; it blows out highlights and amplifies sensor noise.
+    known, so the picture is corrected in software, on the YUY2 bytes directly:
+
+    * contrast stretch: the darkest ~1% of pixels go to black and the brightest
+      to white, which removes the grey veil;
+    * a slowly adapting gamma moves the average brightness toward ``target_luma``
+      without clipping highlights (lifting shadows no more than ``min_gamma``
+      allows; a lower target darkens instead);
+    * ``saturation`` scales the colour (chroma) around neutral.
     """
 
     def __init__(self, cfg: Optional[dict] = None) -> None:
-        cfg = load_exposure_config() if cfg is None else cfg
-        self.enabled = bool(cfg.get("enabled", True))
-        self.target_luma = min(200.0, max(40.0, float(cfg.get("target_luma", 100))))
-        self.min_gamma = min(1.0, max(0.2, float(cfg.get("min_gamma", 0.55))))
-        self.adapt = min(1.0, max(0.01, float(cfg.get("adapt", 0.08))))
+        # No cfg = follow the shared, dashboard-adjustable settings on every frame.
+        self._follow_shared = cfg is None
+        self._read(get_exposure_settings() if cfg is None else _clean_exposure(cfg))
         self.gamma = 1.0
-        self._lut_key: Optional[int] = None
-        self._lut = np.arange(256, dtype=np.uint8)
+        self.low = 0.0
+        self.high = 255.0
+        self._primed = False
+
+    def _read(self, cfg: dict) -> None:
+        self.enabled = cfg["enabled"]
+        self.target_luma = cfg["target_luma"]
+        self.min_gamma = cfg["min_gamma"]
+        self.adapt = cfg["adapt"]
+        self.stretch = cfg["contrast_stretch"]
+        self.saturation = cfg["saturation"]
 
     def apply(self, raw: np.ndarray) -> np.ndarray:
-        """Lift shadows of the (H, W, 2) YUY2 array in place and return it."""
+        """Correct the (H, W, 2) YUY2 array in place and return it."""
+        if self._follow_shared:
+            self._read(get_exposure_settings())
         if not self.enabled:
             return raw
-        mean = min(254.0, max(1.0, float(raw[::4, ::4, 0].mean()))) / 255.0
+        luma = raw[::4, ::4, 0]
+        if self.stretch:
+            lo, hi = (float(v) for v in np.percentile(luma, (1.0, 99.5)))
+            hi = max(hi, lo + 48.0)
+            if not self._primed:
+                self.low, self.high, self._primed = lo, hi, True
+            self.low += self.adapt * (lo - self.low)
+            self.high += self.adapt * (hi - self.high)
+        else:
+            self.low, self.high = 0.0, 255.0
+        span = max(1.0, self.high - self.low)
+        stretched = np.clip((luma.astype(np.float32) - self.low) / span, 0.0, 1.0)
+        mean = min(0.99, max(0.01, float(stretched.mean())))
         target = self.target_luma / 255.0
-        wanted = 1.0
-        if mean < target:
-            wanted = max(self.min_gamma, np.log(target) / np.log(mean))
+        # Below 1 lifts shadows (never past min_gamma), above 1 darkens; 255 stays 255.
+        wanted = min(_MAX_GAMMA, max(self.min_gamma, float(np.log(target) / np.log(mean))))
         self.gamma += self.adapt * (wanted - self.gamma)
-        key = round(self.gamma * 50)
-        if key != self._lut_key:
-            x = np.arange(256, dtype=np.float32) / 255.0
-            self._lut = np.round((x ** (key / 50.0)) * 255.0).astype(np.uint8)
-            self._lut_key = key
-        raw[..., 0] = self._lut[raw[..., 0]]
+        x = np.clip((np.arange(256, dtype=np.float32) - self.low) / span, 0.0, 1.0)
+        raw[..., 0] = np.round((x ** self.gamma) * 255.0).astype(np.uint8)[raw[..., 0]]
+        if self.saturation != 1.0:
+            c = np.clip((np.arange(256, dtype=np.float32) - 128.0) * self.saturation + 128.0, 0, 255)
+            raw[..., 1] = np.round(c).astype(np.uint8)[raw[..., 1]]
         return raw
 
 

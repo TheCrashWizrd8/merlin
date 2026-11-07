@@ -1883,6 +1883,39 @@
         </div>
       </div>
     </section>
+
+    <section class="panel" id="exposurePanel">
+      <div class="panel-head">Camera exposure <span id="exposureStatus" style="font-weight:400;text-transform:none;color:var(--muted);">LinkBack cameras</span></div>
+      <div class="panel-body">
+        <div class="slider-row">
+          <label style="width:7rem;">Exposure</label>
+          <input type="range" class="std-slider" id="expTarget" min="40" max="200" step="1" value="100">
+          <span class="val" id="expTargetVal">100</span>
+        </div>
+        <div class="slider-row">
+          <label style="width:7rem;">Shadow lift</label>
+          <input type="range" class="std-slider" id="expGamma" min="0.2" max="1" step="0.01" value="0.55">
+          <span class="val" id="expGammaVal">0.55</span>
+        </div>
+        <div class="slider-row">
+          <label style="width:7rem;">Saturation</label>
+          <input type="range" class="std-slider" id="expSat" min="0" max="3" step="0.05" value="1.5">
+          <span class="val" id="expSatVal">1.50</span>
+        </div>
+        <div class="btn-row">
+          <label style="display:flex;align-items:center;gap:0.35rem;"><input type="checkbox" id="expEnabled" checked> Auto exposure</label>
+          <label style="display:flex;align-items:center;gap:0.35rem;"><input type="checkbox" id="expStretch" checked> Contrast stretch</label>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="expSave">Save as default</button>
+          <button type="button" id="expReset">Reset</button>
+        </div>
+        <div style="margin-top:0.5rem;font-size:0.72rem;color:var(--muted);">
+          Software correction on the LinkBack cameras only. Exposure = target brightness; Shadow lift is the strongest
+          brightening allowed (lower = brighter, flatter). Changes apply live to both cameras.
+        </div>
+      </div>
+    </section>
   </div>
 
   <script src="/live_jpeg.js"></script>
@@ -4014,6 +4047,73 @@
     document.getElementById('diagnosticsScrollHint')?.addEventListener('click', () => {
       document.getElementById('diagnostics')?.scrollIntoView({ behavior: 'smooth' });
     });
+
+    /* --- Camera exposure (LinkBack cameras) --- */
+    const expEls = {
+      target: document.getElementById('expTarget'),
+      gamma: document.getElementById('expGamma'),
+      sat: document.getElementById('expSat'),
+      enabled: document.getElementById('expEnabled'),
+      stretch: document.getElementById('expStretch'),
+    };
+    const expStatus = document.getElementById('exposureStatus');
+    let expTimer = null;
+
+    function expShowValues() {
+      document.getElementById('expTargetVal').textContent = expEls.target.value;
+      document.getElementById('expGammaVal').textContent = (+expEls.gamma.value).toFixed(2);
+      document.getElementById('expSatVal').textContent = (+expEls.sat.value).toFixed(2);
+      const on = expEls.enabled.checked;
+      expEls.target.disabled = expEls.gamma.disabled = expEls.sat.disabled = expEls.stretch.disabled = !on;
+    }
+
+    function expApply(settings) {
+      expEls.target.value = settings.target_luma;
+      expEls.gamma.value = settings.min_gamma;
+      expEls.sat.value = settings.saturation;
+      expEls.enabled.checked = !!settings.enabled;
+      expEls.stretch.checked = !!settings.contrast_stretch;
+      expShowValues();
+    }
+
+    function expPayload(extra) {
+      return Object.assign({
+        target_luma: +expEls.target.value,
+        min_gamma: +expEls.gamma.value,
+        saturation: +expEls.sat.value,
+        enabled: expEls.enabled.checked,
+        contrast_stretch: expEls.stretch.checked,
+      }, extra || {});
+    }
+
+    async function expSend(extra, note) {
+      try {
+        const res = await fetch('/sub/api/camera/exposure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(extra && extra.reset ? extra : expPayload(extra)),
+        });
+        const data = await res.json();
+        if (data.settings) expApply(data.settings);
+        expStatus.textContent = note || 'applied';
+      } catch (err) {
+        expStatus.textContent = 'failed: ' + err;
+      }
+    }
+
+    function expChanged() {
+      expShowValues();
+      clearTimeout(expTimer);
+      expTimer = setTimeout(() => expSend(null, 'applied (not saved)'), 120);
+    }
+
+    Object.values(expEls).forEach(el => el.addEventListener('input', expChanged));
+    document.getElementById('expSave').addEventListener('click', () => expSend({ save: true }, 'saved as default'));
+    document.getElementById('expReset').addEventListener('click', () => expSend({ reset: true }, 'reset to defaults'));
+    fetch('/sub/api/camera/exposure').then(r => r.json()).then(d => {
+      if (d.settings) expApply(d.settings);
+      expStatus.textContent = (d.cameras && d.cameras.length ? d.cameras.length + ' LinkBack camera(s)' : 'no LinkBack camera found');
+    }).catch(() => {});
 
     restoreControlState();
     connectLiveStream();

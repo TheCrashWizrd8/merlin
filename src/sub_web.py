@@ -296,6 +296,24 @@ def register_sub_routes(app, *, start_services: bool = True) -> None:
         set_simulated_leak(active)
         return jsonify({"ok": True, "active": active})
 
+    @app.route("/sub/api/camera/exposure", methods=["GET", "POST"])
+    def sub_api_camera_exposure():
+        from src import linkback_camera as lb
+
+        if request.method == "GET":
+            return jsonify({
+                "ok": True,
+                "settings": lb.get_exposure_settings(),
+                "limits": lb.EXPOSURE_LIMITS,
+                "cameras": [c["port_path"] for c in lb.list_linkback_devices()],
+            })
+        data = request.get_json(silent=True) or {}
+        if data.get("reset"):
+            settings = lb.reset_exposure_settings()
+        else:
+            settings = lb.set_exposure_settings(data, save=bool(data.get("save")))
+        return jsonify({"ok": True, "settings": settings})
+
     @app.route("/sub/api/telemetry/leaks")
     def sub_api_leaks():
         snap = state.telemetry_snapshot()
