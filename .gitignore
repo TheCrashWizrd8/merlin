@@ -18,3 +18,6 @@ runs/
 
 # System
 .DS_Store
+
+# compiled LinkBack USB reader (built automatically from src/linkback_reader.c)
+build/

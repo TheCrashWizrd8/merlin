@@ -219,3 +219,68 @@ def test_auto_exposure_follows_shared_settings_when_given_no_config(monkeypatch)
                               "target_luma": 100, "min_gamma": 0.4, "adapt": 1.0})
     assert ae.apply(_dark_raw(20))[..., 0].mean() > 60  # picked up without recreating it
     monkeypatch.setattr(lb, "_exposure_settings", None)
+
+
+_FAKE_READER = """#!/usr/bin/env python3
+import struct, sys, time
+MAGIC = 0x314B424C
+out = sys.stdout.buffer
+if sys.argv[1] == "bad-port":
+    sys.stderr.write("no LinkBack camera on port bad-port\\n"); sys.exit(2)
+out.write(struct.pack("<II", MAGIC, 0)); out.flush()
+frame = bytes([100, 128]) * (450 * 450)
+for _ in range(3):
+    out.write(struct.pack("<II", MAGIC, len(frame)) + frame); out.flush()
+time.sleep(30)
+"""
+
+
+def _fake_reader(tmp_path, monkeypatch, ports=("3-1.1",)):
+    from src import linkback_camera as lb
+
+    script = tmp_path / "fake_reader"
+    script.write_text(_FAKE_READER)
+    script.chmod(0o755)
+    monkeypatch.setattr(lb, "reader_binary", lambda: str(script))
+    monkeypatch.setattr(lb, "list_linkback_devices", lambda: [{"port_path": p, "serial": "x", "sysfs": ""} for p in ports])
+    return lb
+
+
+def test_reader_process_frames_flow_and_release_stops_it(tmp_path, monkeypatch):
+    lb = _fake_reader(tmp_path, monkeypatch)
+    cam = lb.LinkbackCamera("linkback")
+    cam.open()
+    try:
+        assert cam.port_path == "3-1.1"
+        ok = False
+        for _ in range(30):
+            if cam.grab():
+                ok, bgr = cam.retrieve()
+                break
+        assert ok and bgr.shape == (FRAME_H, FRAME_W, 3)
+        proc = cam._proc
+    finally:
+        cam.release()
+    assert proc.poll() is not None  # helper process was terminated
+    assert not lb._claimed  # port released for the next open
+
+
+def test_two_cameras_never_claim_the_same_port(tmp_path, monkeypatch):
+    lb = _fake_reader(tmp_path, monkeypatch, ports=("3-1.1", "3-1.2"))
+    left, right = lb.LinkbackCamera("linkback"), lb.LinkbackCamera("linkback")
+    left.open()
+    right.open()
+    try:
+        assert {left.port_path, right.port_path} == {"3-1.1", "3-1.2"}
+        third = lb.LinkbackCamera("linkback")
+        with pytest.raises(CameraError, match="already in use"):
+            third.open()
+    finally:
+        left.release()
+        right.release()
+
+
+def test_pinned_port_and_helper_errors_surface_as_camera_error(tmp_path, monkeypatch):
+    lb = _fake_reader(tmp_path, monkeypatch, ports=("3-1.1",))
+    with pytest.raises(CameraError, match="no LinkBack camera on port 3-9"):
+        lb.LinkbackCamera("linkback:3-9").open()

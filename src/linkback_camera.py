@@ -17,6 +17,11 @@ How it streams (found by reverse engineering the Android app, no handshake):
 
 The stream is ~10 MB/s, so it must be read with several large queued bulk
 transfers. Reading 512 bytes at a time loses data (horizontal band slips).
+The camera also sends ~25,000 short transfers per second, which costs the
+Python USB library most of a CPU core per camera and stalls completely when a
+model is busy. So the USB work is done by a small compiled helper
+(``src/linkback_reader.c``, built automatically into ``build/``) in its own
+process; the pure-Python reader below is only a fallback.
 
 Both cameras of a pair share the same VID/PID/serial, so they are told apart
 by USB port path ("3-1", "3-2.1", ...), like /dev/v4l/by-path.
@@ -34,6 +39,9 @@ from __future__ import annotations
 
 import glob
 import os
+import shutil
+import struct
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -64,6 +72,57 @@ _SPEC_PREFIX = "linkback"
 
 _claim_lock = threading.Lock()
 _claimed: dict[str, "LinkbackCamera"] = {}
+
+
+_ROOT = Path(__file__).resolve().parent.parent
+_READER_SRC = _ROOT / "src" / "linkback_reader.c"
+_READER_BIN = _ROOT / "build" / "linkback_reader"
+_READER_MAGIC = 0x314B424C  # "LBK1"
+_reader_lock = threading.Lock()
+_reader_path: Optional[str] = None
+_reader_tried = False
+
+
+def reader_binary() -> Optional[str]:
+    """Path of the compiled USB reader, building it if needed (None = use Python)."""
+    global _reader_path, _reader_tried
+    if os.environ.get("LINKBACK_PY_READER"):
+        return None
+    with _reader_lock:
+        if _reader_tried:
+            return _reader_path
+        _reader_tried = True
+        try:
+            fresh = _READER_BIN.exists() and _READER_BIN.stat().st_mtime >= _READER_SRC.stat().st_mtime
+        except OSError:
+            fresh = False
+        if not fresh:
+            _build_reader()
+        if _READER_BIN.exists() and os.access(_READER_BIN, os.X_OK):
+            _reader_path = str(_READER_BIN)
+        else:
+            print("[camera] LinkBack: compiled reader unavailable; using the slower Python "
+                  "reader (sudo apt install libusb-1.0-0-dev build-essential)", flush=True)
+        return _reader_path
+
+
+def _build_reader() -> None:
+    if not (shutil.which("gcc") and shutil.which("pkg-config")):
+        return
+    try:
+        flags = subprocess.run(
+            ["pkg-config", "--cflags", "--libs", "libusb-1.0"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.split()
+        _READER_BIN.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["gcc", "-O2", "-Wall", "-pthread", "-o", str(_READER_BIN), str(_READER_SRC), *flags],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        print(f"[camera] built {_READER_BIN}", flush=True)
+    except (subprocess.SubprocessError, OSError) as exc:
+        detail = getattr(exc, "stderr", "") or exc
+        print(f"[camera] could not build the LinkBack reader: {str(detail).strip()[:300]}", flush=True)
 
 
 def is_linkback_spec(device: object) -> bool:
@@ -116,6 +175,19 @@ def format_linkback_report() -> str:
     for cam in cams:
         lines.append(f"  linkback:{cam['port_path']}   (serial {cam['serial'] or '?'})")
     return "\n".join(lines)
+
+
+def _read_exact(stream, n: int) -> Optional[bytearray]:
+    """Read exactly ``n`` bytes from an unbuffered pipe; None at end of stream."""
+    buf = bytearray(n)
+    view = memoryview(buf)
+    got = 0
+    while got < n:
+        k = stream.readinto(view[got:])
+        if not k:
+            return None
+        got += k
+    return buf
 
 
 class FrameAssembler:
@@ -340,6 +412,7 @@ class LinkbackCamera:
         self._dead = False
         self._ready = threading.Event()
         self._open_error: Optional[str] = None
+        self._proc: Optional[subprocess.Popen] = None
         self.frames_ok = 0
         self.frames_dropped = 0
         self.exposure = AutoExposure()
@@ -371,6 +444,7 @@ class LinkbackCamera:
     def release(self) -> None:
         thread = self._thread
         self._stop.set()
+        self._stop_reader_process()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=4.0)
         self._thread = None
@@ -454,7 +528,112 @@ class LinkbackCamera:
         self._open_error = message
         self._ready.set()
 
+    def _stop_reader_process(self) -> None:
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+    def _claim_port(self, want: str) -> Optional[str]:
+        """Reserve a camera's USB port path for this instance (atomic across cameras)."""
+        seen = [d["port_path"] for d in list_linkback_devices()]
+        with _claim_lock:
+            for path in seen:
+                if want and path != want:
+                    continue
+                owner = _claimed.get(path)
+                if owner is not None and owner is not self:
+                    continue
+                _claimed[path] = self
+                self.port_path = path
+                return path
+        if want and want not in seen:
+            self._fail(f"no LinkBack camera on port {want}" + (f" (found: {', '.join(seen)})" if seen else ""))
+        elif seen:
+            self._fail("all LinkBack cameras are already in use")
+        else:
+            self._fail("no LinkBack camera found (USB 3456:4321)")
+        return None
+
     def _run(self) -> None:
+        binary = reader_binary()
+        if binary:
+            self._run_reader(binary)
+        else:
+            self._run_usb1()
+
+    def _run_reader(self, binary: str) -> None:
+        port = self._claim_port(spec_port_path(self.device))
+        if port is None:
+            return
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [binary, port], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+            )
+            self._proc = proc
+            out = proc.stdout
+            started = False
+            while not self._stop.is_set():
+                header = _read_exact(out, 8)
+                if header is None:
+                    break
+                magic, length = struct.unpack("<II", header)
+                if magic != _READER_MAGIC or length not in (0, FRAME_BYTES):
+                    self._dead = True
+                    break
+                if length == 0:
+                    started = True
+                    print(f"[camera] LinkBack camera streaming on linkback:{port}", flush=True)
+                    self._ready.set()
+                    continue
+                frame = _read_exact(out, length)
+                if frame is None:
+                    break
+                self.frames_ok += 1
+                with self._cond:
+                    self._latest = bytes(frame)
+                    self._seq += 1
+                    self._cond.notify_all()
+            if not started and not self._stop.is_set():
+                self._fail(self._reader_error(proc) or "LinkBack reader stopped before streaming")
+        except OSError as exc:
+            self._fail(f"cannot run LinkBack reader: {exc}")
+        finally:
+            self._dead = True
+            if proc is not None:
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                try:
+                    proc.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                for pipe in (proc.stdout, proc.stderr):
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+            self._proc = None
+            with _claim_lock:
+                if _claimed.get(port) is self:
+                    del _claimed[port]
+            with self._cond:
+                self._cond.notify_all()
+
+    @staticmethod
+    def _reader_error(proc: subprocess.Popen) -> str:
+        try:
+            proc.wait(timeout=2.0)
+            return proc.stderr.read().decode(errors="replace").strip()
+        except Exception:
+            return ""
+
+    def _run_usb1(self) -> None:
         try:
             import usb1
         except ImportError:
@@ -569,6 +748,8 @@ class LinkbackCamera:
                 owner = _claimed.get(path)
                 if owner is not None and owner is not self:
                     continue
+                _claimed[path] = self
+                self.port_path = path
             try:
                 handle = dev.open()
             except usb1.USBErrorAccess:

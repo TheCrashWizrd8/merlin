@@ -8,10 +8,11 @@
 cameras:
   num_cameras: 2
   # Stereo detection cameras: two LinkBack USB cameras (3456:4321, 450x450, no /dev/video node).
-  # "linkback" = first free camera, lowest USB port first. With both plugged in, pin each to its
-  # port so left/right never swap:  python scripts/camera_paths.py  ->  linkback:3-1 / linkback:3-2
-  left_device: linkback
-  right_device: linkback
+  # Pinned to the USB port each is plugged into (python scripts/camera_paths.py lists them).
+  # If left/right are the wrong way round, swap these two lines. If you move a camera to another
+  # port, update its line ("linkback" alone = first free camera, lowest port first).
+  left_device: linkback:3-1.1
+  right_device: linkback:3-1.2
   # FOV / pilot feed: one ordinary V4L2 (UVC) camera. 0×0 = auto max MJPEG for whatever is plugged in.
   # Stable USB port path (plug-order safe). Run: python scripts/camera_paths.py
   fov_device: /dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0
